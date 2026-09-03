@@ -88,9 +88,9 @@ func (l *Lister) Run(ctx context.Context, wg *sync.WaitGroup, objCh chan<- Objec
 // consumed object. In list-only mode the lister is the sole counter and
 // bumps IncrListed for every object it classifies.
 func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- ObjectInfo, s3 S3API, onObject func()) {
-	startAfter := ""
+	continuationToken := ""
 	for {
-		objs, prefixes, next, err := s3.ListPage(ctx, prefix, startAfter, l.delim(), 1000)
+		objs, prefixes, next, err := s3.ListPage(ctx, prefix, "", continuationToken, l.delim(), 1000)
 		if err != nil {
 			l.out.WriteListFailed(prefix, err.Error())
 			l.stats.IncrListFailed()
@@ -126,7 +126,7 @@ func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- 
 		if next == "" {
 			return
 		}
-		startAfter = next
+		continuationToken = next
 	}
 }
 

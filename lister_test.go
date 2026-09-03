@@ -53,13 +53,75 @@ func TestListerMode2BFSPrefixes(t *testing.T) {
 	}
 }
 
+// TestListerMode2CommonPrefixesOnlyPage reproduces the C1 silent-data-loss
+// bug: a truncated page that returns zero Contents but non-empty
+// CommonPrefixes. The pre-fix last-key heuristic computed next="" (because
+// len(objs)==0), so the remaining sub-prefixes were never fetched. With the
+// continuation-token cursor the second page is fetched and all sub-prefixes
+// are enumerated.
+func TestListerMode2CommonPrefixesOnlyPage(t *testing.T) {
+	// Page 1: no objects, two sub-prefixes, truncated -> continuation token "tok1".
+	// Page 2: no objects, one sub-prefix, not truncated.
+	// Each sub-prefix's own list returns a single object.
+	fake := &scriptedS3{
+		pages: map[string][]pageResult{
+			"root/": {
+				{objs: nil, prefixes: []string{"root/a/", "root/b/"}, nextToken: "tok1"},
+				{objs: nil, prefixes: []string{"root/c/"}, nextToken: ""},
+			},
+			"root/a/": {{objs: []ObjectInfo{{Key: "root/a/1", ETag: "0123456789abcdef0123456789abcdef"}}}},
+			"root/b/": {{objs: []ObjectInfo{{Key: "root/b/2", ETag: "0123456789abcdef0123456789abcdef"}}}},
+			"root/c/": {{objs: []ObjectInfo{{Key: "root/c/3", ETag: "0123456789abcdef0123456789abcdef"}}}},
+		},
+	}
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, ListType: 2, ListConcurrency: 1, CheckConcurrency: 1, IsCheck: true}
+	out, err := NewOutput(cfg)
+	if err != nil {
+		t.Fatalf("NewOutput: %v", err)
+	}
+	defer out.Close()
+	stats := NewStats()
+	q := NewQueue()
+	lister := NewLister(q, out, stats, cfg)
+
+	objCh := make(chan ObjectInfo, 16)
+	lister.Seed("root/")
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go lister.Run(context.Background(), &wg, objCh, 0, fake, nil)
+	go func() {
+		wg.Wait()
+		close(objCh)
+	}()
+
+	got := map[string]bool{}
+	for o := range objCh {
+		got[o.Key] = true
+	}
+	want := []string{"root/a/1", "root/b/2", "root/c/3"}
+	for _, k := range want {
+		if !got[k] {
+			t.Errorf("missing object %q (got %v)", k, got)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("got %d objects want %d: %v", len(got), len(want), got)
+	}
+	// Two LIST calls were made on "root/" (page1 + page2 via continuation token).
+	if fake.calls < 2 {
+		t.Errorf("root LIST calls = %d want >= 2", fake.calls)
+	}
+}
+
 // scriptedS3 serves canned page results keyed by prefix. Each call for a
-// prefix pops the first page result; the nextAfter field is currently unused
-// (each prefix is single-page in the test).
+// prefix pops the first page result. The nextToken field is the
+// continuation token returned to drive the next page request.
 type pageResult struct {
 	objs      []ObjectInfo
 	prefixes  []string
-	nextAfter string
+	nextToken string
 }
 type scriptedS3 struct {
 	pages map[string][]pageResult
@@ -67,7 +129,7 @@ type scriptedS3 struct {
 	mu    sync.Mutex
 }
 
-func (s *scriptedS3) ListPage(ctx context.Context, prefix, startAfter string, delim bool, maxKeys int) ([]ObjectInfo, []string, string, error) {
+func (s *scriptedS3) ListPage(ctx context.Context, prefix, startAfter, continuationToken string, delim bool, maxKeys int) ([]ObjectInfo, []string, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -77,7 +139,7 @@ func (s *scriptedS3) ListPage(ctx context.Context, prefix, startAfter string, de
 	}
 	p := pages[0]
 	s.pages[prefix] = pages[1:]
-	return p.objs, p.prefixes, p.nextAfter, nil
+	return p.objs, p.prefixes, p.nextToken, nil
 }
 
 func (s *scriptedS3) RangeGet(ctx context.Context, key string) ([]byte, error) {

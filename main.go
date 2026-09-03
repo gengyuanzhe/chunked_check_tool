@@ -80,7 +80,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 	if cfg.IsCheck {
 		for i := 0; i < cfg.CheckConcurrency; i++ {
 			checkWg.Add(1)
-			workerS3 := newWorker(pool, i+cfg.ListConcurrency, cfg, bucket)
+			workerS3 := newWorker(pool, i+cfg.ListConcurrency, cfg, bucket, stats)
 			lc := &localCounter{interval: cfg.ProgressInterval, printer: printer}
 			go func(w S3API, lc *localCounter) {
 				defer checkWg.Done()
@@ -98,7 +98,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 	listStart := time.Now()
 	for i := 0; i < cfg.ListConcurrency; i++ {
 		listWg.Add(1)
-		workerS3 := newWorker(pool, i, cfg, bucket)
+		workerS3 := newWorker(pool, i, cfg, bucket, stats)
 		lc := &localCounter{interval: cfg.ProgressInterval, printer: printer}
 		onObject := func() { lc.incr(stats, "listed") }
 		go lister.Run(ctx, &listWg, objCh, i, workerS3, onObject)
@@ -106,24 +106,34 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 
 	// Seeding.
 	seeded := false
+	// seedErr captures the first error from the seed loop (including
+	// ctx.Err() on SIGINT) so it can be returned AFTER shutdown flushes
+	// output and stats.
+	var seedErr error
 	if cfg.ListType == 1 {
 		// Mode 1: root pagination with delimiter. Use a worker index past
 		// the list+check ranges so node assignment does not collide.
-		seedWorker := newWorker(pool, cfg.ListConcurrency+cfg.CheckConcurrency, cfg, bucket)
+		seedWorker := newWorker(pool, cfg.ListConcurrency+cfg.CheckConcurrency, cfg, bucket, stats)
 		sa := startAfter
+		continuationToken := ""
 		for {
-			objs, subprefixes, next, err := seedWorker.ListPage(ctx, prefix, sa, true, 1000)
+			objs, subprefixes, next, err := seedWorker.ListPage(ctx, prefix, sa, continuationToken, true, 1000)
 			if err != nil {
 				out.WriteListFailed(prefix, err.Error())
 				stats.IncrListFailed()
 				break
 			}
+			sa = "" // continuation tokens take over after the first page
 			for _, o := range objs {
 				if cfg.IsCheck {
 					select {
 					case objCh <- o:
 					case <-ctx.Done():
-						return ctx.Err()
+						seedErr = ctx.Err()
+						break
+					}
+					if seedErr != nil {
+						break
 					}
 				} else {
 					// list-only: lister is the sole counter, so main counts
@@ -134,6 +144,9 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 					}
 				}
 			}
+			if seedErr != nil {
+				break
+			}
 			for _, sp := range subprefixes {
 				lister.Seed(sp)
 				seeded = true
@@ -141,7 +154,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 			if next == "" {
 				break
 			}
-			sa = next
+			continuationToken = next
 		}
 	} else {
 		// Mode 2: ignore -nextmarker (documented limitation).
@@ -180,13 +193,16 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 		return fmt.Errorf("write stats: %w", err)
 	}
 	stats.PrintSummary(cfg.IsCheck)
-	return nil
+	// Return the seed-loop error (e.g. ctx.Err() on SIGINT) AFTER shutdown
+	// has flushed buffered output and written stats. main logs the interrupt
+	// and exits non-zero, but no data is lost.
+	return seedErr
 }
 
 // newWorker builds a per-worker S3API bound to a single node via NodePool
 // round-robin assignment. If every node is failed, Assign returns -1 and we
 // fatal — the tool cannot run without at least one reachable endpoint.
-func newWorker(pool *NodePool, workerIdx int, cfg *Config, bucket string) S3API {
+func newWorker(pool *NodePool, workerIdx int, cfg *Config, bucket string, stats *Stats) S3API {
 	nodeIdx := pool.Assign(workerIdx)
 	if nodeIdx < 0 {
 		log.Fatalf("no available nodes for worker %d", workerIdx)
@@ -195,5 +211,5 @@ func newWorker(pool *NodePool, workerIdx int, cfg *Config, bucket string) S3API 
 	if err != nil {
 		log.Fatalf("minio client (worker %d): %v", workerIdx, err)
 	}
-	return NewS3Client(client, bucket)
+	return NewS3Client(client, bucket, stats, pool, nodeIdx, cfg)
 }
