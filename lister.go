@@ -51,8 +51,13 @@ func (l *Lister) Seed(prefix string) {
 // until either the context is cancelled or inflight drops to zero. The
 // worker that drives inflight to zero closes the queue, which unblocks any
 // other workers waiting in Queue.Pop.
-func (l *Lister) Run(ctx context.Context, wg *sync.WaitGroup, objCh chan<- ObjectInfo, workerIdx int, s3 S3API) {
+//
+// onObject is invoked after each object is processed (sent to objCh in
+// check mode, classified locally in list-only mode). It is used by main to
+// drive per-worker progress printing. Pass nil to disable.
+func (l *Lister) Run(ctx context.Context, wg *sync.WaitGroup, objCh chan<- ObjectInfo, workerIdx int, s3 S3API, onObject func()) {
 	defer wg.Done()
+	_ = workerIdx
 	for {
 		select {
 		case <-ctx.Done():
@@ -63,7 +68,7 @@ func (l *Lister) Run(ctx context.Context, wg *sync.WaitGroup, objCh chan<- Objec
 		if !ok {
 			return
 		}
-		l.processPrefix(ctx, prefix, objCh, s3)
+		l.processPrefix(ctx, prefix, objCh, s3, onObject)
 		// Every prefix that is popped accounts for one Add(-1). Seed and the
 		// Mode-2 sub-prefix enqueue path do the matching Add(+1).
 		if l.inflight.Add(-1) == 0 {
@@ -77,7 +82,12 @@ func (l *Lister) Run(ctx context.Context, wg *sync.WaitGroup, objCh chan<- Objec
 // (when IsCheck) or classifying them locally (when list-only). In Mode 2
 // (delim=true) it also enqueues discovered sub-prefixes, bumping inflight
 // for each so they are accounted for in the termination counter.
-func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- ObjectInfo, s3 S3API) {
+//
+// Counting rule (fixes a double-count with checker.Handle): in check mode
+// the lister does NOT IncrListed — the checker bumps listedTotal once per
+// consumed object. In list-only mode the lister is the sole counter and
+// bumps IncrListed for every object it classifies.
+func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- ObjectInfo, s3 S3API, onObject func()) {
 	startAfter := ""
 	for {
 		objs, prefixes, next, err := s3.ListPage(ctx, prefix, startAfter, l.delim(), 1000)
@@ -87,7 +97,6 @@ func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- 
 			return
 		}
 		for _, o := range objs {
-			l.stats.IncrListed()
 			if l.cfg.IsCheck {
 				select {
 				case objCh <- o:
@@ -95,10 +104,14 @@ func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- 
 					return
 				}
 			} else {
-				// list-only mode: classify locally, no Range GET.
+				// list-only mode: lister is the sole counter/classifier.
+				l.stats.IncrListed()
 				if !isNormalETag(o.ETag) {
 					l.stats.IncrMultipart()
 				}
+			}
+			if onObject != nil {
+				onObject()
 			}
 		}
 		if l.cfg.ListType == 2 {

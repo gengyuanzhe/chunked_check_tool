@@ -37,7 +37,7 @@ func TestListerMode2BFSPrefixes(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.ListConcurrency; i++ {
 		wg.Add(1)
-		go lister.Run(context.Background(), &wg, objCh, i, fake)
+		go lister.Run(context.Background(), &wg, objCh, i, fake, nil)
 	}
 	go func() {
 		wg.Wait()

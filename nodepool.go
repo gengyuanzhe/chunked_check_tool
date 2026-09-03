@@ -48,6 +48,14 @@ func (p *NodePool) URL(idx int) string {
 	return fmt.Sprintf("%s://%s", p.scheme, p.endpoints[idx])
 }
 
+// Endpoint returns the raw host:port of node idx. Used by worker factory
+// to bind a minio client to a specific node without touching private fields.
+func (p *NodePool) Endpoint(idx int) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.endpoints[idx]
+}
+
 func (p *NodePool) IsFailed(idx int) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

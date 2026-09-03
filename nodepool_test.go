@@ -53,3 +53,14 @@ func TestNodePoolURL(t *testing.T) {
 		t.Errorf("URL(0)=%q want https://1.2.3.4:9000", got)
 	}
 }
+
+func TestNodePoolEndpoint(t *testing.T) {
+	cfg := &Config{Endpoints: []string{"1.2.3.4:9000", "5.6.7.8:9000"}, Scheme: "http"}
+	pool := NewNodePool(cfg)
+	if got := pool.Endpoint(0); got != "1.2.3.4:9000" {
+		t.Errorf("Endpoint(0)=%q want 1.2.3.4:9000", got)
+	}
+	if got := pool.Endpoint(1); got != "5.6.7.8:9000" {
+		t.Errorf("Endpoint(1)=%q want 5.6.7.8:9000", got)
+	}
+}
