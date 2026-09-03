@@ -33,7 +33,7 @@ func TestOutputWritesCorruptedAndMultipart(t *testing.T) {
 		}
 	}
 	check("corrupted_objects.txt", "obj/a")
-	check("multipart_objects.txt", "abc123-2|obj/b")
+	check("multipart_objects.txt", "obj/b|abc123-2")
 	check("list_failed.txt", "prefix/x")
 	check("list_failed.txt", "timeout")
 	check("check_failed.txt", "obj/c")
@@ -65,7 +65,7 @@ func TestOutputMultipartFormat(t *testing.T) {
 	o.Close()
 	data, _ := os.ReadFile(filepath.Join(dir, "multipart_objects.txt"))
 	line := strings.TrimSpace(string(data))
-	if line != "deadbeef-3|key/with|pipe" {
+	if line != "key/with|pipe|deadbeef-3" {
 		t.Errorf("multipart line = %q", line)
 	}
 }

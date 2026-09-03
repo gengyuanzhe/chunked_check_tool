@@ -92,7 +92,7 @@ func (o *Output) openAndStart(name string, ch interface{}, isEntry bool) error {
 
 func (o *Output) WriteCorrupted(key string) { o.corruptedCh <- key }
 func (o *Output) WriteMultipart(etag, key string) {
-	o.multipartCh <- etag + "|" + key
+	o.multipartCh <- key + "|" + etag
 }
 func (o *Output) WriteListFailed(prefix, errStr string)  { o.listFailedCh <- Entry{Key: prefix, Err: errStr} }
 func (o *Output) WriteCheckFailed(key, errStr string)    { o.checkFailedCh <- Entry{Key: key, Err: errStr} }

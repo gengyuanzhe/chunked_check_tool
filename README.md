@@ -97,7 +97,7 @@ progress_interval: 100000
 | 文件 | 内容 | 何时写 |
 |---|---|---|
 | `corrupted_objects.txt` | 损坏的普通对象 key | Range GET 前 128 字节命中 chunk-signature 正则 |
-| `multipart_objects.txt` | `<etag>\|<key>` | ETag 不是 32 位小写 MD5 hex |
+| `multipart_objects.txt` | `<key>\|<etag>` | ETag 不是 32 位小写 MD5 hex |
 | `list_failed.txt` | prefix + 错误原因 | list worker 调用失败 |
 | `check_failed.txt` | key + 错误原因 | checker 调用失败 |
 | `success_objects.log` | 正常对象 key | 仅 `is_success_log=true` |
@@ -107,7 +107,7 @@ progress_interval: 100000
 
 ### multipart_objects.txt 格式
 
-每行 `<etag>|<key>`，例如：
+每行 `<key>|<etag>`，例如：
 ```
 a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4-5|data/2026/01/file.bin
 -|data/2026/02/no-etag.bin

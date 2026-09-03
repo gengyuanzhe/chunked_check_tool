@@ -19,6 +19,17 @@ type ObjectInfo struct {
 	ETag string
 }
 
+// trimETagQuotes strips a single pair of surrounding double quotes that S3
+// returns ETags wrapped in (e.g. `"abcdef..."`). minio-go does not strip
+// them; without this, a normal 32-hex ETag fails isNormalETag and is
+// misclassified as multipart.
+func trimETagQuotes(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
 // S3API is the S3 surface area the checker depends on.
 //
 // ListPage performs a single LIST request (V2). It accepts both a
@@ -121,7 +132,7 @@ func (c *S3Client) ListPage(ctx context.Context, prefix, startAfter, continuatio
 	}
 	objs := make([]ObjectInfo, 0, len(result.Contents))
 	for _, o := range result.Contents {
-		objs = append(objs, ObjectInfo{Key: o.Key, ETag: o.ETag})
+		objs = append(objs, ObjectInfo{Key: o.Key, ETag: trimETagQuotes(o.ETag)})
 	}
 	prefixes := make([]string, 0, len(result.CommonPrefixes))
 	for _, cp := range result.CommonPrefixes {

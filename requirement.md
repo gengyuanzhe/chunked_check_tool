@@ -26,7 +26,7 @@
 
 **多段输出格式**
 
-每行 `<etag>|<key>`，把 ETag 也写进去，用 `|` 和 key 分隔。
+每行 `<key>|<etag>`，把 ETag 也写进去，用 `|` 和 key 分隔，key 在前 etag 在后。
 
 **列举模式**
 
@@ -62,7 +62,7 @@ progress_interval: 100000  # 进度打印阈值（约，性能优先）
 | 文件 | 内容 |
 |---|---|
 | `corrupted_objects.txt` | 损坏的普通对象 key |
-| `multipart_objects.txt` | `<etag>\|<key>` |
+| `multipart_objects.txt` | `<key>\|<etag>` |
 | `list_failed.txt` | 列举失败的 prefix + 原因 |
 | `check_failed.txt` | 校验失败的对象 key + 原因 |
 | `success_objects.log` | 正常对象 key（仅 `is_success_log=true`） |

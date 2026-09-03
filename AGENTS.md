@@ -31,7 +31,7 @@
 | `s3client.go` | `S3API` 接口、`S3Client`（包装 minio.Core + minio.Client）、`FakeS3`/`scriptedS3`（测试用）、节点故障重试一次 |
 | `lister.go` | `Lister`（无 `s3` 字段；`Run`/`processPrefix` 接 `s3` 参数）、无界队列 BFS、`inflight` atomic 计数 |
 | `checker.go` | `Checker`、`isNormalETag`（严格 32 位小写 hex）、`chunkSigRe` |
-| `output.go` | 5 channel + 5 writer goroutine、`bufio.Writer` 64KB、append 模式、`<etag>\|<key>` 多段格式 |
+| `output.go` | 5 channel + 5 writer goroutine、`bufio.Writer` 64KB、append 模式、`<key>\|<etag>` 多段格式 |
 | `queue.go` | 无界队列（slice + mutex + cond），ctx-aware 阻塞 Pop |
 | `stats.go` | atomic.Int64 计数器 + `StatsSnapshot` + `WriteToFile` + `PrintSummary` |
 | `progress.go` | `ProgressPrinter` + `localCounter`（每 worker 本地 int，无 per-obj atomic） |
@@ -40,7 +40,7 @@
 
 1. **多段判定严格**：仅 `^[0-9a-f]{32}$`（32 位小写 MD5 hex）算普通对象。大写、长度不对、`<hex>-N`、空值一律按多段处理。**绝不把多段误判为普通对象**。`isNormalETag` 用逐字节循环实现（非正则），不要改成宽松匹配。
 
-2. **多段对象跳过 Range GET**：直接写 `multipart_objects.txt`，格式 `<etag>|<key>\n`。不要给多段对象发 Range GET（浪费请求 + 可能误判）。
+2. **多段对象跳过 Range GET**：直接写 `multipart_objects.txt`，格式 `<key>|<etag>\n`。不要给多段对象发 Range GET（浪费请求 + 可能误判）。
 
 3. **ETag 来源**：list 响应（统一），**不从 Range GET response header 取**。
 
@@ -87,7 +87,7 @@
 | 文件 | 内容 | 何时写 |
 |---|---|---|
 | `corrupted_objects.txt` | 损坏普通对象 key | Range GET 命中 chunk-signature |
-| `multipart_objects.txt` | `<etag>\|<key>` | ETag 不匹配 `^[0-9a-f]{32}$` |
+| `multipart_objects.txt` | `<key>\|<etag>` | ETag 不匹配 `^[0-9a-f]{32}$` |
 | `list_failed.txt` | prefix + 原因 | list worker 调用失败 |
 | `check_failed.txt` | key + 原因 | checker 调用失败 / 非预期错误 |
 | `success_objects.log` | 正常对象 key | 仅 `is_success_log=true` |
@@ -129,7 +129,7 @@ Go 1.27 二进制路径：`/Users/gengyuanzhe/sdk/go1.27.1/bin/go`（若不在 P
 - **进度行 `checked=` 显示 ListedTotal**：控制器简化决定，不是真实已校验数。
 - **Mode 1 根直接对象不调 `onObject`**：进度计数偏少（仅外观，stats 正确）。
 - **`workerIdx` 参数在 `Lister.Run` 未用**：保留给未来 NodePool 分配，当前是死重量。
-- **多段输出不转义 `|`**：key 中若含 `|` 会破坏 `<etag>|<key>` 格式（实践中 S3 key 罕见 `|`）。
+- **多段输出不转义 `|`**：key 中若含 `|` 会破坏 `<key>|<etag>` 格式（实践中 S3 key 罕见 `|`）。
 - **`list_type:3` 等非法值静默落到 Mode 2 分支**：可加校验。
 
 ## 9. 工作流约定

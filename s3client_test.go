@@ -102,3 +102,19 @@ func TestIsNodeFaultErr(t *testing.T) {
 		}
 	}
 }
+
+func TestTrimETagQuotes(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`"0123456789abcdef0123456789abcdef"`, "0123456789abcdef0123456789abcdef"},
+		{`"abc-2"`, "abc-2"},
+		{`abc`, "abc"},
+		{`""`, ""},
+		{`"`, "\""},
+		{`"abc`, `"abc`},
+	}
+	for _, c := range cases {
+		if got := trimETagQuotes(c.in); got != c.want {
+			t.Errorf("trimETagQuotes(%q)=%q want %q", c.in, got, c.want)
+		}
+	}
+}
