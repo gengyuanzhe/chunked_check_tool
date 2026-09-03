@@ -89,11 +89,13 @@ func (c *S3Client) ListPage(ctx context.Context, prefix, startAfter string, deli
 	for _, cp := range result.CommonPrefixes {
 		prefixes = append(prefixes, cp.Prefix)
 	}
-	// Use the last returned key as the next start-after cursor. When the
-	// response is truncated and no NextContinuationToken is exposed by the
-	// Core API for V2, paging by key is the documented S3 fallback.
+	// Only advance the cursor when the response is actually truncated.
+	// Returning the last key on a non-truncated final page would drive the
+	// caller to issue one extra empty LIST request per prefix — at scale
+	// (billions of objects, millions of prefixes in Mode 2 BFS) that is an
+	// unacceptable volume of wasted requests.
 	next := ""
-	if len(objs) > 0 {
+	if result.IsTruncated && len(objs) > 0 {
 		next = objs[len(objs)-1].Key
 	}
 	return objs, prefixes, next, nil
