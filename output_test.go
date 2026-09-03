@@ -9,7 +9,7 @@ import (
 
 func TestOutputWritesCorruptedAndMultipart(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsSuccessLog: true}
+	cfg := &Config{OutputDir: dir, IsCheck: true, IsSuccessLog: true}
 	o, err := NewOutput(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -57,9 +57,46 @@ func TestOutputNoSuccessWhenDisabled(t *testing.T) {
 	}
 }
 
+// In list-only mode (is_check=false), only list_failed.txt should be
+// created — the object files (corrupted/multipart/check_failed/success)
+// must not exist, because nothing writes to them and we don't want to
+// leave empty files lying around.
+func TestOutputListOnlySkipsObjectFiles(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: false, IsSuccessLog: false}
+	o, err := NewOutput(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Defensive: even if someone calls these, they should be no-ops.
+	o.WriteCorrupted("k1")
+	o.WriteMultipart("etag-2", "k2")
+	o.WriteCheckFailed("k3", "err")
+	o.WriteSuccess("k4")
+	o.WriteListFailed("prefix/", "timeout")
+	if err := o.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// list_failed must exist (lister writes to it in both modes).
+	if _, err := os.Stat(filepath.Join(dir, "list_failed.txt")); err != nil {
+		t.Errorf("list_failed.txt should exist: %v", err)
+	}
+	// Object files must NOT exist.
+	for _, name := range []string{
+		"corrupted_objects.txt",
+		"multipart_objects.txt",
+		"check_failed.txt",
+		"success_objects.log",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s should not exist in list-only mode, got %v", name, err)
+		}
+	}
+}
+
 func TestOutputMultipartFormat(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir}
+	cfg := &Config{OutputDir: dir, IsCheck: true}
 	o, _ := NewOutput(cfg)
 	o.WriteMultipart("deadbeef-3", "key/with|pipe")
 	o.Close()
