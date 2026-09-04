@@ -22,6 +22,8 @@ output_dir: ./out
 is_check: true
 is_success_log: true
 progress_interval: 50000
+obj_ch_capacity: 5000
+output_ch_capacity: 2048
 `)
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		t.Fatal(err)
@@ -42,6 +44,39 @@ progress_interval: 50000
 	}
 	if !cfg.IsSuccessLog || cfg.ProgressInterval != 50000 {
 		t.Errorf("bool/int fields wrong: %+v", cfg)
+	}
+	if cfg.ObjChCapacity != 5000 {
+		t.Errorf("obj_ch_capacity = %d, want 5000", cfg.ObjChCapacity)
+	}
+	if cfg.OutputChCapacity != 2048 {
+		t.Errorf("output_ch_capacity = %d, want 2048", cfg.OutputChCapacity)
+	}
+}
+
+func TestLoadConfig_ChannelCapacityDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte(`
+endpoints:
+  - 10.0.0.1:9000
+ak: ak
+sk: sk
+bucket: b
+`)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 0 means "not configured" — caller falls back to current defaults
+	// (objCh: formula max(check_concurrency×4, 2000); output channels: 1024).
+	if cfg.ObjChCapacity != 0 {
+		t.Errorf("obj_ch_capacity default = %d, want 0 (unset)", cfg.ObjChCapacity)
+	}
+	if cfg.OutputChCapacity != 0 {
+		t.Errorf("output_ch_capacity default = %d, want 0 (unset)", cfg.OutputChCapacity)
 	}
 }
 

@@ -20,6 +20,8 @@ type Config struct {
 	IsCheck          bool     `yaml:"is_check"`
 	IsSuccessLog     bool     `yaml:"is_success_log"`
 	ProgressInterval int      `yaml:"progress_interval"`
+	ObjChCapacity    int      `yaml:"obj_ch_capacity"`
+	OutputChCapacity int      `yaml:"output_ch_capacity"`
 }
 
 func LoadConfig(path string) (*Config, error) {

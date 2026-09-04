@@ -66,9 +66,13 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 	printer := NewProgressPrinter(os.Stdout)
 	start := time.Now()
 
-	objChCap := cfg.CheckConcurrency * 4
-	if objChCap < 2000 {
-		objChCap = 2000
+	objChCap := cfg.ObjChCapacity
+	if objChCap <= 0 {
+		// default: 4× check workers, floored at 2000
+		objChCap = cfg.CheckConcurrency * 4
+		if objChCap < 2000 {
+			objChCap = 2000
+		}
 	}
 	objCh := make(chan ObjectInfo, objChCap)
 	q := NewQueue()

@@ -36,13 +36,17 @@ func NewOutput(cfg *Config) (*Output, error) {
 	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
 		return nil, fmt.Errorf("mkdir output: %w", err)
 	}
+	chCap := cfg.OutputChCapacity
+	if chCap <= 0 {
+		chCap = 1024
+	}
 	o := &Output{
 		dir:              cfg.OutputDir,
-		corruptedCh:      make(chan string, 1024),
-		multipartCh:      make(chan string, 1024),
-		listFailedCh:     make(chan Entry, 1024),
-		checkFailedCh:    make(chan Entry, 1024),
-		successCh:        make(chan string, 1024),
+		corruptedCh:      make(chan string, chCap),
+		multipartCh:      make(chan string, chCap),
+		listFailedCh:     make(chan Entry, chCap),
+		checkFailedCh:    make(chan Entry, chCap),
+		successCh:        make(chan string, chCap),
 		corruptedEnabled: cfg.IsCheck,
 		multipartEnabled: cfg.IsCheck,
 		checkEnabled:     cfg.IsCheck,
