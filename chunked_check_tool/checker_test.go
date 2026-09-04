@@ -134,6 +134,37 @@ func TestCheckerHandleEmptyObjectSkipsRangeGet(t *testing.T) {
 
 var errFake416 = errors.New("416 Range Not Satisfiable")
 
+func TestCheckerHandleCheckFailedLogsQueueLengths(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true}
+	out, _ := NewOutput(cfg)
+	out.SetQueueLenProviders(
+		func() int { return 7 },  // prefix queue length
+		func() int { return 42 }, // objCh length
+	)
+	s := NewStats()
+	worker := &FakeS3{Err: minio.ErrorResponse{
+		Code:       "InvalidRange",
+		Message:    "The requested range is not satisfiable",
+		StatusCode: 416,
+	}}
+	c := NewChecker(worker, out, s, false)
+	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef", Size: 1})
+	if err := out.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(filepath.Join(dir, "check_failed.log"))
+	if err != nil {
+		t.Fatalf("read check_failed.log: %v", err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{`prefix_queue_len=7`, `obj_ch_len=42`} {
+		if !strings.Contains(log, want) {
+			t.Errorf("check_failed.log missing %q\nfull log:\n%s", want, log)
+		}
+	}
+}
 func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
