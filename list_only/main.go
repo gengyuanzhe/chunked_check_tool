@@ -282,6 +282,7 @@ func runIter(ctx context.Context, li *lister, cfg *Config) {
 		client := li.pick()
 		start := time.Now()
 		var subdirs []string
+		objectCnt := 0
 		for obj := range client.ListObjectsIter(ctx, li.bucket, minio.ListObjectsOptions{
 			Prefix:    prefix,
 			Recursive: false,
@@ -296,9 +297,10 @@ func runIter(ctx context.Context, li *lister, cfg *Config) {
 			if strings.HasSuffix(obj.Key, "/") {
 				subdirs = append(subdirs, obj.Key)
 			} else {
-				li.stats.addObjects(1)
+				objectCnt++
 			}
 		}
+		li.stats.addObjects(objectCnt)
 		li.stats.addListCall(time.Since(start).Nanoseconds())
 		for _, p := range subdirs {
 			wg.Add(1)
