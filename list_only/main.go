@@ -57,8 +57,8 @@ func loadConfig(path string) (*Config, error) {
 	if c.Mode == "" {
 		c.Mode = "bfs"
 	}
-	if c.Mode != "bfs" && c.Mode != "walk" && c.Mode != "iter" {
-		return nil, fmt.Errorf("mode must be bfs, walk, or iter, got %q", c.Mode)
+	if c.Mode != "bfs" && c.Mode != "walk" && c.Mode != "iter" && c.Mode != "sub" {
+		return nil, fmt.Errorf("mode must be bfs, walk, iter, or sub, got %q", c.Mode)
 	}
 	return &c, nil
 }
@@ -320,6 +320,82 @@ func runIter(ctx context.Context, li *lister, cfg *Config) {
 	wg.Wait()
 }
 
+// runSub ports test_list_sub.go's implementation verbatim into list_only's
+// framework: parent-waiting walk (wg.Wait on each level), bare non-ctx
+// semaphore, global rand.Intn for client pick, errOnce for first error.
+// Used as a perf reference baseline to reverse-modify against runIter.
+func runSub(ctx context.Context, li *lister, cfg *Config) {
+	var (
+		firstErr error
+		errOnce  sync.Once
+		sem      = make(chan struct{}, cfg.Concurrency)
+	)
+
+	var walk func(p string) error
+	walk = func(p string) error {
+		p = ensureTrailingSlash(p)
+
+		sem <- struct{}{}
+		_, subdirs, e := listOneLevelSub(ctx, li, p)
+		<-sem
+
+		if e != nil {
+			return e
+		}
+		if len(subdirs) == 0 {
+			return nil
+		}
+
+		var wg sync.WaitGroup
+		for _, sub := range subdirs {
+			wg.Add(1)
+			go func(subPrefix string) {
+				defer wg.Done()
+				if subErr := walk(subPrefix); subErr != nil {
+					errOnce.Do(func() { firstErr = subErr })
+				}
+			}(sub)
+		}
+		wg.Wait()
+		return firstErr
+	}
+
+	if err := walk(cfg.Prefix); err != nil {
+		log.Printf("sub walk: %v", err)
+	}
+}
+
+// listOneLevelSub is the per-prefix helper for runSub. Mirrors
+// test_list_sub.go's listOneLevelWithDelimiter: global rand client pick,
+// ListObjectsIter with FetchOwner=false, local counters, batched stats
+// commit at end.
+func listOneLevelSub(ctx context.Context, li *lister, prefix string) (objectCnt int, subdirs []string, err error) {
+	prefix = ensureTrailingSlash(prefix)
+	start := time.Now()
+	client := li.clients[rand.Intn(len(li.clients))]
+	for obj := range client.ListObjectsIter(ctx, li.bucket, minio.ListObjectsOptions{
+		Prefix:     prefix,
+		Recursive:  false,
+		FetchOwner: &listFetchOwner,
+	}) {
+		if obj.Err != nil {
+			li.stats.addListCall(time.Since(start).Nanoseconds())
+			return 0, nil, obj.Err
+		}
+		if obj.Key == "" {
+			continue
+		}
+		if strings.HasSuffix(obj.Key, "/") {
+			subdirs = append(subdirs, obj.Key)
+		} else {
+			objectCnt++
+		}
+	}
+	li.stats.addListCall(time.Since(start).Nanoseconds())
+	li.stats.addObjects(objectCnt)
+	return objectCnt, subdirs, nil
+}
+
 // queue is an unbounded string queue with ctx-aware blocking pop. It is
 // closed when the BFS inflight counter hits zero.
 type queue struct {
@@ -416,6 +492,8 @@ func main() {
 		runWalk(ctx, li, cfg)
 	case "iter":
 		runIter(ctx, li, cfg)
+	case "sub":
+		runSub(ctx, li, cfg)
 	}
 	total := time.Since(start)
 
