@@ -73,10 +73,18 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 	objCh := make(chan ObjectInfo, objChCap)
 	q := NewQueue()
 	lister := NewLister(q, out, stats, cfg)
-	printer.SetQueueLenProviders(
-		func() int { return q.Len() },
-		func() int { return len(objCh) },
-	)
+	printer.SetQueueSnapshotProvider(func() QueueSnapshot {
+		cor, mp, lf, cf, su := out.ChannelSnapshot()
+		return QueueSnapshot{
+			Prefix:      q.Len(),
+			ObjCh:       len(objCh),
+			Corrupted:   cor,
+			Multipart:   mp,
+			ListFailed:  lf,
+			CheckFailed: cf,
+			Success:     su,
+		}
+	})
 
 	// Spawn check workers first so they drain objCh while main paginates the
 	// root prefix in Mode 1 (which writes directly to objCh).

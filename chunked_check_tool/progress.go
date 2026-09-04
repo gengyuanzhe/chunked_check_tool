@@ -11,24 +11,34 @@ import (
 // counter and calls MaybePrint only when its local count crosses the
 // threshold, so the hot path stays atomic-free.
 type ProgressPrinter struct {
-	w            io.Writer
-	mu           sync.Mutex // guards write only, not counting
-	prefixQueueLen func() int
-	objChLen       func() int
+	w              io.Writer
+	mu             sync.Mutex // guards write only, not counting
+	queueSnapshot  func() QueueSnapshot
+}
+
+// QueueSnapshot is a live snapshot of all in-flight queues: the BFS
+// prefix queue, the objCh channel between lister and checker, and the
+// five buffered channels inside Output that feed the various .txt / .log
+// writer goroutines. Reported as a group on every progress line so
+// backpressure is visible at a glance.
+type QueueSnapshot struct {
+	Prefix      int // BFS queue length (Queue.Len)
+	ObjCh       int // lister→checker channel (len(objCh))
+	Corrupted   int // → corrupted_objects.txt
+	Multipart   int // → multipart_objects.txt
+	ListFailed  int // → list_failed.txt
+	CheckFailed int // → check_failed.txt
+	Success     int // → success_objects.log
 }
 
 func NewProgressPrinter(w io.Writer) *ProgressPrinter {
 	return &ProgressPrinter{w: w}
 }
 
-// SetQueueLenProviders injects callbacks that report live lengths of the
-// prefix queue (Queue.Len) and the objCh channel. MaybePrint calls both
-// on every progress line and appends them as prefix_queue_len / obj_ch_len
-// fields — useful for spotting lister/checker backpressure at the
-// foreground. Either fn may be nil, in which case the field is omitted.
-func (p *ProgressPrinter) SetQueueLenProviders(prefixFn, objFn func() int) {
-	p.prefixQueueLen = prefixFn
-	p.objChLen = objFn
+// SetQueueSnapshotProvider injects a callback returning the current
+// QueueSnapshot. Called once per progress line. nil = omit the q= field.
+func (p *ProgressPrinter) SetQueueSnapshotProvider(fn func() QueueSnapshot) {
+	p.queueSnapshot = fn
 }
 
 // MaybePrint reads a global stats snapshot and prints one progress line.
@@ -47,11 +57,10 @@ func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
 		snap.ListAvgLatencyMs, snap.GetAvgLatencyMs,
 		label, count,
 	)
-	if p.prefixQueueLen != nil {
-		fmt.Fprintf(p.w, " prefix_queue_len=%d", p.prefixQueueLen())
-	}
-	if p.objChLen != nil {
-		fmt.Fprintf(p.w, " obj_ch_len=%d", p.objChLen())
+	if p.queueSnapshot != nil {
+		q := p.queueSnapshot()
+		fmt.Fprintf(p.w, " q=pfx:%d obj:%d cor:%d mp:%d lf:%d cf:%d su:%d",
+			q.Prefix, q.ObjCh, q.Corrupted, q.Multipart, q.ListFailed, q.CheckFailed, q.Success)
 	}
 	fmt.Fprintln(p.w)
 }

@@ -170,6 +170,27 @@ func (o *Output) WriteSuccess(key string) {
 	}
 }
 
+// ChannelSnapshot returns the current length of each buffered writer
+// channel. Channels whose writer goroutine was not started (because the
+// corresponding mode is disabled) report 0. Called from
+// ProgressPrinter's queueSnapshot provider once per progress line.
+func (o *Output) ChannelSnapshot() (corrupted, multipart, listFailed, checkFailed, success int) {
+	if o.corruptedEnabled {
+		corrupted = len(o.corruptedCh)
+	}
+	if o.multipartEnabled {
+		multipart = len(o.multipartCh)
+	}
+	listFailed = len(o.listFailedCh) // list_failed is always enabled
+	if o.checkEnabled {
+		checkFailed = len(o.checkFailedCh)
+	}
+	if o.successEnabled {
+		success = len(o.successCh)
+	}
+	return
+}
+
 func (o *Output) Close() error {
 	// list_failed always has a consumer. The object channels only have a
 	// consumer when their file was opened (gated on is_check / is_success_log
