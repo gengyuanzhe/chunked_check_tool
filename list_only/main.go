@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -56,8 +57,8 @@ func loadConfig(path string) (*Config, error) {
 	if c.Mode == "" {
 		c.Mode = "bfs"
 	}
-	if c.Mode != "bfs" && c.Mode != "walk" {
-		return nil, fmt.Errorf("mode must be bfs or walk, got %q", c.Mode)
+	if c.Mode != "bfs" && c.Mode != "walk" && c.Mode != "iter" {
+		return nil, fmt.Errorf("mode must be bfs, walk, or iter, got %q", c.Mode)
 	}
 	return &c, nil
 }
@@ -236,6 +237,80 @@ func runWalk(ctx context.Context, li *lister, cfg *Config) {
 	wg.Wait()
 }
 
+// ensureTrailingSlash normalizes a prefix so delimiter-based listing
+// behaves predictably: S3 treats "a/b" and "a/b/" differently when
+// listing with delimiter. Mirrors test_list_sub.go's helper.
+func ensureTrailingSlash(prefix string) string {
+	if prefix == "" {
+		return ""
+	}
+	if strings.HasSuffix(prefix, "/") {
+		return prefix
+	}
+	return prefix + "/"
+}
+
+// runIter enumerates the tree using minio's high-level ListObjectsIter
+// channel API (Recursive: false = delimiter "/"). Unlike listPageV1,
+// this does NOT manually handle marker pagination — minio-go paginates
+// internally and streams results until the prefix is exhausted.
+//
+// The channel yields both real objects (Key not ending with "/") and
+// "directory" entries (Key ending with "/", which are CommonPrefixes
+// surfaced as synthetic objects). We count the former in stats.objects
+// and recurse into the latter.
+//
+// list_calls semantic in this mode = number of ListObjectsIter
+// invocations = number of prefixes listed (each invocation may internally
+// issue multiple HTTP requests that we do not count). This matches
+// test_list_sub.go's accounting.
+func runIter(ctx context.Context, li *lister, cfg *Config) {
+	sem := make(chan struct{}, cfg.Concurrency)
+	var wg sync.WaitGroup
+
+	var walk func(prefix string)
+	walk = func(prefix string) {
+		defer wg.Done()
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		defer func() { <-sem }()
+
+		prefix = ensureTrailingSlash(prefix)
+		client := li.pick()
+		start := time.Now()
+		var subdirs []string
+		for obj := range client.ListObjectsIter(ctx, li.bucket, minio.ListObjectsOptions{
+			Prefix:    prefix,
+			Recursive: false,
+		}) {
+			if obj.Err != nil {
+				log.Printf("list %q: %v", prefix, obj.Err)
+				return
+			}
+			if obj.Key == "" {
+				continue
+			}
+			if strings.HasSuffix(obj.Key, "/") {
+				subdirs = append(subdirs, obj.Key)
+			} else {
+				li.stats.addObjects(1)
+			}
+		}
+		li.stats.addListCall(time.Since(start).Nanoseconds())
+		for _, p := range subdirs {
+			wg.Add(1)
+			go walk(p)
+		}
+	}
+
+	wg.Add(1)
+	go walk(cfg.Prefix)
+	wg.Wait()
+}
+
 // queue is an unbounded string queue with ctx-aware blocking pop. It is
 // closed when the BFS inflight counter hits zero.
 type queue struct {
@@ -318,6 +393,8 @@ func main() {
 		runBFS(ctx, li, cfg)
 	case "walk":
 		runWalk(ctx, li, cfg)
+	case "iter":
+		runIter(ctx, li, cfg)
 	}
 	total := time.Since(start)
 
