@@ -380,6 +380,7 @@ func main() {
 	for _, ep := range cfg.Endpoints {
 		c, err := minio.New(ep, &minio.Options{
 			Creds:        credentials.NewStaticV4(cfg.AK, cfg.SK, ""),
+			Region:       "us-east-1",
 			Secure:       false, // HTTP only
 			Transport:    transport,
 			BucketLookup: minio.BucketLookupAuto,
