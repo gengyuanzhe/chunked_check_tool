@@ -73,7 +73,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 	objCh := make(chan ObjectInfo, objChCap)
 	q := NewQueue()
 	lister := NewLister(q, out, stats, cfg)
-	out.SetQueueLenProviders(
+	printer.SetQueueLenProviders(
 		func() int { return q.Len() },
 		func() int { return len(objCh) },
 	)

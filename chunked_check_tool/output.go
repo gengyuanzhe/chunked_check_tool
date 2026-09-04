@@ -24,25 +24,12 @@ type Output struct {
 	successCh        chan string
 	checkLogger      *slog.Logger
 	checkLogFile     *os.File
-	prefixQueueLen   func() int
-	objChLen         func() int
 	corruptedEnabled bool
 	multipartEnabled bool
 	checkEnabled     bool
 	successEnabled   bool
 	wg               sync.WaitGroup
 	files            []*os.File
-}
-
-// SetQueueLenProviders injects callbacks that report the live lengths of
-// the prefix queue (Queue.Len) and the objCh channel. Both are invoked
-// inside WriteCheckFailedLog so each check-failure log line carries a
-// snapshot of backlog at failure time — useful for correlating check
-// failures with lister/checker backpressure. Either fn may be nil, in
-// which case the corresponding field is omitted.
-func (o *Output) SetQueueLenProviders(prefixFn, objFn func() int) {
-	o.prefixQueueLen = prefixFn
-	o.objChLen = objFn
 }
 
 func NewOutput(cfg *Config) (*Output, error) {
@@ -175,12 +162,6 @@ func (o *Output) WriteCheckFailedLog(key string, statusCode int, s3Code string, 
 		attrs = append(attrs, slog.String("s3_code", s3Code))
 	}
 	attrs = append(attrs, slog.Any("err", err))
-	if o.prefixQueueLen != nil {
-		attrs = append(attrs, slog.Int("prefix_queue_len", o.prefixQueueLen()))
-	}
-	if o.objChLen != nil {
-		attrs = append(attrs, slog.Int("obj_ch_len", o.objChLen()))
-	}
 	o.checkLogger.Error("check failed", attrs...)
 }
 func (o *Output) WriteSuccess(key string) {

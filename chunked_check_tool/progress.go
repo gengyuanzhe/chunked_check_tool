@@ -11,12 +11,24 @@ import (
 // counter and calls MaybePrint only when its local count crosses the
 // threshold, so the hot path stays atomic-free.
 type ProgressPrinter struct {
-	w  io.Writer
-	mu sync.Mutex // guards write only, not counting
+	w            io.Writer
+	mu           sync.Mutex // guards write only, not counting
+	prefixQueueLen func() int
+	objChLen       func() int
 }
 
 func NewProgressPrinter(w io.Writer) *ProgressPrinter {
 	return &ProgressPrinter{w: w}
+}
+
+// SetQueueLenProviders injects callbacks that report live lengths of the
+// prefix queue (Queue.Len) and the objCh channel. MaybePrint calls both
+// on every progress line and appends them as prefix_queue_len / obj_ch_len
+// fields — useful for spotting lister/checker backpressure at the
+// foreground. Either fn may be nil, in which case the field is omitted.
+func (p *ProgressPrinter) SetQueueLenProviders(prefixFn, objFn func() int) {
+	p.prefixQueueLen = prefixFn
+	p.objChLen = objFn
 }
 
 // MaybePrint reads a global stats snapshot and prints one progress line.
@@ -28,12 +40,19 @@ func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	fmt.Fprintf(p.w,
-		"[progress] listed=%d checked=%d multipart=%d corrupted=%d list_failed=%d check_failed=%d (%s=%d)\n",
+		"[progress] listed=%d checked=%d multipart=%d corrupted=%d list_failed=%d check_failed=%d (%s=%d)",
 		snap.ListedTotal, snap.ListedTotal,
 		snap.Multipart, snap.Corrupted,
 		snap.ListFailed, snap.CheckFailed,
 		label, count,
 	)
+	if p.prefixQueueLen != nil {
+		fmt.Fprintf(p.w, " prefix_queue_len=%d", p.prefixQueueLen())
+	}
+	if p.objChLen != nil {
+		fmt.Fprintf(p.w, " obj_ch_len=%d", p.objChLen())
+	}
+	fmt.Fprintln(p.w)
 }
 
 // localCounter is a per-worker progress counter. Workers call incr() on every
