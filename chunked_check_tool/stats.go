@@ -15,6 +15,8 @@ type Stats struct {
 	checkFailedCount atomic.Int64
 	listCalls        atomic.Int64
 	listLatencySumNs atomic.Int64
+	getCalls         atomic.Int64
+	getLatencySumNs  atomic.Int64
 
 	listTotalDuration time.Duration
 	totalDuration     time.Duration
@@ -29,6 +31,8 @@ type StatsSnapshot struct {
 	ListCalls            int64
 	ListAvgLatencyMs     float64
 	ListTotalDurationSec float64
+	GetCalls             int64
+	GetAvgLatencyMs      float64
 	TotalDurationSec     float64
 }
 
@@ -49,6 +53,15 @@ func (s *Stats) AddListCall(latency time.Duration) {
 	s.listLatencySumNs.Add(int64(latency))
 }
 
+// AddGetCall records one RangeGet invocation's latency. Called once per
+// public RangeGet call (covering both the initial attempt and any node-
+// fault retry), so getCalls == successful RangeGets + RangeGets that
+// eventually failed.
+func (s *Stats) AddGetCall(latency time.Duration) {
+	s.getCalls.Add(1)
+	s.getLatencySumNs.Add(int64(latency))
+}
+
 func (s *Stats) SetListDuration(d time.Duration)  { s.listTotalDuration = d }
 func (s *Stats) SetTotalDuration(d time.Duration) { s.totalDuration = d }
 
@@ -57,6 +70,11 @@ func (s *Stats) Snapshot() StatsSnapshot {
 	var avgMs float64
 	if calls > 0 {
 		avgMs = float64(s.listLatencySumNs.Load()) / float64(calls) / 1e6
+	}
+	getCalls := s.getCalls.Load()
+	var getAvgMs float64
+	if getCalls > 0 {
+		getAvgMs = float64(s.getLatencySumNs.Load()) / float64(getCalls) / 1e6
 	}
 	return StatsSnapshot{
 		ListedTotal:          s.listedTotal.Load(),
@@ -67,6 +85,8 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		ListCalls:            calls,
 		ListAvgLatencyMs:     avgMs,
 		ListTotalDurationSec: s.listTotalDuration.Seconds(),
+		GetCalls:             getCalls,
+		GetAvgLatencyMs:      getAvgMs,
 		TotalDurationSec:     s.totalDuration.Seconds(),
 	}
 }
@@ -78,6 +98,10 @@ func (s *Stats) WriteToFile(path string, isCheck bool) error {
 	b = append(b, fmt.Sprintf("list_calls: %d\n", snap.ListCalls)...)
 	b = append(b, fmt.Sprintf("list_avg_latency_ms: %.2f\n", snap.ListAvgLatencyMs)...)
 	b = append(b, fmt.Sprintf("list_total_duration_sec: %.2f\n", snap.ListTotalDurationSec)...)
+	if isCheck {
+		b = append(b, fmt.Sprintf("get_calls: %d\n", snap.GetCalls)...)
+		b = append(b, fmt.Sprintf("get_avg_latency_ms: %.2f\n", snap.GetAvgLatencyMs)...)
+	}
 	b = append(b, fmt.Sprintf("total_duration_sec: %.2f\n", snap.TotalDurationSec)...)
 	if isCheck {
 		b = append(b, fmt.Sprintf("multipart: %d\n", snap.Multipart)...)
@@ -97,6 +121,7 @@ func (s *Stats) PrintSummary(isCheck bool) {
 	fmt.Printf("list_calls: %d avg_latency_ms: %.2f list_total_sec: %.2f total_sec: %.2f\n",
 		snap.ListCalls, snap.ListAvgLatencyMs, snap.ListTotalDurationSec, snap.TotalDurationSec)
 	if isCheck {
+		fmt.Printf("get_calls: %d avg_latency_ms: %.2f\n", snap.GetCalls, snap.GetAvgLatencyMs)
 		fmt.Printf("multipart: %d corrupted: %d list_failed: %d check_failed: %d\n",
 			snap.Multipart, snap.Corrupted, snap.ListFailed, snap.CheckFailed)
 	} else {

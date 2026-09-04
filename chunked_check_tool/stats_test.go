@@ -18,6 +18,8 @@ func TestStatsIncrAndSnapshot(t *testing.T) {
 	s.IncrCheckFailed()
 	s.AddListCall(2 * time.Millisecond)
 	s.AddListCall(4 * time.Millisecond)
+	s.AddGetCall(10 * time.Millisecond)
+	s.AddGetCall(20 * time.Millisecond)
 	s.SetListDuration(10 * time.Second)
 	s.SetTotalDuration(15 * time.Second)
 
@@ -33,6 +35,12 @@ func TestStatsIncrAndSnapshot(t *testing.T) {
 	}
 	if snap.ListAvgLatencyMs != 3.0 {
 		t.Errorf("avg latency=%v want 3.0", snap.ListAvgLatencyMs)
+	}
+	if snap.GetCalls != 2 {
+		t.Errorf("getcalls=%d want 2", snap.GetCalls)
+	}
+	if snap.GetAvgLatencyMs != 15.0 {
+		t.Errorf("get avg latency=%v want 15.0", snap.GetAvgLatencyMs)
 	}
 	if snap.ListTotalDurationSec != 10.0 {
 		t.Errorf("list duration=%v want 10.0", snap.ListTotalDurationSec)
@@ -54,7 +62,7 @@ func TestStatsWriteFile(t *testing.T) {
 	}
 	data, _ := os.ReadFile(path)
 	content := string(data)
-	for _, key := range []string{"total_objects:", "list_calls:", "list_avg_latency_ms:", "list_total_duration_sec:", "total_duration_sec:", "multipart:", "corrupted:"} {
+	for _, key := range []string{"total_objects:", "list_calls:", "list_avg_latency_ms:", "list_total_duration_sec:", "get_calls:", "get_avg_latency_ms:", "total_duration_sec:", "multipart:", "corrupted:"} {
 		if !strings.Contains(content, key) {
 			t.Errorf("missing %q in:\n%s", key, content)
 		}

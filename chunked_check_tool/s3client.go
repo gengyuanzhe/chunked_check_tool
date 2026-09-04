@@ -247,8 +247,16 @@ func (c *S3Client) rebuild() bool {
 }
 
 // RangeGet returns the first 128 bytes of an object, used to inspect the
-// chunked-upload streaming signature header.
+// chunked-upload streaming signature header. The call is timed once for
+// stats.AddGetCall — covers the initial attempt plus any node-fault retry,
+// so getCalls == per-object GET count.
 func (c *S3Client) RangeGet(ctx context.Context, key string) ([]byte, error) {
+	start := time.Now()
+	defer func() {
+		if c.stats != nil {
+			c.stats.AddGetCall(time.Since(start))
+		}
+	}()
 	body, err := c.rangeGetOnce(ctx, key)
 	if err != nil && c.pool != nil && isNodeFaultErr(err) {
 		c.pool.MarkFailed(c.nodeIdx)
