@@ -383,7 +383,7 @@ func main() {
 			Region:       "us-east-1",
 			Secure:       false, // HTTP only
 			Transport:    transport,
-			BucketLookup: minio.BucketLookupAuto,
+			BucketLookup: minio.BucketLookupPath,
 		})
 		if err != nil {
 			log.Fatalf("minio client %s: %v", ep, err)
