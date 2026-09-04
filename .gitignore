@@ -1,4 +1,5 @@
 .idea/
 .superpowers/
 *.out
-chunked_check_tool
+/chunked_check_tool/chunked_check_tool
+/list_only/list_only
