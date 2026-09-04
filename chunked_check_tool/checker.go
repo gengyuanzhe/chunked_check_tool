@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"regexp"
 
 	"github.com/minio/minio-go/v7"
@@ -32,17 +31,16 @@ func extractHTTPStatusCode(err error) int {
 	return 0
 }
 
-// formatErrChain renders err as a single-line chain string for
-// check_failed.log. minio.ErrorResponse.Error() returns only the Message
-// field, which hides the S3 error Code (e.g. "InvalidRange") — so we
-// special-case it to surface Code, StatusCode, and Message together before
-// falling back to %+v for everything else.
-func formatErrChain(err error) string {
+// extractS3Code pulls the S3 error Code string (e.g. "InvalidRange",
+// "NoSuchKey") off err. Returns "" when err is not a minio.ErrorResponse.
+// Distinct from the HTTP status code — the S3 Code carries semantic info
+// that HTTP status doesn't (e.g. 404 could be NoSuchKey or NoSuchBucket).
+func extractS3Code(err error) string {
 	var er minio.ErrorResponse
 	if errors.As(err, &er) {
-		return fmt.Sprintf("s3_code=%s http=%d msg=%q | %v", er.Code, er.StatusCode, er.Message, err)
+		return er.Code
 	}
-	return fmt.Sprintf("%+v", err)
+	return ""
 }
 
 // isNormalETag reports whether etag is a normal (single-part) S3 ETag:
@@ -106,7 +104,7 @@ func (c *Checker) Handle(obj ObjectInfo) {
 	body, err := c.worker.RangeGet(context.Background(), obj.Key)
 	if err != nil {
 		c.out.WriteCheckFailed(obj.Key, err.Error())
-		c.out.WriteCheckFailedLog(obj.Key, extractHTTPStatusCode(err), formatErrChain(err))
+		c.out.WriteCheckFailedLog(obj.Key, extractHTTPStatusCode(err), extractS3Code(err), err)
 		c.stats.IncrCheckFailed()
 		return
 	}

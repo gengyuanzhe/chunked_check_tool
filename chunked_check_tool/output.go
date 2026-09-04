@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,7 +12,7 @@ import (
 type Entry struct {
 	Key  string
 	Err  string
-	Code int // HTTP status code for check_failed.log; 0 means N/A
+	Code int // HTTP status code, kept for future use; check_failed.log no longer reads it (slog carries fields)
 }
 
 type Output struct {
@@ -20,8 +21,9 @@ type Output struct {
 	multipartCh      chan string
 	listFailedCh     chan Entry
 	checkFailedCh    chan Entry
-	checkFailedLogCh chan Entry
 	successCh        chan string
+	checkLogger      *slog.Logger
+	checkLogFile     *os.File
 	corruptedEnabled bool
 	multipartEnabled bool
 	checkEnabled     bool
@@ -40,7 +42,6 @@ func NewOutput(cfg *Config) (*Output, error) {
 		multipartCh:      make(chan string, 1024),
 		listFailedCh:     make(chan Entry, 1024),
 		checkFailedCh:    make(chan Entry, 1024),
-		checkFailedLogCh: make(chan Entry, 1024),
 		successCh:        make(chan string, 1024),
 		corruptedEnabled: cfg.IsCheck,
 		multipartEnabled: cfg.IsCheck,
@@ -112,34 +113,22 @@ func (o *Output) openAndStart(name string, ch interface{}, isEntry bool) error {
 	return nil
 }
 
-// openCheckFailedLog opens check_failed.log and starts a writer that emits
-// one line per Entry as "key | status_code | err_chain". status_code is
-// "N/A" when Entry.Code is 0 (non-HTTP error like context.DeadlineExceeded).
+// openCheckFailedLog opens check_failed.log and wires it to a *slog.Logger
+// with the stdlib text handler. Each WriteCheckFailedLog call becomes one
+// structured log record:
+//
+//	time=... level=ERROR msg="check failed" key=... http_code=... s3_code=... err=...
+//
+// slog is concurrency-safe, so we drop the channel + writer goroutine that
+// the .txt files still use.
 func (o *Output) openCheckFailedLog() error {
 	f, err := os.OpenFile(filepath.Join(o.dir, "check_failed.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return fmt.Errorf("open check_failed.log: %w", err)
 	}
+	o.checkLogFile = f
 	o.files = append(o.files, f)
-	w := bufio.NewWriterSize(f, 64*1024)
-
-	o.wg.Add(1)
-	go func() {
-		defer o.wg.Done()
-		for e := range o.checkFailedLogCh {
-			w.WriteString(e.Key)
-			w.WriteString(" | ")
-			if e.Code > 0 {
-				fmt.Fprintf(w, "%d", e.Code)
-			} else {
-				w.WriteString("N/A")
-			}
-			w.WriteString(" | ")
-			w.WriteString(e.Err)
-			w.WriteByte('\n')
-		}
-		w.Flush()
-	}()
+	o.checkLogger = slog.New(slog.NewTextHandler(f, nil))
 	return nil
 }
 
@@ -159,10 +148,21 @@ func (o *Output) WriteCheckFailed(key, errStr string) {
 		o.checkFailedCh <- Entry{Key: key, Err: errStr}
 	}
 }
-func (o *Output) WriteCheckFailedLog(key string, statusCode int, errChain string) {
-	if o.checkEnabled {
-		o.checkFailedLogCh <- Entry{Key: key, Code: statusCode, Err: errChain}
+func (o *Output) WriteCheckFailedLog(key string, statusCode int, s3Code string, err error) {
+	if !o.checkEnabled || o.checkLogger == nil {
+		return
 	}
+	attrs := []any{slog.String("key", key)}
+	if statusCode > 0 {
+		attrs = append(attrs, slog.Int("http_code", statusCode))
+	} else {
+		attrs = append(attrs, slog.String("http_code", "N/A"))
+	}
+	if s3Code != "" {
+		attrs = append(attrs, slog.String("s3_code", s3Code))
+	}
+	attrs = append(attrs, slog.Any("err", err))
+	o.checkLogger.Error("check failed", attrs...)
 }
 func (o *Output) WriteSuccess(key string) {
 	if o.successEnabled {
@@ -184,7 +184,6 @@ func (o *Output) Close() error {
 	}
 	if o.checkEnabled {
 		close(o.checkFailedCh)
-		close(o.checkFailedLogCh)
 	}
 	if o.successEnabled {
 		close(o.successCh)

@@ -159,24 +159,23 @@ func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 		t.Errorf("check_failed.txt line = %q, want prefix %q", string(cfBytes), "path/obj ")
 	}
 
-	// check_failed.log carries structured fields: key | status_code | chain.
+	// check_failed.log is now slog text-handler output. Assert presence of
+	// structured fields rather than a fixed column order.
 	logBytes, err := os.ReadFile(filepath.Join(dir, "check_failed.log"))
 	if err != nil {
 		t.Fatalf("read check_failed.log: %v", err)
 	}
-	line := strings.TrimRight(string(logBytes), "\n")
-	parts := strings.SplitN(line, " | ", 3)
-	if len(parts) != 3 {
-		t.Fatalf("check_failed.log line = %q, want 3 | -separated fields", line)
-	}
-	if parts[0] != "path/obj" {
-		t.Errorf("key field = %q, want %q", parts[0], "path/obj")
-	}
-	if parts[1] != "416" {
-		t.Errorf("status_code field = %q, want %q", parts[1], "416")
-	}
-	if !strings.Contains(parts[2], "InvalidRange") {
-		t.Errorf("err_chain field = %q, want it to contain %q", parts[2], "InvalidRange")
+	log := string(logBytes)
+	for _, want := range []string{
+		`level=ERROR`,
+		`msg="check failed"`,
+		`key=path/obj`,
+		`http_code=416`,
+		`s3_code=InvalidRange`,
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("check_failed.log missing %q\nfull log:\n%s", want, log)
+		}
 	}
 }
 
