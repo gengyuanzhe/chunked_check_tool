@@ -365,12 +365,23 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
+	maxConns := cfg.Concurrency
+	if maxConns < 64 {
+		maxConns = 64
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = maxConns * len(cfg.Endpoints)
+	transport.MaxIdleConnsPerHost = maxConns
+	transport.MaxConnsPerHost = 0
+	transport.IdleConnTimeout = 90 * time.Second
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+
 	clients := make([]*minio.Client, 0, len(cfg.Endpoints))
 	for _, ep := range cfg.Endpoints {
 		c, err := minio.New(ep, &minio.Options{
 			Creds:        credentials.NewStaticV4(cfg.AK, cfg.SK, ""),
 			Secure:       false, // HTTP only
-			Transport:    &http.Transport{MaxIdleConnsPerHost: 32, IdleConnTimeout: 90 * time.Second, TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+			Transport:    transport,
 			BucketLookup: minio.BucketLookupAuto,
 		})
 		if err != nil {
