@@ -250,6 +250,12 @@ func ensureTrailingSlash(prefix string) string {
 	return prefix + "/"
 }
 
+// listFetchOwner controls the fetch-owner query param sent to S3 in iter
+// mode. minio-go defaults fetchOwner to true when FetchOwner is nil, which
+// forces the server to return owner info per object. Setting it to false
+// matches test_list_sub and avoids the extra per-object work.
+var listFetchOwner = false
+
 // runIter enumerates the tree using minio's high-level ListObjectsIter
 // channel API (Recursive: false = delimiter "/"). Unlike listPageV1,
 // this does NOT manually handle marker pagination — minio-go paginates
@@ -284,8 +290,9 @@ func runIter(ctx context.Context, li *lister, cfg *Config) {
 		var subdirs []string
 		objectCnt := 0
 		for obj := range client.ListObjectsIter(ctx, li.bucket, minio.ListObjectsOptions{
-			Prefix:    prefix,
-			Recursive: false,
+			Prefix:     prefix,
+			Recursive:  false,
+			FetchOwner: &listFetchOwner,
 		}) {
 			if obj.Err != nil {
 				log.Printf("list %q: %v", prefix, obj.Err)
