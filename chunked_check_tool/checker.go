@@ -62,6 +62,18 @@ func (c *Checker) Handle(obj ObjectInfo) {
 		return
 	}
 
+	// Size=0 objects cannot be RangeGet'd (S3 returns 416 Range Not
+	// Satisfiable since the requested byte range doesn't overlap with
+	// an empty body). An empty body also cannot contain a chunked-upload
+	// signature, so the corruption check is inconclusive — treat as
+	// normal.
+	if obj.Size == 0 {
+		if c.successLog {
+			c.out.WriteSuccess(obj.Key)
+		}
+		return
+	}
+
 	body, err := c.worker.RangeGet(context.Background(), obj.Key)
 	if err != nil {
 		c.out.WriteCheckFailed(obj.Key, err.Error())

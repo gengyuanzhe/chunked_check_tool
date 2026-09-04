@@ -17,6 +17,7 @@ import (
 type ObjectInfo struct {
 	Key  string
 	ETag string
+	Size int64
 }
 
 // trimETagQuotes strips a single pair of surrounding double quotes that S3
@@ -142,7 +143,7 @@ func (c *S3Client) ListPage(ctx context.Context, prefix, startAfter, continuatio
 	}
 	objs := make([]ObjectInfo, 0, len(result.contents))
 	for _, o := range result.contents {
-		objs = append(objs, ObjectInfo{Key: o.Key, ETag: trimETagQuotes(o.ETag)})
+		objs = append(objs, ObjectInfo{Key: o.Key, ETag: trimETagQuotes(o.ETag), Size: o.Size})
 	}
 	prefixes := make([]string, 0, len(result.commonPrefixes))
 	for _, cp := range result.commonPrefixes {
