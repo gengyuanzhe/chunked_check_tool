@@ -56,6 +56,33 @@ progress_interval: 100000
 | `is_success_log` | `false` | `true` 时把正常对象 key 写入 `success_objects.log` |
 | `progress_interval` | `100000` | stdout 进度打印阈值（约） |
 
+### 配置示例
+
+#### 启用 Mode 3（递归 + 信号量）
+
+```yaml
+list_type: 3
+list_concurrency: 32      # 信号量容量，同时进行的 ListPage 调用数上限
+```
+
+适用：对象树深或不规则、希望并发度严格受控于信号量而非固定 worker 数的场景。Mode 2 的固定 worker 池在树形不规则时可能饿死（树宽 < worker 数时部分 worker 空闲）或过载（子目录集中爆发时），Mode 3 用递归 + 信号量自动随树形调节并发，每棵子树按需抢占 slot。`-nextmarker` 在此模式被忽略。
+
+#### 切换到 V1 ListObjects API
+
+```yaml
+list_api_version: 1
+```
+
+适用：目标 S3 实现不支持 ListObjectsV2（某些旧版 MinIO 或自研存储），或 V2 行为异常时。V1 用 marker（最后一个返回的 key，delimited 时由 S3 返回 `NextMarker`）分页；V2 用 continuation token（服务器返回的不透明游标）。两条路径对 caller 透明，切换只需改这一个字段，Mode 1/2/3 均可搭配 V1 或 V2。
+
+#### 组合：Mode 3 + V1
+
+```yaml
+list_type: 3
+list_api_version: 1
+list_concurrency: 32
+```
+
 ## 运行
 
 ```bash
