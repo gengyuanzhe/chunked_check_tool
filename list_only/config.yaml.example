@@ -1,0 +1,9 @@
+endpoints:
+  - 10.0.0.1:9000
+  - 10.0.0.2:9000
+ak: <access-key>
+sk: <secret-key>
+bucket: mybucket
+prefix: ""
+mode: bfs        # bfs 或 walk
+concurrency: 32
