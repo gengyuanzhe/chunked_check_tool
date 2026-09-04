@@ -3,7 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/minio/minio-go/v7"
 )
 
 func TestIsNormalETag(t *testing.T) {
@@ -128,6 +133,52 @@ func TestCheckerHandleEmptyObjectSkipsRangeGet(t *testing.T) {
 }
 
 var errFake416 = errors.New("416 Range Not Satisfiable")
+
+func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true}
+	out, _ := NewOutput(cfg)
+	s := NewStats()
+	worker := &FakeS3{Err: minio.ErrorResponse{
+		Code:       "InvalidRange",
+		Message:    "The requested range is not satisfiable",
+		StatusCode: 416,
+	}}
+	c := NewChecker(worker, out, s, false)
+	c.Handle(ObjectInfo{Key: "path/obj", ETag: "0123456789abcdef0123456789abcdef", Size: 1})
+	if err := out.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// check_failed.txt keeps the original "key err" format.
+	cfBytes, err := os.ReadFile(filepath.Join(dir, "check_failed.txt"))
+	if err != nil {
+		t.Fatalf("read check_failed.txt: %v", err)
+	}
+	if !strings.HasPrefix(string(cfBytes), "path/obj ") {
+		t.Errorf("check_failed.txt line = %q, want prefix %q", string(cfBytes), "path/obj ")
+	}
+
+	// check_failed.log carries structured fields: key | status_code | chain.
+	logBytes, err := os.ReadFile(filepath.Join(dir, "check_failed.log"))
+	if err != nil {
+		t.Fatalf("read check_failed.log: %v", err)
+	}
+	line := strings.TrimRight(string(logBytes), "\n")
+	parts := strings.SplitN(line, " | ", 3)
+	if len(parts) != 3 {
+		t.Fatalf("check_failed.log line = %q, want 3 | -separated fields", line)
+	}
+	if parts[0] != "path/obj" {
+		t.Errorf("key field = %q, want %q", parts[0], "path/obj")
+	}
+	if parts[1] != "416" {
+		t.Errorf("status_code field = %q, want %q", parts[1], "416")
+	}
+	if !strings.Contains(parts[2], "InvalidRange") {
+		t.Errorf("err_chain field = %q, want it to contain %q", parts[2], "InvalidRange")
+	}
+}
 
 // helper: track RangeGet calls
 type callTrackingS3 struct {

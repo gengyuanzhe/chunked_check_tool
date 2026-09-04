@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"regexp"
+
+	"github.com/minio/minio-go/v7"
 )
 
 // chunkSigRe matches the streaming chunked-upload signature header that S3
@@ -15,6 +19,31 @@ import (
 // exactly 64 lowercase or uppercase hex chars. The line terminator is \r\n
 // or \n — both occur in practice depending on the client.
 var chunkSigRe = regexp.MustCompile(`^[0-9a-fA-F]+;chunk-signature=[0-9a-fA-F]{64}[\r\n]`)
+
+// extractHTTPStatusCode pulls the HTTP status code off err if it wraps a
+// minio.ErrorResponse. Returns 0 when err carries no HTTP status (e.g.
+// context.DeadlineExceeded, net.OpError) — the caller writes "N/A" in that
+// case.
+func extractHTTPStatusCode(err error) int {
+	var er minio.ErrorResponse
+	if errors.As(err, &er) {
+		return er.StatusCode
+	}
+	return 0
+}
+
+// formatErrChain renders err as a single-line chain string for
+// check_failed.log. minio.ErrorResponse.Error() returns only the Message
+// field, which hides the S3 error Code (e.g. "InvalidRange") — so we
+// special-case it to surface Code, StatusCode, and Message together before
+// falling back to %+v for everything else.
+func formatErrChain(err error) string {
+	var er minio.ErrorResponse
+	if errors.As(err, &er) {
+		return fmt.Sprintf("s3_code=%s http=%d msg=%q | %v", er.Code, er.StatusCode, er.Message, err)
+	}
+	return fmt.Sprintf("%+v", err)
+}
 
 // isNormalETag reports whether etag is a normal (single-part) S3 ETag:
 // exactly 32 lowercase hex characters. Anything else — uppercase hex,
@@ -77,6 +106,7 @@ func (c *Checker) Handle(obj ObjectInfo) {
 	body, err := c.worker.RangeGet(context.Background(), obj.Key)
 	if err != nil {
 		c.out.WriteCheckFailed(obj.Key, err.Error())
+		c.out.WriteCheckFailedLog(obj.Key, extractHTTPStatusCode(err), formatErrChain(err))
 		c.stats.IncrCheckFailed()
 		return
 	}
