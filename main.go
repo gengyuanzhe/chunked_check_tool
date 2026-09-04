@@ -94,14 +94,19 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 	}
 
 	// Spawn list workers. They block on the queue until seeds arrive.
+	// Mode 3 skips this pool — it drives enumeration via runRecursiveWalk
+	// (see seeding section below), which caps concurrency with a semaphore
+	// instead of a fixed worker count.
 	var listWg sync.WaitGroup
 	listStart := time.Now()
-	for i := 0; i < cfg.ListConcurrency; i++ {
-		listWg.Add(1)
-		workerS3 := newWorker(pool, i, cfg, bucket, stats)
-		lc := &localCounter{interval: cfg.ProgressInterval, printer: printer}
-		onObject := func() { lc.incr(stats, "listed") }
-		go lister.Run(ctx, &listWg, objCh, i, workerS3, onObject)
+	if cfg.ListType != 3 {
+		for i := 0; i < cfg.ListConcurrency; i++ {
+			listWg.Add(1)
+			workerS3 := newWorker(pool, i, cfg, bucket, stats)
+			lc := &localCounter{interval: cfg.ProgressInterval, printer: printer}
+			onObject := func() { lc.incr(stats, "listed") }
+			go lister.Run(ctx, &listWg, objCh, i, workerS3, onObject)
+		}
 	}
 
 	// Seeding.
@@ -156,6 +161,17 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 			}
 			continuationToken = next
 		}
+	} else if cfg.ListType == 3 {
+		// Mode 3: recursive semaphore-bounded walk from the root. No queue,
+		// no list worker pool — one goroutine drives the walk and closes
+		// objCh when done. -nextmarker is ignored (same limitation as Mode 2).
+		walkS3 := newWorker(pool, cfg.ListConcurrency, cfg, bucket, stats)
+		go func() {
+			runRecursiveWalk(ctx, walkS3, prefix, objCh, out, stats, cfg, nil)
+			close(objCh)
+			stats.SetListDuration(time.Since(listStart))
+		}()
+		seeded = true
 	} else {
 		// Mode 2: ignore -nextmarker (documented limitation).
 		lister.Seed(prefix)
@@ -168,12 +184,15 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 		q.Close()
 	}
 
-	// Close objCh once all list workers are done.
-	go func() {
-		listWg.Wait()
-		close(objCh)
-		stats.SetListDuration(time.Since(listStart))
-	}()
+	// Close objCh once all list workers are done. Mode 3 closes objCh
+	// itself in the walk goroutine above, so skip this branch.
+	if cfg.ListType != 3 {
+		go func() {
+			listWg.Wait()
+			close(objCh)
+			stats.SetListDuration(time.Since(listStart))
+		}()
+	}
 
 	if cfg.IsCheck {
 		checkWg.Wait()

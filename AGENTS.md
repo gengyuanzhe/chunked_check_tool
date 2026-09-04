@@ -28,8 +28,9 @@
 | `main.go` | flag 解析、`signal.NotifyContext`（SIGINT/SIGTERM）、`run` 编排、Mode 1 根列举分页、worker 启停、stats 写盘 |
 | `config.go` | `Config` 结构体 + `LoadConfig`（YAML，带默认值） |
 | `nodepool.go` | `NodePool`：轮询 `Assign`、`MarkFailed`、`URL`、`Endpoint`（故障隔离，全局共享 failed 集） |
-| `s3client.go` | `S3API` 接口、`S3Client`（包装 minio.Core + minio.Client）、`FakeS3`/`scriptedS3`（测试用）、节点故障重试一次 |
+| `s3client.go` | `S3API` 接口、`S3Client`（`minioListAPI` 接口包装 minio.Core + minio.Client，按 `cfg.ListAPIVersion` 分派 V1/V2）、`FakeS3`/`scriptedS3`（测试用）、节点故障重试一次 |
 | `lister.go` | `Lister`（无 `s3` 字段；`Run`/`processPrefix` 接 `s3` 参数）、无界队列 BFS、`inflight` atomic 计数 |
+| `walker.go` | `runRecursiveWalk`：Mode 3 信号量递归列举，`sync.WaitGroup` 终止，不用 queue/inflight |
 | `checker.go` | `Checker`、`isNormalETag`（严格 32 位小写 hex）、`chunkSigRe` |
 | `output.go` | 5 channel + 5 writer goroutine、`bufio.Writer` 64KB、append 模式、`<key>\|<etag>` 多段格式 |
 | `queue.go` | 无界队列（slice + mutex + cond），ctx-aware 阻塞 Pop |
@@ -58,6 +59,10 @@
 
 10. **性能优先但可读**：HTTP keep-alive（minio-go 自带连接池，不要自建）、`bufio.Writer` 64KB、合理 channel 容量、避免 per-obj 分配。**但**任何"复杂难读"的优化（手写内存池、unsafe、lock-free 结构）需先向用户请求确认，不要直接写。见 `memory/performance-vs-readability.md`。
 
+11. **Mode 3 用 WaitGroup 终止**：`walker.go` 的 `runRecursiveWalk` 不用 queue、不用 inflight 计数；终止性靠 `sync.WaitGroup`。每个 `go walk(subprefix)` **前**必须 `wg.Add(1)`，否则 Wait 可能在 spawn 前归零、过早关闭 objCh。root 首个 `wg.Add(1)` 同理在 `go walk(prefix)` 前。objCh 由 main 中的 walk goroutine 在 `wg.Wait()` 返回后显式关闭。子树列举失败只写 `list_failed` 跳过该子树，不中止其他分支。
+
+12. **V1/V2 分页协议对 caller 透明**：`S3Client.listPageOnce` 按 `cfg.ListAPIVersion` 分派 `Core.ListObjects`（V1，marker 游标）或 `Core.ListObjectsV2`（V2，continuation token）。两条路径都归一化进 `listResult{contents, commonPrefixes, next}`，`next` 作为下一次 `ListPage` 的 `continuationToken` 参数回传。V1 无 delimiter 且 `IsTruncated=true` 但 `NextMarker` 为空时，回退到最后一个 Contents key 作 marker；有 delimiter 时 S3 返回 `NextMarker`。caller（lister/walker/main 根分页）只需把 `next` 喂回 `continuationToken`，不感知 V1/V2 差异。`S3Client.core` 是 `minioListAPI` 接口（非 `*minio.Core`）以支持测试注入。
+
 ## 5. CLI 与配置
 
 ### CLI flags
@@ -74,7 +79,8 @@
 | `endpoints` | 必填 | ip:port 列表，至少 1 个 |
 | `scheme` | `http` | `http` 或 `https`（后者跳过证书校验） |
 | `ak` / `sk` | 必填 | SigV4 静态凭证 |
-| `list_type` | `1` | 1=子目录+平铺 nextmarker；2=递归 BFS delimiter |
+| `list_type` | `1` | 1=子目录+平铺 nextmarker；2=递归 BFS delimiter；3=递归+信号量 |
+| `list_api_version` | `2` | 1=ListObjects V1（marker 分页）；2=ListObjectsV2（continuation token，默认） |
 | `list_concurrency` | `8` | 列举并发度 |
 | `check_concurrency` | `16` | 校验并发度 |
 | `output_dir` | `.` | 输出目录 |

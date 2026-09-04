@@ -127,12 +127,21 @@ type scriptedS3 struct {
 	pages map[string][]pageResult
 	calls int
 	mu    sync.Mutex
+	// errOn, when non-nil, makes ListPage return the mapped error for the
+	// given prefix instead of consulting pages. Used to exercise subtree
+	// failure isolation in walker tests.
+	errOn map[string]error
 }
 
 func (s *scriptedS3) ListPage(ctx context.Context, prefix, startAfter, continuationToken string, delim bool, maxKeys int) ([]ObjectInfo, []string, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
+	if s.errOn != nil {
+		if err, ok := s.errOn[prefix]; ok {
+			return nil, nil, "", err
+		}
+	}
 	pages, ok := s.pages[prefix]
 	if !ok || len(pages) == 0 {
 		return nil, nil, "", nil

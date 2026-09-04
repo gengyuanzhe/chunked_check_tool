@@ -13,6 +13,7 @@ type Config struct {
 	AK               string   `yaml:"ak"`
 	SK               string   `yaml:"sk"`
 	ListType         int      `yaml:"list_type"`
+	ListAPIVersion   int      `yaml:"list_api_version"`
 	ListConcurrency  int      `yaml:"list_concurrency"`
 	CheckConcurrency int      `yaml:"check_concurrency"`
 	OutputDir        string   `yaml:"output_dir"`
@@ -50,6 +51,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.ListType == 0 {
 		cfg.ListType = 1
+	}
+	if cfg.ListAPIVersion == 0 {
+		cfg.ListAPIVersion = 2
 	}
 	return &cfg, nil
 }

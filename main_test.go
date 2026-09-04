@@ -30,6 +30,7 @@ func TestRunEndToEnd_smoke(t *testing.T) {
 		"\nak: " + os.Getenv("S3_AK") +
 		"\nsk: " + os.Getenv("S3_SK") +
 		"\nlist_type: " + envOr("S3_LIST_TYPE", "2") +
+		"\nlist_api_version: " + envOr("S3_LIST_API_VERSION", "2") +
 		"\nlist_concurrency: 2\ncheck_concurrency: 2\noutput_dir: " + dir +
 		"\nis_check: true\nis_success_log: false\nprogress_interval: 1000\n"
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {

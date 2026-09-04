@@ -32,7 +32,8 @@ endpoints:
 scheme: http            # http 或 https（后者忽略证书校验）
 ak: <access-key>
 sk: <secret-key>
-list_type: 1            # 1=子目录+平铺 nextmarker, 2=递归 BFS delimiter
+list_type: 1            # 1=子目录+平铺 nextmarker, 2=递归 BFS delimiter, 3=递归+信号量
+list_api_version: 2     # 1=ListObjects V1 (marker 分页), 2=ListObjectsV2 (continuation token, 默认)
 list_concurrency: 8
 check_concurrency: 16
 output_dir: ./out
@@ -46,8 +47,9 @@ progress_interval: 100000
 | `endpoints` | 必填 | S3 节点 ip:port 列表，至少 1 个 |
 | `scheme` | `http` | `https` 时跳过 TLS 证书校验 |
 | `ak` / `sk` | 必填 | 访问凭证（SigV4 静态凭证） |
-| `list_type` | `1` | 1 或 2，见下方"列举模式" |
-| `list_concurrency` | `8` | 列举 worker 数 |
+| `list_type` | `1` | 1=子目录+平铺 nextmarker, 2=递归 BFS delimiter, 3=递归+信号量 |
+| `list_api_version` | `2` | 1=ListObjects V1（marker 分页），2=ListObjectsV2（continuation token，默认） |
+| `list_concurrency` | `8` | 列举 worker 数（Mode 3 为信号量容量） |
 | `check_concurrency` | `16` | 校验 worker 数 |
 | `output_dir` | `.` | 输出目录（自动创建） |
 | `is_check` | `true` | `false` 时只列举不校验，仅写 `stats.txt` |
@@ -89,6 +91,15 @@ progress_interval: 100000
 3. `inflight` atomic 计数器跟踪待处理任务；归零时关闭 objCh。
 
 适用：层级深、需要自动发现所有子前缀的场景。`-nextmarker` 在此模式被忽略。
+
+### Mode 3（`list_type: 3`，递归 + 信号量）
+
+1. 从根 prefix 开始，每个进行中的 walk goroutine 持有一个信号量 slot（容量 = `list_concurrency`）。
+2. 对当前 prefix 带 delimiter 翻页列举：对象发到 objCh，新 `CommonPrefixes` 各起一个 goroutine 递归 walk。
+3. 信号量保证同时进行的 ListPage 调用数 ≤ `list_concurrency`，无论树多深多宽。
+4. 所有 walk goroutine 退出时（`sync.WaitGroup` 归零）→ 关闭 objCh。`-nextmarker` 在此模式被忽略。
+
+适用：树深或不规则、希望并发度严格受控于信号量而非固定 worker 数的场景。Mode 2 的 worker 池在树形不规则时容易饿死或过载，Mode 3 用递归 + 信号量规避此问题。
 
 ## 输出文件
 

@@ -71,6 +71,16 @@ func NewMinioClient(endpoint, ak, sk string, secure bool) (*minio.Client, error)
 	})
 }
 
+// minioListAPI is the subset of *minio.Core that S3Client calls for
+// listing. Extracting it as an interface lets tests inject a fake to
+// verify the V1/V2 dispatch and cursor normalization without a live
+// endpoint. Both methods are defined on Core with value receivers, so
+// *minio.Core satisfies this interface.
+type minioListAPI interface {
+	ListObjectsV2(bucketName, prefix, startAfter, continuationToken, delimiter string, maxKeys int) (minio.ListBucketV2Result, error)
+	ListObjects(bucket, prefix, marker, delimiter string, maxKeys int) (minio.ListBucketResult, error)
+}
+
 // S3Client wraps minio.Core for ListPage (exposes CommonPrefixes, which the
 // higher-level minio.Client.ListObjects channel API does not) and minio.Client
 // for RangeGet.
@@ -83,7 +93,7 @@ func NewMinioClient(endpoint, ak, sk string, secure bool) (*minio.Client, error)
 // the caller records list_failed/check_failed. Each worker owns its own
 // S3Client so no synchronization is needed on the mutable fields.
 type S3Client struct {
-	core    *minio.Core
+	core    minioListAPI
 	client  *minio.Client
 	bucket  string
 	stats   *Stats
@@ -130,33 +140,89 @@ func (c *S3Client) ListPage(ctx context.Context, prefix, startAfter, continuatio
 	if err != nil {
 		return nil, nil, "", err
 	}
-	objs := make([]ObjectInfo, 0, len(result.Contents))
-	for _, o := range result.Contents {
+	objs := make([]ObjectInfo, 0, len(result.contents))
+	for _, o := range result.contents {
 		objs = append(objs, ObjectInfo{Key: o.Key, ETag: trimETagQuotes(o.ETag)})
 	}
-	prefixes := make([]string, 0, len(result.CommonPrefixes))
-	for _, cp := range result.CommonPrefixes {
+	prefixes := make([]string, 0, len(result.commonPrefixes))
+	for _, cp := range result.commonPrefixes {
 		prefixes = append(prefixes, cp.Prefix)
 	}
-	// Use the S3-supplied NextContinuationToken rather than the last-key
-	// heuristic. The continuation token is the only cursor that correctly
-	// handles CommonPrefixes-only truncated pages (Contents=[] + non-empty
-	// CommonPrefixes + IsTruncated=true).
-	next := ""
-	if result.IsTruncated {
-		next = result.NextContinuationToken
-	}
-	return objs, prefixes, next, nil
+	return objs, prefixes, result.next, nil
 }
 
-// listPageOnce is a single minio call with timing recorded against stats.
-func (c *S3Client) listPageOnce(prefix, startAfter, continuationToken, delimiter string, maxKeys int) (minio.ListBucketV2Result, error) {
+// listResult is the normalized output of one LIST call, independent of
+// whether V1 or V2 was used. `next` is the cursor to feed back into the
+// next call's continuationToken parameter (V2: NextContinuationToken;
+// V1: NextMarker or last Contents key when no delimiter was used).
+type listResult struct {
+	contents       []minio.ObjectInfo
+	commonPrefixes []minio.CommonPrefix
+	next           string
+}
+
+// listPageOnce issues a single LIST request and records its latency against
+// stats. It dispatches on cfg.ListAPIVersion: V1 uses Core.ListObjects with
+// a marker cursor; V2 (default) uses Core.ListObjectsV2 with a continuation
+// token. Both paths normalize to a listResult so ListPage is agnostic to
+// the wire protocol.
+//
+// V1 cursor semantics: the first page passes startAfter (if any) as the
+// marker; subsequent pages pass the previous call's returned `next` value
+// (which is NextMarker, or the last Contents key when NextMarker is empty).
+// The caller always feeds `next` back via the continuationToken slot, so
+// listPageOnce maps continuationToken → marker when ListAPIVersion=1.
+func (c *S3Client) listPageOnce(prefix, startAfter, continuationToken, delimiter string, maxKeys int) (listResult, error) {
 	start := time.Now()
-	result, err := c.core.ListObjectsV2(c.bucket, prefix, startAfter, continuationToken, delimiter, maxKeys)
+	if c.cfg != nil && c.cfg.ListAPIVersion == 1 {
+		marker := startAfter
+		if continuationToken != "" {
+			marker = continuationToken
+		}
+		r, err := c.core.ListObjects(c.bucket, prefix, marker, delimiter, maxKeys)
+		if c.stats != nil {
+			c.stats.AddListCall(time.Since(start))
+		}
+		if err != nil {
+			return listResult{}, err
+		}
+		next := ""
+		if r.IsTruncated {
+			// S3 populates NextMarker only when a delimiter is set. With no
+			// delimiter the caller must use the last returned key as the
+			// next marker. If Contents is empty and IsTruncated is true
+			// (theoretically possible with delimiter-only pages), we fall
+			// back to "" — the caller stops, matching V2's behavior when
+			// NextContinuationToken is empty on a truncated response.
+			switch {
+			case r.NextMarker != "":
+				next = r.NextMarker
+			case len(r.Contents) > 0:
+				next = r.Contents[len(r.Contents)-1].Key
+			}
+		}
+		return listResult{
+			contents:       r.Contents,
+			commonPrefixes: r.CommonPrefixes,
+			next:           next,
+		}, nil
+	}
+	r, err := c.core.ListObjectsV2(c.bucket, prefix, startAfter, continuationToken, delimiter, maxKeys)
 	if c.stats != nil {
 		c.stats.AddListCall(time.Since(start))
 	}
-	return result, err
+	if err != nil {
+		return listResult{}, err
+	}
+	next := ""
+	if r.IsTruncated {
+		next = r.NextContinuationToken
+	}
+	return listResult{
+		contents:       r.Contents,
+		commonPrefixes: r.CommonPrefixes,
+		next:           next,
+	}, nil
 }
 
 // rebuild swaps the bound minio client to the next alive node. Returns true
