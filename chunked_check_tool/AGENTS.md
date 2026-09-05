@@ -154,6 +154,90 @@ go test -run TestChecker -v ./...
 
 Go 1.27 二进制路径：`/Users/gengyuanzhe/sdk/go1.27.1/bin/go`（若不在 PATH，`export PATH=$PATH:/Users/gengyuanzhe/sdk/go1.27.1/bin`）。
 
+### 7.1 端到端冒烟（本地 minio + 真实多段对象）
+
+用于改动后回归：验证 list/check/分段检查/owner 分桶/`result_line_format`/run.log 全链路。整个流程在 `/tmp/chunked-e2e/` 下，**非仓库内容**，可随改随丢。
+
+**前置**：`/opt/homebrew/bin/{minio,mc}` 已装。minio data dir 与 seed 脚本都放 `/tmp/chunked-e2e/`。
+
+```bash
+# 1. 启动 minio（后台，127.0.0.1:9100）
+mkdir -p /tmp/chunked-e2e/data
+MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin123 \
+  /opt/homebrew/bin/minio server /tmp/chunked-e2e/data \
+  --address 127.0.0.1:9100 > /tmp/chunked-e2e/minio.log 2>&1 &
+
+# 2. 配 mc alias + 建 bucket
+/opt/homebrew/bin/mc alias set local http://127.0.0.1:9100 minioadmin minioadmin123
+/opt/homebrew/bin/mc mb local/testbucket
+
+# 3. seed 5 个正常普通对象 + 1 个损坏普通对象（body 开头是 chunk-sig 头）
+mkdir -p /tmp/chunked-e2e/seed
+for i in 01 02 03 04 05; do
+  head -c 65536 /dev/urandom > /tmp/chunked-e2e/seed/file_${i}.bin
+done
+/opt/homebrew/bin/mc cp /tmp/chunked-e2e/seed/file_*.bin local/testbucket/data/2026/01/
+printf '1000;chunk-signature=0000000000000000000000000000000000000000000000000000000000000000\r\n' > /tmp/chunked-e2e/seed/corrupted.bin
+head -c 65536 /dev/urandom >> /tmp/chunked-e2e/seed/corrupted.bin
+/opt/homebrew/bin/mc cp /tmp/chunked-e2e/seed/corrupted.bin local/testbucket/corrupted/corrupted.bin
+
+# 4. seed 2 个多段对象（用 minio-go，partSize=5MiB 触发 multipart）
+#    mp/clean.bin   — 6MB 正常 body（ETag <hex>-2）
+#    mp/corrupt.bin — 首段开头 128 字节是 chunk-sig 头（ETag <hex>-2，分段检查命中）
+mkdir -p /tmp/chunked-e2e/mp-seed
+#    见 /tmp/chunked-e2e/mp-seed/main.go（仓库外 helper，用 minio-go v7）
+cd /tmp/chunked-e2e/mp-seed && go run .
+
+# 5. 写 cfg（is_check=true, is_multipart_check=true, segment_size=5242880）
+cat > /tmp/chunked-e2e/cfg.yaml <<'EOF'
+endpoints:
+  - 127.0.0.1:9100
+scheme: http
+ak: minioadmin
+sk: minioadmin123
+list_type: 2
+list_concurrency: 2
+check_concurrency: 4
+output_dir: /tmp/chunked-e2e/out
+is_check: true
+is_success_log: true
+is_multipart_check: true
+multipart_segment_size: 5242880
+is_multipart_success_log: true
+progress_interval: 2
+result_line_format: <bucket>|<key>
+EOF
+
+# 6. 编译并跑
+cd /Users/gengyuanzhe/code/S3/golang/chunked_check_tool/chunked_check_tool
+go build -o /tmp/chunked_check_tool .
+/tmp/chunked_check_tool -c /tmp/chunked-e2e/cfg.yaml -bkt testbucket
+```
+
+**期望结果**（testbucket 8 对象）：
+
+| 输出 | 内容 |
+|---|---|
+| `out/stats.txt` | `total_objects=8 ok_objects=5 corrupted_objects=1 ok_mp=1 corrupted_mp=1 list_failed=0 check_failed=0 multipart_check_failed=0` |
+| `out/minio/corrupted_objects.txt` | `testbucket\|corrupted/corrupted.bin` |
+| `out/minio/ok_objects.txt` | 5 行 `testbucket\|data/2026/01/file_0N.bin` |
+| `out/minio/corrupted_mp.txt` | `testbucket\|mp/corrupt.bin` |
+| `out/minio/ok_mp.txt` | `testbucket\|mp/clean.bin` |
+| `out/{list_failed,check_failed,multipart_check_failed}.txt` | 空 |
+| `out/run.log` | 含配置快照（ak/sk `***`）+ 进度行 + summary |
+
+`out/minio/` 路径名里的 `minio` 是 LIST 响应 Owner 字段（root 用户 → OwnerID=`minio`）；空 OwnerID 会落到 `_unknown/`。
+
+**断点续跑**：`output_dir` 是 append 模式，重跑会累加。想干净跑就换 `output_dir`（`sed 's#out#out2#'`）。
+
+**清场**（minio 后台进程 + /tmp 数据）：
+```bash
+pkill -f 'minio server.*127.0.0.1:9100'
+# /tmp/chunked-e2e 视情况删；权限系统可能拒绝 rm -rf，必要时用 rm 逐文件
+```
+
+**mp-seed helper**（`/tmp/chunked-e2e/mp-seed/main.go`，非仓库代码）：用 `github.com/minio/minio-go/v7` 上传两个 5MiB+ 对象触发 multipart，partSize 必须是 `5*1024*1024`（minio 最小 part size）。`mp/corrupt.bin` 的首段前 128 字节是 `1000;chunk-signature=...` 头，其余是 filler——分段检查在段 0 offset 0 命中。
+
 ## 8. 已知遗留项（改动时留意，非阻塞）
 
 来源：SDD ledger 的 deferred minors（见 `.superpowers/sdd/2026-09-03-chunked-check-tool/progress.md`）。

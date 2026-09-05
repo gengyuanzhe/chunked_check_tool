@@ -58,33 +58,35 @@ func main() {
 	}
 }
 
-// printConfig writes a config snapshot to w at startup. ak/sk are masked
-// so the run.log (which persists) doesn't leak credentials.
+// printConfig writes a config snapshot to w at startup. sk is masked so the
+// run.log (which persists) doesn't leak the secret; ak is shown in clear.
+// Each line is indented 4 spaces for readability against the progress/summary
+// lines that surround it in run.log.
 func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, startAfter, runLogPath string) {
 	fmt.Fprintf(w, "=== config ===\n")
-	fmt.Fprintf(w, "config: %s\n", cfgPath)
-	fmt.Fprintf(w, "bucket: %s\n", bucket)
-	fmt.Fprintf(w, "prefix: %s\n", orEmpty(prefix))
-	fmt.Fprintf(w, "nextmarker: %s\n", orEmpty(startAfter))
-	fmt.Fprintf(w, "endpoints: %s\n", strings.Join(cfg.Endpoints, ", "))
-	fmt.Fprintf(w, "scheme: %s\n", cfg.Scheme)
-	fmt.Fprintf(w, "ak: ***\n")
-	fmt.Fprintf(w, "sk: ***\n")
-	fmt.Fprintf(w, "list_type: %d\n", cfg.ListType)
-	fmt.Fprintf(w, "list_api_version: %d\n", cfg.ListAPIVersion)
-	fmt.Fprintf(w, "list_concurrency: %d\n", cfg.ListConcurrency)
-	fmt.Fprintf(w, "check_concurrency: %d\n", cfg.CheckConcurrency)
-	fmt.Fprintf(w, "output_dir: %s\n", cfg.OutputDir)
-	fmt.Fprintf(w, "is_check: %t\n", cfg.IsCheck)
-	fmt.Fprintf(w, "is_success_log: %t\n", cfg.IsSuccessLog)
-	fmt.Fprintf(w, "is_multipart_check: %t\n", cfg.IsMultipartCheck)
-	fmt.Fprintf(w, "multipart_segment_size: %d\n", cfg.MultipartSegmentSize)
-	fmt.Fprintf(w, "is_multipart_success_log: %t\n", cfg.IsMultipartSuccessLog)
-	fmt.Fprintf(w, "progress_interval: %d\n", cfg.ProgressInterval)
-	fmt.Fprintf(w, "obj_ch_capacity: %d\n", cfg.ObjChCapacity)
-	fmt.Fprintf(w, "output_ch_capacity: %d\n", cfg.OutputChCapacity)
-	fmt.Fprintf(w, "result_line_format: %s\n", cfg.ResultLineFormat)
-	fmt.Fprintf(w, "run_log: %s\n", runLogPath)
+	fmt.Fprintf(w, "    config: %s\n", cfgPath)
+	fmt.Fprintf(w, "    bucket: %s\n", bucket)
+	fmt.Fprintf(w, "    prefix: %s\n", orEmpty(prefix))
+	fmt.Fprintf(w, "    nextmarker: %s\n", orEmpty(startAfter))
+	fmt.Fprintf(w, "    endpoints: %s\n", strings.Join(cfg.Endpoints, ", "))
+	fmt.Fprintf(w, "    scheme: %s\n", cfg.Scheme)
+	fmt.Fprintf(w, "    ak: %s\n", cfg.AK)
+	fmt.Fprintf(w, "    sk: ***\n")
+	fmt.Fprintf(w, "    list_type: %d\n", cfg.ListType)
+	fmt.Fprintf(w, "    list_api_version: %d\n", cfg.ListAPIVersion)
+	fmt.Fprintf(w, "    list_concurrency: %d\n", cfg.ListConcurrency)
+	fmt.Fprintf(w, "    check_concurrency: %d\n", cfg.CheckConcurrency)
+	fmt.Fprintf(w, "    output_dir: %s\n", cfg.OutputDir)
+	fmt.Fprintf(w, "    is_check: %t\n", cfg.IsCheck)
+	fmt.Fprintf(w, "    is_success_log: %t\n", cfg.IsSuccessLog)
+	fmt.Fprintf(w, "    is_multipart_check: %t\n", cfg.IsMultipartCheck)
+	fmt.Fprintf(w, "    multipart_segment_size: %d\n", cfg.MultipartSegmentSize)
+	fmt.Fprintf(w, "    is_multipart_success_log: %t\n", cfg.IsMultipartSuccessLog)
+	fmt.Fprintf(w, "    progress_interval: %d\n", cfg.ProgressInterval)
+	fmt.Fprintf(w, "    obj_ch_capacity: %d\n", cfg.ObjChCapacity)
+	fmt.Fprintf(w, "    output_ch_capacity: %d\n", cfg.OutputChCapacity)
+	fmt.Fprintf(w, "    result_line_format: %s\n", cfg.ResultLineFormat)
+	fmt.Fprintf(w, "    run_log: %s\n", runLogPath)
 	fmt.Fprintf(w, "=== end config ===\n")
 }
 
