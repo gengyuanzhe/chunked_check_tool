@@ -163,3 +163,37 @@ func TestOutputListFailedLogStructured(t *testing.T) {
 		}
 	}
 }
+
+// TestOutputCorruptedMultipartFile verifies that when is_multipart_check is
+// on, the corrupted_multipart_objects.txt file is created and carries the
+// keys of multipart objects that failed the segment check. When the switch
+// is off, the file is not created.
+func TestOutputCorruptedMultipartFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, MultipartSegmentSize: 5 * 1024 * 1024}
+	o, _ := NewOutput(cfg)
+	o.WriteCorruptedMultipart("mp/k1")
+	if err := o.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "corrupted_multipart_objects.txt"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if line := strings.TrimSpace(string(data)); line != "mp/k1" {
+		t.Errorf("corrupted_multipart_objects.txt = %q, want %q", line, "mp/k1")
+	}
+}
+
+func TestOutputCorruptedMultipartSkippedWhenSwitchOff(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: false}
+	o, _ := NewOutput(cfg)
+	o.WriteCorruptedMultipart("mp/k1") // no-op
+	if err := o.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "corrupted_multipart_objects.txt")); !os.IsNotExist(err) {
+		t.Errorf("corrupted_multipart_objects.txt should not exist when switch off, got %v", err)
+	}
+}

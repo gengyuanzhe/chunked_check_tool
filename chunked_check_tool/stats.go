@@ -8,15 +8,16 @@ import (
 )
 
 type Stats struct {
-	listedTotal      atomic.Int64
-	multipartCount   atomic.Int64
-	corruptedCount   atomic.Int64
-	listFailedCount  atomic.Int64
-	checkFailedCount atomic.Int64
-	listCalls        atomic.Int64
-	listLatencySumNs atomic.Int64
-	getCalls         atomic.Int64
-	getLatencySumNs  atomic.Int64
+	listedTotal             atomic.Int64
+	multipartCount          atomic.Int64
+	corruptedCount          atomic.Int64
+	corruptedMultipartCount atomic.Int64
+	listFailedCount         atomic.Int64
+	checkFailedCount        atomic.Int64
+	listCalls               atomic.Int64
+	listLatencySumNs        atomic.Int64
+	getCalls                atomic.Int64
+	getLatencySumNs         atomic.Int64
 
 	listTotalDuration time.Duration
 	totalDuration     time.Duration
@@ -26,6 +27,7 @@ type StatsSnapshot struct {
 	ListedTotal          int64
 	Multipart            int64
 	Corrupted            int64
+	CorruptedMultipart   int64
 	ListFailed           int64
 	CheckFailed          int64
 	ListCalls            int64
@@ -40,10 +42,11 @@ func NewStats() *Stats {
 	return &Stats{}
 }
 
-func (s *Stats) IncrListed()     { s.listedTotal.Add(1) }
-func (s *Stats) IncrMultipart()  { s.multipartCount.Add(1) }
-func (s *Stats) IncrCorrupted()  { s.corruptedCount.Add(1) }
-func (s *Stats) IncrListFailed() { s.listFailedCount.Add(1) }
+func (s *Stats) IncrListed()             { s.listedTotal.Add(1) }
+func (s *Stats) IncrMultipart()          { s.multipartCount.Add(1) }
+func (s *Stats) IncrCorrupted()          { s.corruptedCount.Add(1) }
+func (s *Stats) IncrCorruptedMultipart() { s.corruptedMultipartCount.Add(1) }
+func (s *Stats) IncrListFailed()         { s.listFailedCount.Add(1) }
 func (s *Stats) IncrCheckFailed() {
 	s.checkFailedCount.Add(1)
 }
@@ -80,6 +83,7 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		ListedTotal:          s.listedTotal.Load(),
 		Multipart:            s.multipartCount.Load(),
 		Corrupted:            s.corruptedCount.Load(),
+		CorruptedMultipart:   s.corruptedMultipartCount.Load(),
 		ListFailed:           s.listFailedCount.Load(),
 		CheckFailed:          s.checkFailedCount.Load(),
 		ListCalls:            calls,
@@ -106,6 +110,7 @@ func (s *Stats) WriteToFile(path string, isCheck bool) error {
 	if isCheck {
 		b = append(b, fmt.Sprintf("multipart: %d\n", snap.Multipart)...)
 		b = append(b, fmt.Sprintf("corrupted: %d\n", snap.Corrupted)...)
+		b = append(b, fmt.Sprintf("corrupted_multipart: %d\n", snap.CorruptedMultipart)...)
 	}
 	b = append(b, fmt.Sprintf("list_failed: %d\n", snap.ListFailed)...)
 	if isCheck {
@@ -122,8 +127,8 @@ func (s *Stats) PrintSummary(isCheck bool) {
 		snap.ListCalls, snap.ListAvgLatencyMs, snap.ListTotalDurationSec, snap.TotalDurationSec)
 	if isCheck {
 		fmt.Printf("get_calls: %d avg_latency_ms: %.2f\n", snap.GetCalls, snap.GetAvgLatencyMs)
-		fmt.Printf("multipart: %d corrupted: %d list_failed: %d check_failed: %d\n",
-			snap.Multipart, snap.Corrupted, snap.ListFailed, snap.CheckFailed)
+		fmt.Printf("multipart: %d corrupted: %d corrupted_multipart: %d list_failed: %d check_failed: %d\n",
+			snap.Multipart, snap.Corrupted, snap.CorruptedMultipart, snap.ListFailed, snap.CheckFailed)
 	} else {
 		fmt.Printf("list_failed: %d\n", snap.ListFailed)
 	}

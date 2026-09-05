@@ -74,16 +74,16 @@ func isNormalETag(etag string) bool {
 // Checker classifies a single listed object: multipart (skip Range GET),
 // normal (Range GET 128 bytes + regex), corrupted, or check-failed.
 type Checker struct {
-	worker     S3API
-	out        *Output
-	stats      *Stats
-	successLog bool
+	worker S3API
+	out    *Output
+	stats  *Stats
+	cfg    *Config
 }
 
-// NewChecker builds a Checker. successLog controls whether normal (non-
-// corrupted) objects are written to the success log.
-func NewChecker(worker S3API, out *Output, stats *Stats, successLog bool) *Checker {
-	return &Checker{worker: worker, out: out, stats: stats, successLog: successLog}
+// NewChecker builds a Checker. cfg carries success-log toggle plus the
+// multipart-segment-check config (switch + segment size).
+func NewChecker(worker S3API, out *Output, stats *Stats, cfg *Config) *Checker {
+	return &Checker{worker: worker, out: out, stats: stats, cfg: cfg}
 }
 
 // Handle classifies obj. Every object that reaches Handle counts as
@@ -95,8 +95,15 @@ func (c *Checker) Handle(obj ObjectInfo) {
 	c.stats.IncrListed()
 
 	if !isNormalETag(obj.ETag) {
-		c.out.WriteMultipart(obj.ETag, obj.Key)
-		c.stats.IncrMultipart()
+		// Multipart object. If the multipart segment check is enabled,
+		// probe the first 128 bytes of each segment for the chunked-upload
+		// signature; any match means the multipart is corrupted.
+		if c.cfg.IsMultipartCheck && c.cfg.MultipartSegmentSize > 0 && obj.Size > 0 {
+			c.checkMultipartSegments(obj)
+		} else {
+			c.out.WriteMultipart(obj.ETag, obj.Key)
+			c.stats.IncrMultipart()
+		}
 		return
 	}
 
@@ -106,7 +113,7 @@ func (c *Checker) Handle(obj ObjectInfo) {
 	// signature, so the corruption check is inconclusive — treat as
 	// normal.
 	if obj.Size == 0 {
-		if c.successLog {
+		if c.cfg.IsSuccessLog {
 			c.out.WriteSuccess(obj.Key)
 		}
 		return
@@ -123,7 +130,37 @@ func (c *Checker) Handle(obj ObjectInfo) {
 	if chunkSigRe.Match(body) {
 		c.out.WriteCorrupted(obj.Key)
 		c.stats.IncrCorrupted()
-	} else if c.successLog {
+	} else if c.cfg.IsSuccessLog {
 		c.out.WriteSuccess(obj.Key)
 	}
+}
+
+// checkMultipartSegments probes the first 128 bytes of each segment of obj
+// (segments of cfg.MultipartSegmentSize bytes starting at offset 0, segSize,
+// 2*segSize, ...). If ANY segment's body matches the chunked-upload signature
+// regex, the object is flagged as corrupted multipart. If a segment RangeGet
+// returns an error, the object is flagged as check_failed (matching the
+// normal-object RangeGet error path). Otherwise the object is recorded as a
+// plain multipart.
+func (c *Checker) checkMultipartSegments(obj ObjectInfo) {
+	segSize := c.cfg.MultipartSegmentSize
+	numSegs := (obj.Size + segSize - 1) / segSize
+	for i := int64(0); i < numSegs; i++ {
+		offset := i * segSize
+		body, err := c.worker.RangeGetAt(context.Background(), obj.Key, offset, 128)
+		if err != nil {
+			c.out.WriteCheckFailed(obj.Key)
+			c.out.WriteCheckFailedLog(obj.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
+			c.stats.IncrCheckFailed()
+			return
+		}
+		if chunkSigRe.Match(body) {
+			c.out.WriteCorruptedMultipart(obj.Key)
+			c.stats.IncrCorruptedMultipart()
+			return
+		}
+	}
+	// No segment matched — record as a plain multipart.
+	c.out.WriteMultipart(obj.ETag, obj.Key)
+	c.stats.IncrMultipart()
 }

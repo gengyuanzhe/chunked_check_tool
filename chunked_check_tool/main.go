@@ -78,15 +78,16 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 	q := NewQueue()
 	lister := NewLister(q, out, stats, cfg)
 	printer.SetQueueSnapshotProvider(func() QueueSnapshot {
-		cor, mp, lf, cf, su := out.ChannelSnapshot()
+		cor, mp, cmp, lf, cf, su := out.ChannelSnapshot()
 		return QueueSnapshot{
-			Prefix:      q.Len(),
-			ObjCh:       len(objCh),
-			Corrupted:   cor,
-			Multipart:   mp,
-			ListFailed:  lf,
-			CheckFailed: cf,
-			Success:     su,
+			Prefix:             q.Len(),
+			ObjCh:              len(objCh),
+			Corrupted:          cor,
+			Multipart:          mp,
+			CorruptedMultipart: cmp,
+			ListFailed:         lf,
+			CheckFailed:        cf,
+			Success:            su,
 		}
 	})
 
@@ -100,7 +101,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 			lc := &localCounter{interval: cfg.ProgressInterval, printer: printer}
 			go func(w S3API, lc *localCounter) {
 				defer checkWg.Done()
-				c := NewChecker(w, out, stats, cfg.IsSuccessLog)
+				c := NewChecker(w, out, stats, cfg)
 				for obj := range objCh {
 					c.Handle(obj)
 					lc.incr(stats, "checked")

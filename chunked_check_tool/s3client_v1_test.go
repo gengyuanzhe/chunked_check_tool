@@ -56,9 +56,9 @@ func (f *fakeCore) ListObjects(bucket, prefix, marker, delimiter string, maxKeys
 func TestListPageV1_UsesMarkerAndNextMarker(t *testing.T) {
 	core := &fakeCore{
 		v1Result: minio.ListBucketResult{
-			Contents:     []minio.ObjectInfo{{Key: "a", ETag: `"0123456789abcdef0123456789abcdef"`}},
-			IsTruncated:  true,
-			NextMarker:   "next-marker-from-s3",
+			Contents:    []minio.ObjectInfo{{Key: "a", ETag: `"0123456789abcdef0123456789abcdef"`}},
+			IsTruncated: true,
+			NextMarker:  "next-marker-from-s3",
 		},
 	}
 	c := &S3Client{core: core, bucket: "bk", stats: NewStats(), cfg: &Config{ListAPIVersion: 1}}

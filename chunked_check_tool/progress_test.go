@@ -37,25 +37,29 @@ func TestProgressNoPrintBelowInterval(t *testing.T) {
 func TestProgressPrintsQueueLengths(t *testing.T) {
 	s := NewStats()
 	// Seed some calls so list_calls/get_calls show non-zero values.
-	s.AddListCall(1_000_000)  // 1ms
-	s.AddGetCall(2_000_000)   // 2ms
+	s.AddListCall(1_000_000) // 1ms
+	s.AddGetCall(2_000_000)  // 2ms
+	s.IncrCorruptedMultipart()
 	var buf bytes.Buffer
 	pp := NewProgressPrinter(&buf)
 	pp.SetQueueSnapshotProvider(func() QueueSnapshot {
 		return QueueSnapshot{
 			Prefix: 7, ObjCh: 42,
 			Corrupted: 1, Multipart: 2, ListFailed: 3, CheckFailed: 4, Success: 5,
+			CorruptedMultipart: 6,
 		}
 	})
 	pp.MaybePrint(s, "checked", 100)
 	out := buf.String()
 	for _, want := range []string{
+		`corrupted_mp=1`,
 		`list_calls=1`,
 		`get_calls=1`,
 		`q=pfx:7`,
 		`obj:42`,
 		`cor:1`,
 		`mp:2`,
+		`cmp:6`,
 		`lf:3`,
 		`cf:4`,
 		`su:5`,

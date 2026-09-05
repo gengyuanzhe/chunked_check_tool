@@ -107,3 +107,29 @@ func TestLoadConfig_SchemeHttps(t *testing.T) {
 		t.Errorf("scheme = %q, want https", cfg.Scheme)
 	}
 }
+
+func TestLoadConfig_MultipartCheck(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte(`
+endpoints:
+  - 10.0.0.1:9000
+ak: x
+sk: y
+is_multipart_check: true
+multipart_segment_size: 5242880
+`)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.IsMultipartCheck {
+		t.Errorf("is_multipart_check = false, want true")
+	}
+	if cfg.MultipartSegmentSize != 5242880 {
+		t.Errorf("multipart_segment_size = %d, want 5242880", cfg.MultipartSegmentSize)
+	}
+}

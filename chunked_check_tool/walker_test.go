@@ -222,4 +222,8 @@ func (c *countingS3) ListPage(ctx context.Context, prefix, startAfter, continuat
 
 func (c *countingS3) RangeGet(ctx context.Context, key string) ([]byte, error) { return nil, nil }
 
+func (c *countingS3) RangeGetAt(ctx context.Context, key string, offset, length int64) ([]byte, error) {
+	return nil, nil
+}
+
 var _ S3API = (*countingS3)(nil)

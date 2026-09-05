@@ -155,4 +155,8 @@ func (s *scriptedS3) RangeGet(ctx context.Context, key string) ([]byte, error) {
 	return nil, nil
 }
 
+func (s *scriptedS3) RangeGetAt(ctx context.Context, key string, offset, length int64) ([]byte, error) {
+	return nil, nil
+}
+
 var _ S3API = (*scriptedS3)(nil)

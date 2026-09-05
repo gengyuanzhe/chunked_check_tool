@@ -10,22 +10,24 @@ import (
 )
 
 type Output struct {
-	dir              string
-	corruptedCh      chan string
-	multipartCh      chan string
-	listFailedCh     chan string
-	checkFailedCh    chan string
-	successCh        chan string
-	listLogger       *slog.Logger
-	listLogFile     *os.File
-	checkLogger      *slog.Logger
-	checkLogFile    *os.File
-	corruptedEnabled bool
-	multipartEnabled bool
-	checkEnabled     bool
-	successEnabled   bool
-	wg               sync.WaitGroup
-	files            []*os.File
+	dir                       string
+	corruptedCh               chan string
+	multipartCh               chan string
+	corruptedMultipartCh      chan string
+	listFailedCh              chan string
+	checkFailedCh             chan string
+	successCh                 chan string
+	listLogger                *slog.Logger
+	listLogFile               *os.File
+	checkLogger               *slog.Logger
+	checkLogFile              *os.File
+	corruptedEnabled          bool
+	multipartEnabled          bool
+	corruptedMultipartEnabled bool
+	checkEnabled              bool
+	successEnabled            bool
+	wg                        sync.WaitGroup
+	files                     []*os.File
 }
 
 func NewOutput(cfg *Config) (*Output, error) {
@@ -37,16 +39,18 @@ func NewOutput(cfg *Config) (*Output, error) {
 		chCap = 1024
 	}
 	o := &Output{
-		dir:              cfg.OutputDir,
-		corruptedCh:      make(chan string, chCap),
-		multipartCh:      make(chan string, chCap),
-		listFailedCh:     make(chan string, chCap),
-		checkFailedCh:    make(chan string, chCap),
-		successCh:        make(chan string, chCap),
-		corruptedEnabled: cfg.IsCheck,
-		multipartEnabled: cfg.IsCheck,
-		checkEnabled:     cfg.IsCheck,
-		successEnabled:   cfg.IsSuccessLog,
+		dir:                       cfg.OutputDir,
+		corruptedCh:               make(chan string, chCap),
+		multipartCh:               make(chan string, chCap),
+		corruptedMultipartCh:      make(chan string, chCap),
+		listFailedCh:              make(chan string, chCap),
+		checkFailedCh:             make(chan string, chCap),
+		successCh:                 make(chan string, chCap),
+		corruptedEnabled:          cfg.IsCheck,
+		multipartEnabled:          cfg.IsCheck,
+		corruptedMultipartEnabled: cfg.IsCheck && cfg.IsMultipartCheck,
+		checkEnabled:              cfg.IsCheck,
+		successEnabled:            cfg.IsSuccessLog,
 	}
 	// list_failed is written by the lister in both check and list-only modes,
 	// so it always opens. The object files (corrupted/multipart/check_failed)
@@ -65,6 +69,11 @@ func NewOutput(cfg *Config) (*Output, error) {
 	}
 	if o.multipartEnabled {
 		if err := o.openAndStart("multipart_objects.txt", o.multipartCh); err != nil {
+			return nil, err
+		}
+	}
+	if o.corruptedMultipartEnabled {
+		if err := o.openAndStart("corrupted_multipart_objects.txt", o.corruptedMultipartCh); err != nil {
 			return nil, err
 		}
 	}
@@ -148,6 +157,11 @@ func (o *Output) WriteCorrupted(key string) {
 		o.corruptedCh <- key
 	}
 }
+func (o *Output) WriteCorruptedMultipart(key string) {
+	if o.corruptedMultipartEnabled {
+		o.corruptedMultipartCh <- key
+	}
+}
 
 // orDash returns s, or "-" when s is empty. Used for slog fields that are
 // optional (e.g. req_id on non-S3 errors) so the log line still carries a
@@ -213,12 +227,15 @@ func (o *Output) WriteSuccess(key string) {
 // channel. Channels whose writer goroutine was not started (because the
 // corresponding mode is disabled) report 0. Called from
 // ProgressPrinter's queueSnapshot provider once per progress line.
-func (o *Output) ChannelSnapshot() (corrupted, multipart, listFailed, checkFailed, success int) {
+func (o *Output) ChannelSnapshot() (corrupted, multipart, corruptedMultipart, listFailed, checkFailed, success int) {
 	if o.corruptedEnabled {
 		corrupted = len(o.corruptedCh)
 	}
 	if o.multipartEnabled {
 		multipart = len(o.multipartCh)
+	}
+	if o.corruptedMultipartEnabled {
+		corruptedMultipart = len(o.corruptedMultipartCh)
 	}
 	listFailed = len(o.listFailedCh) // list_failed is always enabled
 	if o.checkEnabled {
@@ -241,6 +258,9 @@ func (o *Output) Close() error {
 	}
 	if o.multipartEnabled {
 		close(o.multipartCh)
+	}
+	if o.corruptedMultipartEnabled {
+		close(o.corruptedMultipartCh)
 	}
 	if o.checkEnabled {
 		close(o.checkFailedCh)

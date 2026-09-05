@@ -48,9 +48,14 @@ func trimETagQuotes(s string) string {
 //
 // RangeGet fetches the first 128 bytes of an object (for chunked-upload
 // signature verification).
+//
+// RangeGetAt fetches `length` bytes starting at `offset` (for multipart
+// segment signature verification — each segment's first 128 bytes are
+// inspected in turn). offset is a byte offset into the object body.
 type S3API interface {
 	ListPage(ctx context.Context, prefix, startAfter, continuationToken string, delim bool, maxKeys int) ([]ObjectInfo, []string, string, error)
 	RangeGet(ctx context.Context, key string) ([]byte, error)
+	RangeGetAt(ctx context.Context, key string, offset, length int64) ([]byte, error)
 }
 
 // NewMinioClient constructs a minio.Client bound to a single endpoint.
@@ -286,6 +291,46 @@ func (c *S3Client) rangeGetOnce(ctx context.Context, key string) ([]byte, error)
 	return body, nil
 }
 
+// RangeGetAt fetches `length` bytes starting at byte `offset` of an object,
+// used by the multipart segment check (each segment's first 128 bytes are
+// inspected for the chunked-upload signature). Same node-failover retry
+// semantics as RangeGet; AddGetCall is bumped once per public call.
+func (c *S3Client) RangeGetAt(ctx context.Context, key string, offset, length int64) ([]byte, error) {
+	start := time.Now()
+	defer func() {
+		if c.stats != nil {
+			c.stats.AddGetCall(time.Since(start))
+		}
+	}()
+	body, err := c.rangeGetAtOnce(ctx, key, offset, length)
+	if err != nil && c.pool != nil && isNodeFaultErr(err) {
+		c.pool.MarkFailed(c.nodeIdx)
+		if c.rebuild() {
+			body, err = c.rangeGetAtOnce(ctx, key, offset, length)
+		}
+	}
+	return body, err
+}
+
+func (c *S3Client) rangeGetAtOnce(ctx context.Context, key string, offset, length int64) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var opts minio.GetObjectOptions
+	if err := opts.SetRange(offset, offset+length-1); err != nil {
+		return nil, err
+	}
+	obj, err := c.client.GetObject(ctx, c.bucket, key, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer obj.Close()
+	body, err := io.ReadAll(io.LimitReader(obj, length))
+	if err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
 // isNodeFaultErr reports whether err is a transient node-fault error that
 // should trigger failover: connection errors, timeouts, and HTTP 5xx
 // responses. Business-level 4xx errors (404 Not Found, 403 Forbidden,
@@ -335,11 +380,11 @@ var nodeFaultSigs = []string{
 
 // FakeS3 is an in-memory S3API for testing.
 type FakeS3 struct {
-	Objects             []ObjectInfo
-	CommonPrefixes      []string
+	Objects               []ObjectInfo
+	CommonPrefixes        []string
 	NextContinuationToken string
-	Body                []byte
-	Err                 error
+	Body                  []byte
+	Err                   error
 	// FailNext, when non-nil, causes the next ListPage call to return
 	// this error and then clears it — used to exercise the node-failover
 	// retry path of callers (the caller, not FakeS3, decides whether to
@@ -347,6 +392,11 @@ type FakeS3 struct {
 	FailNext error
 	// Calls counts ListPage invocations.
 	Calls int
+	// RangeGetHandler, when non-nil, is invoked by RangeGetAt to return
+	// per-offset bodies. Used by multipart-segment-check tests to simulate
+	// "first segment clean, second segment matches the chunk signature".
+	// When nil, RangeGetAt returns Body (same as RangeGet).
+	RangeGetHandler func(offset, length int64) ([]byte, error)
 }
 
 func (f *FakeS3) ListPage(ctx context.Context, prefix, startAfter, continuationToken string, delim bool, maxKeys int) ([]ObjectInfo, []string, string, error) {
@@ -365,6 +415,16 @@ func (f *FakeS3) ListPage(ctx context.Context, prefix, startAfter, continuationT
 func (f *FakeS3) RangeGet(ctx context.Context, key string) ([]byte, error) {
 	if f.Err != nil {
 		return nil, f.Err
+	}
+	return f.Body, nil
+}
+
+func (f *FakeS3) RangeGetAt(ctx context.Context, key string, offset, length int64) ([]byte, error) {
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	if f.RangeGetHandler != nil {
+		return f.RangeGetHandler(offset, length)
 	}
 	return f.Body, nil
 }
