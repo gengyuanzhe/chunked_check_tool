@@ -49,7 +49,8 @@ func runRecursiveWalk(ctx context.Context, s3 S3API, prefix string, objCh chan<-
 		for {
 			objs, prefixes, next, err := s3.ListPage(ctx, prefix, "", continuationToken, true, 1000)
 			if err != nil {
-				out.WriteListFailed(prefix, err.Error())
+				out.WriteListFailed(prefix)
+				out.WriteListFailedLog(prefix, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
 				stats.IncrListFailed()
 				return
 			}

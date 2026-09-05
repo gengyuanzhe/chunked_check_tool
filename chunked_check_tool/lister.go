@@ -92,7 +92,8 @@ func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- 
 	for {
 		objs, prefixes, next, err := s3.ListPage(ctx, prefix, "", continuationToken, l.delim(), 1000)
 		if err != nil {
-			l.out.WriteListFailed(prefix, err.Error())
+			l.out.WriteListFailed(prefix)
+			l.out.WriteListFailedLog(prefix, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
 			l.stats.IncrListFailed()
 			return
 		}

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/minio/minio-go/v7"
 )
 
 func TestOutputWritesCorruptedAndMultipart(t *testing.T) {
@@ -16,8 +18,8 @@ func TestOutputWritesCorruptedAndMultipart(t *testing.T) {
 	}
 	o.WriteCorrupted("obj/a")
 	o.WriteMultipart("abc123-2", "obj/b")
-	o.WriteListFailed("prefix/x", "timeout")
-	o.WriteCheckFailed("obj/c", "500")
+	o.WriteListFailed("prefix/x")
+	o.WriteCheckFailed("obj/c")
 	o.WriteSuccess("obj/ok")
 	if err := o.Close(); err != nil {
 		t.Fatal(err)
@@ -34,10 +36,17 @@ func TestOutputWritesCorruptedAndMultipart(t *testing.T) {
 	}
 	check("corrupted_objects.txt", "obj/a")
 	check("multipart_objects.txt", "obj/b|abc123-2")
-	check("list_failed.txt", "prefix/x")
-	check("list_failed.txt", "timeout")
-	check("check_failed.txt", "obj/c")
-	check("check_failed.txt", "500")
+	// .txt files now only carry the key/prefix (the .log file next to them
+	// carries the structured error info). Assert the .txt is bare — no
+	// trailing error text.
+	lfBytes, _ := os.ReadFile(filepath.Join(dir, "list_failed.txt"))
+	if line := strings.TrimSpace(string(lfBytes)); line != "prefix/x" {
+		t.Errorf("list_failed.txt = %q, want %q", line, "prefix/x")
+	}
+	cfBytes, _ := os.ReadFile(filepath.Join(dir, "check_failed.txt"))
+	if line := strings.TrimSpace(string(cfBytes)); line != "obj/c" {
+		t.Errorf("check_failed.txt = %q, want %q", line, "obj/c")
+	}
 	check("success_objects.log", "obj/ok")
 }
 
@@ -71,9 +80,9 @@ func TestOutputListOnlySkipsObjectFiles(t *testing.T) {
 	// Defensive: even if someone calls these, they should be no-ops.
 	o.WriteCorrupted("k1")
 	o.WriteMultipart("etag-2", "k2")
-	o.WriteCheckFailed("k3", "err")
+	o.WriteCheckFailed("k3")
 	o.WriteSuccess("k4")
-	o.WriteListFailed("prefix/", "timeout")
+	o.WriteListFailed("prefix/")
 	if err := o.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -104,5 +113,53 @@ func TestOutputMultipartFormat(t *testing.T) {
 	line := strings.TrimSpace(string(data))
 	if line != "key/with|pipe|deadbeef-3" {
 		t.Errorf("multipart line = %q", line)
+	}
+}
+
+// TestOutputListFailedLogStructured verifies list_failed.log carries the
+// structured error info (slog text format) with req_id positioned after msg
+// and before the key field. The .txt next to it carries only the prefix.
+func TestOutputListFailedLogStructured(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: false}
+	o, _ := NewOutput(cfg)
+	er := minio.ErrorResponse{
+		Code:       "InternalError",
+		Message:    "we crashed",
+		StatusCode: 500,
+		RequestID:  "REQ-LF-1",
+	}
+	o.WriteListFailed("prefix/x")
+	o.WriteListFailedLog("prefix/x", extractHTTPStatusCode(er), extractS3Code(er), extractRequestID(er), er)
+	if err := o.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// .txt carries only the prefix
+	txtBytes, err := os.ReadFile(filepath.Join(dir, "list_failed.txt"))
+	if err != nil {
+		t.Fatalf("read list_failed.txt: %v", err)
+	}
+	if line := strings.TrimSpace(string(txtBytes)); line != "prefix/x" {
+		t.Errorf("list_failed.txt = %q, want %q", line, "prefix/x")
+	}
+
+	// .log carries structured fields
+	logBytes, err := os.ReadFile(filepath.Join(dir, "list_failed.log"))
+	if err != nil {
+		t.Fatalf("read list_failed.log: %v", err)
+	}
+	log := string(logBytes)
+	for _, want := range []string{
+		`level=ERROR`,
+		`msg="list failed"`,
+		`req_id=REQ-LF-1`,
+		`prefix=prefix/x`,
+		`http_code=500`,
+		`s3_code=InternalError`,
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("list_failed.log missing %q\nfull log:\n%s", want, log)
+		}
 	}
 }

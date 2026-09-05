@@ -140,7 +140,8 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 		for {
 			objs, subprefixes, next, err := seedWorker.ListPage(ctx, prefix, sa, continuationToken, true, 1000)
 			if err != nil {
-				out.WriteListFailed(prefix, err.Error())
+				out.WriteListFailed(prefix)
+				out.WriteListFailedLog(prefix, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
 				stats.IncrListFailed()
 				break
 			}

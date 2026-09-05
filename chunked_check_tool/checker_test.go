@@ -143,6 +143,7 @@ func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 		Code:       "InvalidRange",
 		Message:    "The requested range is not satisfiable",
 		StatusCode: 416,
+		RequestID:  "REQ-1234-ABCD",
 	}}
 	c := NewChecker(worker, out, s, false)
 	c.Handle(ObjectInfo{Key: "path/obj", ETag: "0123456789abcdef0123456789abcdef", Size: 1})
@@ -150,17 +151,18 @@ func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	// check_failed.txt keeps the original "key err" format.
+	// check_failed.txt keeps only the key — the .log next to it carries
+	// the structured error info.
 	cfBytes, err := os.ReadFile(filepath.Join(dir, "check_failed.txt"))
 	if err != nil {
 		t.Fatalf("read check_failed.txt: %v", err)
 	}
-	if !strings.HasPrefix(string(cfBytes), "path/obj ") {
-		t.Errorf("check_failed.txt line = %q, want prefix %q", string(cfBytes), "path/obj ")
+	if line := strings.TrimSpace(string(cfBytes)); line != "path/obj" {
+		t.Errorf("check_failed.txt = %q, want %q", line, "path/obj")
 	}
 
-	// check_failed.log is now slog text-handler output. Assert presence of
-	// structured fields rather than a fixed column order.
+	// check_failed.log is slog text-handler output. req_id must appear
+	// right after msg (before key).
 	logBytes, err := os.ReadFile(filepath.Join(dir, "check_failed.log"))
 	if err != nil {
 		t.Fatalf("read check_failed.log: %v", err)
@@ -169,6 +171,7 @@ func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 	for _, want := range []string{
 		`level=ERROR`,
 		`msg="check failed"`,
+		`req_id=REQ-1234-ABCD`,
 		`key=path/obj`,
 		`http_code=416`,
 		`s3_code=InvalidRange`,
@@ -176,6 +179,13 @@ func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 		if !strings.Contains(log, want) {
 			t.Errorf("check_failed.log missing %q\nfull log:\n%s", want, log)
 		}
+	}
+	// Field order: msg must come before req_id, which must come before key.
+	msgIdx := strings.Index(log, `msg="check failed"`)
+	reqIdx := strings.Index(log, `req_id=REQ-1234-ABCD`)
+	keyIdx := strings.Index(log, `key=path/obj`)
+	if !(msgIdx < reqIdx && reqIdx < keyIdx) {
+		t.Errorf("field order wrong: msg@%d req_id@%d key@%d\n%s", msgIdx, reqIdx, keyIdx, log)
 	}
 }
 

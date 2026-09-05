@@ -9,21 +9,17 @@ import (
 	"sync"
 )
 
-type Entry struct {
-	Key  string
-	Err  string
-	Code int // HTTP status code, kept for future use; check_failed.log no longer reads it (slog carries fields)
-}
-
 type Output struct {
 	dir              string
 	corruptedCh      chan string
 	multipartCh      chan string
-	listFailedCh     chan Entry
-	checkFailedCh    chan Entry
+	listFailedCh     chan string
+	checkFailedCh    chan string
 	successCh        chan string
+	listLogger       *slog.Logger
+	listLogFile     *os.File
 	checkLogger      *slog.Logger
-	checkLogFile     *os.File
+	checkLogFile    *os.File
 	corruptedEnabled bool
 	multipartEnabled bool
 	checkEnabled     bool
@@ -44,8 +40,8 @@ func NewOutput(cfg *Config) (*Output, error) {
 		dir:              cfg.OutputDir,
 		corruptedCh:      make(chan string, chCap),
 		multipartCh:      make(chan string, chCap),
-		listFailedCh:     make(chan Entry, chCap),
-		checkFailedCh:    make(chan Entry, chCap),
+		listFailedCh:     make(chan string, chCap),
+		checkFailedCh:    make(chan string, chCap),
 		successCh:        make(chan string, chCap),
 		corruptedEnabled: cfg.IsCheck,
 		multipartEnabled: cfg.IsCheck,
@@ -56,21 +52,24 @@ func NewOutput(cfg *Config) (*Output, error) {
 	// so it always opens. The object files (corrupted/multipart/check_failed)
 	// are gated on is_check — in list-only mode the checker never runs and no
 	// one writes to those channels, so we don't create empty files.
-	if err := o.openAndStart("list_failed.txt", o.listFailedCh, true); err != nil {
+	if err := o.openAndStart("list_failed.txt", o.listFailedCh); err != nil {
+		return nil, err
+	}
+	if err := o.openListFailedLog(); err != nil {
 		return nil, err
 	}
 	if o.corruptedEnabled {
-		if err := o.openAndStart("corrupted_objects.txt", o.corruptedCh, false); err != nil {
+		if err := o.openAndStart("corrupted_objects.txt", o.corruptedCh); err != nil {
 			return nil, err
 		}
 	}
 	if o.multipartEnabled {
-		if err := o.openAndStart("multipart_objects.txt", o.multipartCh, false); err != nil {
+		if err := o.openAndStart("multipart_objects.txt", o.multipartCh); err != nil {
 			return nil, err
 		}
 	}
 	if o.checkEnabled {
-		if err := o.openAndStart("check_failed.txt", o.checkFailedCh, true); err != nil {
+		if err := o.openAndStart("check_failed.txt", o.checkFailedCh); err != nil {
 			return nil, err
 		}
 		if err := o.openCheckFailedLog(); err != nil {
@@ -78,16 +77,18 @@ func NewOutput(cfg *Config) (*Output, error) {
 		}
 	}
 	if o.successEnabled {
-		if err := o.openAndStart("success_objects.log", o.successCh, false); err != nil {
+		if err := o.openAndStart("success_objects.log", o.successCh); err != nil {
 			return nil, err
 		}
 	}
 	return o, nil
 }
 
-// openAndStart opens the file (append mode) and starts a writer goroutine.
-// isEntry=true means channel is chan Entry (write "key err\n"); else chan string.
-func (o *Output) openAndStart(name string, ch interface{}, isEntry bool) error {
+// openAndStart opens the file (append mode) and starts a writer goroutine
+// that writes one channel value per line. The .txt files carry only the
+// key/prefix — structured error info lives in the .log files (see
+// openListFailedLog/openCheckFailedLog).
+func (o *Output) openAndStart(name string, ch chan string) error {
 	f, err := os.OpenFile(filepath.Join(o.dir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", name, err)
@@ -98,22 +99,31 @@ func (o *Output) openAndStart(name string, ch interface{}, isEntry bool) error {
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
-		switch c := ch.(type) {
-		case chan string:
-			for line := range c {
-				w.WriteString(line)
-				w.WriteByte('\n')
-			}
-		case chan Entry:
-			for e := range c {
-				w.WriteString(e.Key)
-				w.WriteByte(' ')
-				w.WriteString(e.Err)
-				w.WriteByte('\n')
-			}
+		for line := range ch {
+			w.WriteString(line)
+			w.WriteByte('\n')
 		}
 		w.Flush()
 	}()
+	return nil
+}
+
+// openListFailedLog opens list_failed.log and wires it to a *slog.Logger
+// with the stdlib text handler. Each WriteListFailedLog call becomes one
+// structured record:
+//
+//	time=... level=ERROR msg="list failed" req_id=... prefix=... http_code=... s3_code=... err=...
+//
+// slog is concurrency-safe, so we drop the channel + writer goroutine that
+// the .txt files still use.
+func (o *Output) openListFailedLog() error {
+	f, err := os.OpenFile(filepath.Join(o.dir, "list_failed.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("open list_failed.log: %w", err)
+	}
+	o.listLogFile = f
+	o.files = append(o.files, f)
+	o.listLogger = slog.New(slog.NewTextHandler(f, nil))
 	return nil
 }
 
@@ -121,10 +131,7 @@ func (o *Output) openAndStart(name string, ch interface{}, isEntry bool) error {
 // with the stdlib text handler. Each WriteCheckFailedLog call becomes one
 // structured log record:
 //
-//	time=... level=ERROR msg="check failed" key=... http_code=... s3_code=... err=...
-//
-// slog is concurrency-safe, so we drop the channel + writer goroutine that
-// the .txt files still use.
+//	time=... level=ERROR msg="check failed" req_id=... key=... http_code=... s3_code=... err=...
 func (o *Output) openCheckFailedLog() error {
 	f, err := os.OpenFile(filepath.Join(o.dir, "check_failed.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -141,22 +148,50 @@ func (o *Output) WriteCorrupted(key string) {
 		o.corruptedCh <- key
 	}
 }
+
+// orDash returns s, or "-" when s is empty. Used for slog fields that are
+// optional (e.g. req_id on non-S3 errors) so the log line still carries a
+// placeholder column instead of dropping the field entirely.
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
 func (o *Output) WriteMultipart(etag, key string) {
 	if o.multipartEnabled {
 		o.multipartCh <- key + "|" + etag
 	}
 }
-func (o *Output) WriteListFailed(prefix, errStr string) { o.listFailedCh <- Entry{Key: prefix, Err: errStr} }
-func (o *Output) WriteCheckFailed(key, errStr string) {
+func (o *Output) WriteListFailed(prefix string) { o.listFailedCh <- prefix }
+func (o *Output) WriteListFailedLog(prefix string, statusCode int, s3Code, reqID string, err error) {
+	if o.listLogger == nil {
+		return
+	}
+	attrs := []any{slog.String("req_id", orDash(reqID))}
+	attrs = append(attrs, slog.String("prefix", prefix))
+	if statusCode > 0 {
+		attrs = append(attrs, slog.Int("http_code", statusCode))
+	} else {
+		attrs = append(attrs, slog.String("http_code", "N/A"))
+	}
+	if s3Code != "" {
+		attrs = append(attrs, slog.String("s3_code", s3Code))
+	}
+	attrs = append(attrs, slog.Any("err", err))
+	o.listLogger.Error("list failed", attrs...)
+}
+func (o *Output) WriteCheckFailed(key string) {
 	if o.checkEnabled {
-		o.checkFailedCh <- Entry{Key: key, Err: errStr}
+		o.checkFailedCh <- key
 	}
 }
-func (o *Output) WriteCheckFailedLog(key string, statusCode int, s3Code string, err error) {
+func (o *Output) WriteCheckFailedLog(key string, statusCode int, s3Code, reqID string, err error) {
 	if !o.checkEnabled || o.checkLogger == nil {
 		return
 	}
-	attrs := []any{slog.String("key", key)}
+	attrs := []any{slog.String("req_id", orDash(reqID))}
+	attrs = append(attrs, slog.String("key", key))
 	if statusCode > 0 {
 		attrs = append(attrs, slog.Int("http_code", statusCode))
 	} else {

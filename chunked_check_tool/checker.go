@@ -43,6 +43,17 @@ func extractS3Code(err error) string {
 	return ""
 }
 
+// extractRequestID pulls the x-amz-request-id value off err if it wraps a
+// minio.ErrorResponse. Returns "" for non-S3 errors (e.g. context timeout,
+// net.OpError) — caller writes "N/A" in that case.
+func extractRequestID(err error) string {
+	var er minio.ErrorResponse
+	if errors.As(err, &er) {
+		return er.RequestID
+	}
+	return ""
+}
+
 // isNormalETag reports whether etag is a normal (single-part) S3 ETag:
 // exactly 32 lowercase hex characters. Anything else — uppercase hex,
 // wrong length, a `-N` multipart suffix, empty — is treated as multipart
@@ -103,8 +114,8 @@ func (c *Checker) Handle(obj ObjectInfo) {
 
 	body, err := c.worker.RangeGet(context.Background(), obj.Key)
 	if err != nil {
-		c.out.WriteCheckFailed(obj.Key, err.Error())
-		c.out.WriteCheckFailedLog(obj.Key, extractHTTPStatusCode(err), extractS3Code(err), err)
+		c.out.WriteCheckFailed(obj.Key)
+		c.out.WriteCheckFailedLog(obj.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
 		c.stats.IncrCheckFailed()
 		return
 	}
