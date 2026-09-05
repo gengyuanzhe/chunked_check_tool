@@ -50,8 +50,8 @@ func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	fmt.Fprintf(p.w,
-		"[progress] listed=%d checked=%d multipart=%d corrupted=%d list_failed=%d check_failed=%d list_calls=%d list_avg_ms=%.2f get_calls=%d get_avg_ms=%.2f (%s=%d)",
-		snap.ListedTotal, snap.ListedTotal,
+		"[progress] listed=%d multipart=%d corrupted=%d list_failed=%d check_failed=%d list_calls=%d list_avg_ms=%.2f get_calls=%d get_avg_ms=%.2f (%s=%d)",
+		snap.ListedTotal,
 		snap.Multipart, snap.Corrupted,
 		snap.ListFailed, snap.CheckFailed,
 		snap.ListCalls, snap.ListAvgLatencyMs,
