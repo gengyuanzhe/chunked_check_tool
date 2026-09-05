@@ -201,26 +201,40 @@ func multipartCfg(dir string, segSize int64) *Config {
 		OutputDir:            dir,
 		IsCheck:              true,
 		IsMultipartCheck:     true,
+		IsSuccessLog:         true,
 		MultipartSegmentSize: segSize,
 	}
 }
 
+// TestCheckerMultipartSegmentCheckCorrupted: switch on, segment matches →
+// corrupted multipart file goes to <owner>/corrupted_multipart_objects.txt
+// (per-owner routing).
 func TestCheckerMultipartSegmentCheckCorrupted(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
 	out, _ := NewOutput(cfg)
-	defer out.Close()
 	s := NewStats()
 	worker := &FakeS3{Body: chunkSigBody}
 	c := NewChecker(worker, out, s, cfg)
 	// multipart etag + Size=10MB → 2 segments at offset 0 and 5MB. Body
 	// matches at offset 0, so it's flagged immediately as corrupted.
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024})
+	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, OwnerID: "owner-A"})
 	if got := s.Snapshot().CorruptedMultipart; got != 1 {
 		t.Errorf("corrupted_multipart=%d want 1", got)
 	}
 	if got := s.Snapshot().Multipart; got != 0 {
 		t.Errorf("multipart=%d want 0 (corrupted multipart should not also count as plain multipart)", got)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Per-owner file must exist with the key.
+	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "corrupted_multipart_objects.txt"))
+	if err != nil {
+		t.Fatalf("read corrupted_multipart: %v", err)
+	}
+	if line := strings.TrimSpace(string(data)); line != "k" {
+		t.Errorf("corrupted_multipart_objects.txt = %q, want %q", line, "k")
 	}
 }
 
@@ -228,51 +242,87 @@ func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
 	out, _ := NewOutput(cfg)
-	defer out.Close()
 	s := NewStats()
 	worker := &FakeS3{Body: []byte("normal object body, no chunk signature here")}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024})
+	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, OwnerID: "owner-A"})
 	if got := s.Snapshot().CorruptedMultipart; got != 0 {
 		t.Errorf("corrupted_multipart=%d want 0", got)
 	}
 	if got := s.Snapshot().Multipart; got != 1 {
 		t.Errorf("multipart=%d want 1 (clean multipart should still be recorded as multipart)", got)
 	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// IsSuccessLog=true → clean multipart goes to <owner>/ok_multipart_objects.txt
+	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "ok_multipart_objects.txt"))
+	if err != nil {
+		t.Fatalf("read ok_multipart: %v", err)
+	}
+	if line := strings.TrimSpace(string(data)); line != "k" {
+		t.Errorf("ok_multipart_objects.txt = %q, want %q", line, "k")
+	}
 }
 
+// TestCheckerMultipartSegmentCheckRangeError: segment RangeGet error →
+// writes to multipart_check_failed.txt at the root (NOT check_failed), and
+// bumps MultipartCheckFailed (not CheckFailed).
 func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
 	out, _ := NewOutput(cfg)
-	defer out.Close()
 	s := NewStats()
 	worker := &FakeS3{Err: context.DeadlineExceeded}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024})
-	if got := s.Snapshot().CheckFailed; got != 1 {
-		t.Errorf("check_failed=%d want 1 (RangeGet error during segment check should surface as check_failed)", got)
+	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, OwnerID: "owner-A"})
+	if got := s.Snapshot().MultipartCheckFailed; got != 1 {
+		t.Errorf("multipart_check_failed=%d want 1 (segment RangeGet error should bump MultipartCheckFailed)", got)
+	}
+	if got := s.Snapshot().CheckFailed; got != 0 {
+		t.Errorf("check_failed=%d want 0 (segment errors go to multipart_check_failed, not check_failed)", got)
 	}
 	if got := s.Snapshot().CorruptedMultipart; got != 0 {
 		t.Errorf("corrupted_multipart=%d want 0", got)
 	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// File at root (not per-owner).
+	data, err := os.ReadFile(filepath.Join(dir, "multipart_check_failed.txt"))
+	if err != nil {
+		t.Fatalf("read multipart_check_failed: %v", err)
+	}
+	if line := strings.TrimSpace(string(data)); line != "k" {
+		t.Errorf("multipart_check_failed.txt = %q, want %q", line, "k")
+	}
 }
 
+// TestCheckerMultipartSegmentCheckDisabled: switch off → all multipart go to
+// <owner>/multipart_objects.txt (key only, no etag).
 func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 	dir := t.TempDir()
-	// switch OFF: existing behavior, no segment check, recorded as plain multipart
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: false, MultipartSegmentSize: 5 * 1024 * 1024}
 	out, _ := NewOutput(cfg)
-	defer out.Close()
 	s := NewStats()
 	worker := &FakeS3{Body: chunkSigBody} // would match if we checked — but we don't
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024})
+	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, OwnerID: "owner-A"})
 	if got := s.Snapshot().CorruptedMultipart; got != 0 {
 		t.Errorf("corrupted_multipart=%d want 0 (switch off)", got)
 	}
 	if got := s.Snapshot().Multipart; got != 1 {
 		t.Errorf("multipart=%d want 1 (switch off, plain multipart)", got)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "multipart_objects.txt"))
+	if err != nil {
+		t.Fatalf("read multipart_objects: %v", err)
+	}
+	if line := strings.TrimSpace(string(data)); line != "k" {
+		t.Errorf("multipart_objects.txt = %q, want %q (key only)", line, "k")
 	}
 }
 
@@ -296,7 +346,7 @@ func TestCheckerMultipartSegmentCheckSecondSegmentMatches(t *testing.T) {
 		},
 	}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024})
+	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, OwnerID: "owner-A"})
 	if got := s.Snapshot().CorruptedMultipart; got != 1 {
 		t.Errorf("corrupted_multipart=%d want 1 (second segment should trigger)", got)
 	}

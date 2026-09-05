@@ -118,3 +118,33 @@ func TestTrimETagQuotes(t *testing.T) {
 		}
 	}
 }
+
+// TestListPagePopulatesOwnerID verifies S3Client.ListPage extracts Owner.ID
+// from the minio.ObjectInfo returned by the LIST response into ObjectInfo.
+// OwnerID drives per-owner output partitioning, so a missing or wrong OwnerID
+// would route writes to the wrong subfolder.
+func TestListPagePopulatesOwnerID(t *testing.T) {
+	core := &fakeCore{
+		v2Result: minio.ListBucketV2Result{
+			Contents: []minio.ObjectInfo{
+				{Key: "a", ETag: `"0123456789abcdef0123456789abcdef"`, Owner: minio.Owner{ID: "owner-1234"}},
+				{Key: "b", ETag: `"abc-2"`, Owner: minio.Owner{ID: "owner-5678"}},
+				{Key: "c", ETag: `"def-3"`}, // no owner → empty OwnerID
+			},
+		},
+	}
+	c := &S3Client{core: core, bucket: "bk", stats: NewStats(), cfg: &Config{ListAPIVersion: 2}}
+	objs, _, _, err := c.ListPage(context.Background(), "p", "", "", false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objs) != 3 {
+		t.Fatalf("got %d objs, want 3", len(objs))
+	}
+	want := []string{"owner-1234", "owner-5678", ""}
+	for i, w := range want {
+		if objs[i].OwnerID != w {
+			t.Errorf("objs[%d].OwnerID = %q, want %q", i, objs[i].OwnerID, w)
+		}
+	}
+}

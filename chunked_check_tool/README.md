@@ -39,6 +39,8 @@ check_concurrency: 16
 output_dir: ./out
 is_check: true          # true=列举+校验, false=仅列举
 is_success_log: false   # 是否记录正常对象
+is_multipart_check: false   # 是否对多段对象做分段损坏检查
+multipart_segment_size: 0    # 多段分段检查的段长度(字节)，需与上传 part size 一致
 progress_interval: 100000
 ```
 
@@ -52,8 +54,10 @@ progress_interval: 100000
 | `list_concurrency` | `8` | 列举 worker 数（Mode 3 为信号量容量） |
 | `check_concurrency` | `16` | 校验 worker 数 |
 | `output_dir` | `.` | 输出目录（自动创建） |
-| `is_check` | `true` | `false` 时只列举不校验，仅写 `stats.txt` |
-| `is_success_log` | `false` | `true` 时把正常对象 key 写入 `success_objects.log` |
+| `is_check` | `true` | `false` 时只列举不校验，仅写 `stats.txt` + `list_failed.*` |
+| `is_success_log` | `false` | `true` 时把正常对象 key 写入 `<ownerID>/ok_objects.txt`，干净的多段写入 `<ownerID>/ok_multipart_objects.txt` |
+| `is_multipart_check` | `false` | `true` 时对多段对象做分段损坏检查 |
+| `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
 | `progress_interval` | `100000` | stdout 进度打印阈值（约） |
 
 ### 配置示例
@@ -82,6 +86,17 @@ list_type: 3
 list_api_version: 1
 list_concurrency: 32
 ```
+
+#### 启用多段分段损坏检查
+
+```yaml
+is_multipart_check: true
+multipart_segment_size: 5242880   # 5 MiB，需与上传 multipart part size 一致
+```
+
+适用：怀疑多段对象也写入了 chunked 签名（如客户端对每个 part 单独走 aws-chunked 编码）。开启后对每个多段对象按 `ceil(Size/segment_size)` 分段，对每段开头 128 字节做 Range GET，任一段命中 `length;chunk-signature=…` 正则即视为损坏，写入 `<ownerID>/corrupted_multipart_objects.txt`。
+
+注意：`multipart_segment_size` **必须**与上传时的 part size 一致——chunk-signature 出现在每个 part body 的开头，分段边界错位会漏检。Size=0 的多段对象跳过分段检查（按普通多段记录）。某段 Range GET 报错走 `multipart_check_failed.txt`/`multipart_check_failed.log`（根目录），停止后续段检查。
 
 ## 运行
 
@@ -130,25 +145,38 @@ list_concurrency: 32
 
 ## 输出文件
 
-全部写到 `output_dir`，以 append 模式打开（支持断点续跑，不覆盖）：
+全部以 append 模式打开（支持断点续跑，不覆盖）。
+
+### 结果文件（按 OwnerID 分目录，路径 `<output_dir>/<ownerID>/<filename>`；OwnerID 为空时落到 `_unknown/`）
 
 | 文件 | 内容 | 何时写 |
 |---|---|---|
 | `corrupted_objects.txt` | 损坏的普通对象 key | Range GET 前 128 字节命中 chunk-signature 正则 |
-| `multipart_objects.txt` | `<key>\|<etag>` | ETag 不是 32 位小写 MD5 hex |
-| `list_failed.txt` | prefix + 错误原因 | list worker 调用失败 |
-| `check_failed.txt` | key + 错误原因 | checker 调用失败 |
-| `success_objects.log` | 正常对象 key | 仅 `is_success_log=true` |
-| `stats.txt` | 计时与计数 | 程序结束 |
+| `multipart_objects.txt` | 多段对象 key（仅 key） | `is_multipart_check=false` 时所有多段对象 |
+| `corrupted_multipart_objects.txt` | 损坏的多段对象 key | `is_multipart_check=true` 时分段检查命中 |
+| `ok_multipart_objects.txt` | 干净的多段对象 key | `is_multipart_check=true` 且 `is_success_log=true` |
+| `ok_objects.txt` | 正常普通对象 key | `is_success_log=true` |
 
-`is_check=false` 时不写任何对象文件，仅写 `stats.txt`。
+### 处理文件（全局，根目录 `<output_dir>/<filename>`）
+
+| 文件 | 内容 | 何时写 |
+|---|---|---|
+| `list_failed.txt` | 列举失败的 prefix | list worker 调用失败（list-only 模式也写） |
+| `list_failed.log` | 列举失败结构化错误信息（slog text，含 req_id/http_code/s3_code/err） | 同上 |
+| `check_failed.txt` | 校验失败的普通对象 key | checker 普通对象 RangeGet 失败 |
+| `check_failed.log` | 校验失败结构化错误信息（slog text） | 同上 |
+| `multipart_check_failed.txt` | 多段分段检查失败的对象 key | `is_multipart_check=true` 时分段 RangeGet 失败 |
+| `multipart_check_failed.log` | 多段分段检查失败结构化错误信息（slog text） | 同上 |
+| `stats.txt` | 计时与计数（全局一份） | 程序结束 |
+
+`is_check=false` 时只写 `list_failed.*` + `stats.txt`，不写任何对象文件，不创建 owner 目录。
 
 ### multipart_objects.txt 格式
 
-每行 `<key>|<etag>`，例如：
+每行只存 key，不带 ETag：
 ```
-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4-5|data/2026/01/file.bin
--|data/2026/02/no-etag.bin
+data/2026/01/file.bin
+data/2026/02/no-etag.bin
 ```
 
 多段判定**严格**：只有 `^[0-9a-f]{32}$`（32 位小写 MD5 hex）算普通对象，任何其他格式（`<hex>-N`、大写、长度不对、空值）一律按多段处理。原则：绝不把多段误判为普通对象。
@@ -163,8 +191,10 @@ list_total_duration_sec: 642.31
 total_duration_sec: 780.45
 multipart: 5230
 corrupted: 42
+corrupted_multipart: 7
 list_failed: 3
 check_failed: 7
+multipart_check_failed: 2
 ```
 
 `is_check=false` 时只写前 5 行 + `list_failed`。
@@ -180,10 +210,10 @@ check_failed: 7
 
 stdout 约每 `progress_interval` 个对象打印一行：
 ```
-[progress] listed=1000000 checked=995000 multipart=5000 corrupted=30 elapsed=120s
+[progress] listed=1000000 multipart=5000 corrupted=30 corrupted_mp=7 list_failed=3 check_failed=7 multipart_check_failed=2 list_calls=12350 list_avg_ms=82.15 get_calls=995000 get_avg_ms=4.21 (checked=1000000) q=pfx:12 obj:48 cor:0 mp:0 cmp:0 lf:1 cf:0 mcf:0 su:0
 ```
 
-`is_check=false` 时只打 `listed`。程序结束时打印汇总。
+`is_check=false` 时只打 `listed`/`list_calls`/`list_failed`。程序结束时打印汇总。
 
 ## 测试
 

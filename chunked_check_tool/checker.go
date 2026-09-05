@@ -101,7 +101,7 @@ func (c *Checker) Handle(obj ObjectInfo) {
 		if c.cfg.IsMultipartCheck && c.cfg.MultipartSegmentSize > 0 && obj.Size > 0 {
 			c.checkMultipartSegments(obj)
 		} else {
-			c.out.WriteMultipart(obj.ETag, obj.Key)
+			c.out.WriteMultipartAll(obj.OwnerID, obj.Key)
 			c.stats.IncrMultipart()
 		}
 		return
@@ -114,7 +114,7 @@ func (c *Checker) Handle(obj ObjectInfo) {
 	// normal.
 	if obj.Size == 0 {
 		if c.cfg.IsSuccessLog {
-			c.out.WriteSuccess(obj.Key)
+			c.out.WriteSuccess(obj.OwnerID, obj.Key)
 		}
 		return
 	}
@@ -128,10 +128,10 @@ func (c *Checker) Handle(obj ObjectInfo) {
 	}
 
 	if chunkSigRe.Match(body) {
-		c.out.WriteCorrupted(obj.Key)
+		c.out.WriteCorrupted(obj.OwnerID, obj.Key)
 		c.stats.IncrCorrupted()
 	} else if c.cfg.IsSuccessLog {
-		c.out.WriteSuccess(obj.Key)
+		c.out.WriteSuccess(obj.OwnerID, obj.Key)
 	}
 }
 
@@ -139,9 +139,10 @@ func (c *Checker) Handle(obj ObjectInfo) {
 // (segments of cfg.MultipartSegmentSize bytes starting at offset 0, segSize,
 // 2*segSize, ...). If ANY segment's body matches the chunked-upload signature
 // regex, the object is flagged as corrupted multipart. If a segment RangeGet
-// returns an error, the object is flagged as check_failed (matching the
-// normal-object RangeGet error path). Otherwise the object is recorded as a
-// plain multipart.
+// returns an error, the object is flagged as multipart_check_failed (distinct
+// from check_failed — segment GET errors are a separate failure mode and get
+// their own file + counter). Otherwise the object is recorded as a clean
+// multipart (→ ok_multipart_objects.txt when is_success_log, else dropped).
 func (c *Checker) checkMultipartSegments(obj ObjectInfo) {
 	segSize := c.cfg.MultipartSegmentSize
 	numSegs := (obj.Size + segSize - 1) / segSize
@@ -149,18 +150,20 @@ func (c *Checker) checkMultipartSegments(obj ObjectInfo) {
 		offset := i * segSize
 		body, err := c.worker.RangeGetAt(context.Background(), obj.Key, offset, 128)
 		if err != nil {
-			c.out.WriteCheckFailed(obj.Key)
-			c.out.WriteCheckFailedLog(obj.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
-			c.stats.IncrCheckFailed()
+			c.out.WriteMultipartCheckFailed(obj.Key)
+			c.out.WriteMultipartCheckFailedLog(obj.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
+			c.stats.IncrMultipartCheckFailed()
 			return
 		}
 		if chunkSigRe.Match(body) {
-			c.out.WriteCorruptedMultipart(obj.Key)
+			c.out.WriteCorruptedMultipart(obj.OwnerID, obj.Key)
 			c.stats.IncrCorruptedMultipart()
 			return
 		}
 	}
-	// No segment matched — record as a plain multipart.
-	c.out.WriteMultipart(obj.ETag, obj.Key)
+	// No segment matched — record as a clean multipart.
+	if c.cfg.IsSuccessLog {
+		c.out.WriteMultipartOk(obj.OwnerID, obj.Key)
+	}
 	c.stats.IncrMultipart()
 }

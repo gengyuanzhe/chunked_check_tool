@@ -32,7 +32,7 @@
 | `lister.go` | `Lister`（无 `s3` 字段；`Run`/`processPrefix` 接 `s3` 参数）、无界队列 BFS、`inflight` atomic 计数 |
 | `walker.go` | `runRecursiveWalk`：Mode 3 信号量递归列举，`sync.WaitGroup` 终止，不用 queue/inflight |
 | `checker.go` | `Checker`、`isNormalETag`（严格 32 位小写 hex）、`chunkSigRe` |
-| `output.go` | 5 channel + 5 writer goroutine、`bufio.Writer` 64KB、append 模式、`<key>\|<etag>` 多段格式 |
+| `output.go` | 8 channel + writer goroutine（5 个按 OwnerID 分目录 fan-out，3 个根目录全局），`bufio.Writer` 64KB，append 模式，per-owner 文件按 `<ownerID>/<filename>` 路由（OwnerID 为空 → `_unknown/`） |
 | `queue.go` | 无界队列（slice + mutex + cond），ctx-aware 阻塞 Pop |
 | `stats.go` | atomic.Int64 计数器 + `StatsSnapshot` + `WriteToFile` + `PrintSummary` |
 | `progress.go` | `ProgressPrinter` + `localCounter`（每 worker 本地 int，无 per-obj atomic） |
@@ -41,27 +41,31 @@
 
 1. **多段判定严格**：仅 `^[0-9a-f]{32}$`（32 位小写 MD5 hex）算普通对象。大写、长度不对、`<hex>-N`、空值一律按多段处理。**绝不把多段误判为普通对象**。`isNormalETag` 用逐字节循环实现（非正则），不要改成宽松匹配。
 
-2. **多段对象跳过 Range GET**：直接写 `multipart_objects.txt`，格式 `<key>|<etag>\n`。不要给多段对象发 Range GET（浪费请求 + 可能误判）。
+2. **多段对象跳过 Range GET**：直接写 `<ownerID>/multipart_objects.txt`（仅 key，不带 ETag）。不要给多段对象发 Range GET（浪费请求 + 可能误判）。
 
-3. **ETag 来源**：list 响应（统一），**不从 Range GET response header 取**。
+3. **ETag 来源**：list 响应（统一），**不从 Range GET response header 取**。OwnerID 同样来自 list 响应（minio-go v7.3.0 默认 `fetchOwner=true`，无额外请求开销）。
 
-4. **checker goroutine 绝不退出**：任何错误写 `check_failed` 后继续。若 checker 退出，`objCh` 无人消费，list worker 永久阻塞。
+4. **结果文件按 OwnerID 分目录，处理文件全局**：`corrupted`/`multipart`/`corrupted_multipart`/`ok_multipart`/`ok` 这五类结果文件按 `<ownerID>/<filename>` 路由（OwnerID 为空 → `_unknown/`）；`list_failed`/`check_failed`/`multipart_check_failed`/`stats` 留根目录全局。理由：结果文件数量大且天然按 owner 分桶有意义；处理文件全局方便运维统一排查；stats 全局一份避免 owner 分桶后还要汇总。ownerDirName 折叠空/`.`/`..`/含路径分隔符的 OwnerID 到 `_unknown`，防止路径穿越。
 
-5. **`objCh` 永远会被关闭**：list 阶段保证（`listWg.Wait` → `close(objCh)`；或 Mode 1 无 seed 时显式 `q.Close()`）。
+5. **checker goroutine 绝不退出**：任何错误写 `check_failed`（普通对象）/ `multipart_check_failed`（多段分段）后继续。若 checker 退出，`objCh` 无人消费，list worker 永久阻塞。
 
-6. **Add-before-Push 顺序**（BFS 终止性）：Mode 2 在 push 新 subprefix 前 `inflight++`，否则 push 后 worker 消费完 inflight 已归零，新 subprefix 无人处理 → 永久挂起。改动 `lister.go` 的 `processPrefix` 时务必保留此顺序。
+6. **`objCh` 永远会被关闭**：list 阶段保证（`listWg.Wait` → `close(objCh)`；或 Mode 1 无 seed 时显式 `q.Close()`）。
 
-7. **Mode 1 不 seed 根 prefix**：根的直接对象由 `main` 用 delimiter 分页拿（Contents → objCh）；只把 CommonPrefixes（子目录）seed 进队列。若 seed 根，worker 会用 `delim=false` 平铺列出根，与 main 的 delimiter 分页重复，根下子目录对象被计两次。
+7. **Add-before-Push 顺序**（BFS 终止性）：Mode 2 在 push 新 subprefix 前 `inflight++`，否则 push 后 worker 消费完 inflight 已归零，新 subprefix 无人处理 → 永久挂起。改动 `lister.go` 的 `processPrefix` 时务必保留此顺序。
 
-8. **`-nextmarker` 仅 Mode 1 生效**：作为根列举的 start-after 参数。Mode 2 忽略（文档化限制）。
+8. **Mode 1 不 seed 根 prefix**：根的直接对象由 `main` 用 delimiter 分页拿（Contents → objCh）；只把 CommonPrefixes（子目录）seed 进队列。若 seed 根，worker 会用 `delim=false` 平铺列出根，与 main 的 delimiter 分页重复，根下子目录对象被计两次。
 
-9. **节点故障重试一次**：`S3Client.ListPage`/`RangeGet` 在 `isNodeFaultErr`（连接拒绝、超时、5xx，**不含 4xx**）时 `pool.MarkFailed` → `pool.Assign` 找下一个存活节点 → 重建 client → 重试一次。再失败按业务错误处理（写 `list_failed`/`check_failed`）。普通 S3 业务错误（404/403）不触发重绑。
+9. **`-nextmarker` 仅 Mode 1 生效**：作为根列举的 start-after 参数。Mode 2/3 忽略（文档化限制）。
 
-10. **性能优先但可读**：HTTP keep-alive（minio-go 自带连接池，不要自建）、`bufio.Writer` 64KB、合理 channel 容量、避免 per-obj 分配。**但**任何"复杂难读"的优化（手写内存池、unsafe、lock-free 结构）需先向用户请求确认，不要直接写。见 `memory/performance-vs-readability.md`。
+10. **节点故障重试一次**：`S3Client.ListPage`/`RangeGet`/`RangeGetAt` 在 `isNodeFaultErr`（连接拒绝、超时、5xx，**不含 4xx**）时 `pool.MarkFailed` → `pool.Assign` 找下一个存活节点 → 重建 client → 重试一次。再失败按业务错误处理（写 `list_failed`/`check_failed`/`multipart_check_failed`）。普通 S3 业务错误（404/403）不触发重绑。
 
-11. **Mode 3 用 WaitGroup 终止**：`walker.go` 的 `runRecursiveWalk` 不用 queue、不用 inflight 计数；终止性靠 `sync.WaitGroup`。每个 `go walk(subprefix)` **前**必须 `wg.Add(1)`，否则 Wait 可能在 spawn 前归零、过早关闭 objCh。root 首个 `wg.Add(1)` 同理在 `go walk(prefix)` 前。objCh 由 main 中的 walk goroutine 在 `wg.Wait()` 返回后显式关闭。子树列举失败只写 `list_failed` 跳过该子树，不中止其他分支。
+11. **性能优先但可读**：HTTP keep-alive（minio-go 自带连接池，不要自建）、`bufio.Writer` 64KB、合理 channel 容量、避免 per-obj 分配。**但**任何"复杂难读"的优化（手写内存池、unsafe、lock-free 结构）需先向用户请求确认，不要直接写。见 `memory/performance-vs-readability.md`。
 
-12. **V1/V2 分页协议对 caller 透明**：`S3Client.listPageOnce` 按 `cfg.ListAPIVersion` 分派 `Core.ListObjects`（V1，marker 游标）或 `Core.ListObjectsV2`（V2，continuation token）。两条路径都归一化进 `listResult{contents, commonPrefixes, next}`，`next` 作为下一次 `ListPage` 的 `continuationToken` 参数回传。V1 无 delimiter 且 `IsTruncated=true` 但 `NextMarker` 为空时，回退到最后一个 Contents key 作 marker；有 delimiter 时 S3 返回 `NextMarker`。caller（lister/walker/main 根分页）只需把 `next` 喂回 `continuationToken`，不感知 V1/V2 差异。`S3Client.core` 是 `minioListAPI` 接口（非 `*minio.Core`）以支持测试注入。
+12. **Mode 3 用 WaitGroup 终止**：`walker.go` 的 `runRecursiveWalk` 不用 queue、不用 inflight 计数；终止性靠 `sync.WaitGroup`。每个 `go walk(subprefix)` **前**必须 `wg.Add(1)`，否则 Wait 可能在 spawn 前归零、过早关闭 objCh。root 首个 `wg.Add(1)` 同理在 `go walk(prefix)` 前。objCh 由 main 中的 walk goroutine 在 `wg.Wait()` 返回后显式关闭。子树列举失败只写 `list_failed` 跳过该子树，不中止其他分支。
+
+13. **V1/V2 分页协议对 caller 透明**：`S3Client.listPageOnce` 按 `cfg.ListAPIVersion` 分派 `Core.ListObjects`（V1，marker 游标）或 `Core.ListObjectsV2`（V2，continuation token）。两条路径都归一化进 `listResult{contents, commonPrefixes, next}`，`next` 作为下一次 `ListPage` 的 `continuationToken` 参数回传。V1 无 delimiter 且 `IsTruncated=true` 但 `NextMarker` 为空时，回退到最后一个 Contents key 作 marker；有 delimiter 时 S3 返回 `NextMarker`。caller（lister/walker/main 根分页）只需把 `next` 喂回 `continuationToken`，不感知 V1/V2 差异。`S3Client.core` 是 `minioListAPI` 接口（非 `*minio.Core`）以支持测试注入。
+
+14. **多段分段检查的失败分流**：分段 RangeGet 报错走 `multipart_check_failed` 路径（`WriteMultipartCheckFailed` + `IncrMultipartCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_multipart_objects.txt` 并 `IncrCorruptedMultipart`（同时**不** `IncrMultipart`）。干净的多段对象 `IncrMultipart`，仅 `is_success_log=true` 时写 `<ownerID>/ok_multipart_objects.txt`。
 
 ## 5. CLI 与配置
 
@@ -84,22 +88,37 @@
 | `list_concurrency` | `8` | 列举并发度 |
 | `check_concurrency` | `16` | 校验并发度 |
 | `output_dir` | `.` | 输出目录 |
-| `is_check` | `true` | true=列举+校验；false=仅列举（只写 stats.txt） |
-| `is_success_log` | `false` | 是否记录正常对象到 success_objects.log |
+| `is_check` | `true` | true=列举+校验；false=仅列举（只写 stats.txt + list_failed.*） |
+| `is_success_log` | `false` | 是否记录正常对象到 `<ownerID>/ok_objects.txt` + 干净多段到 `<ownerID>/ok_multipart_objects.txt` |
+| `is_multipart_check` | `false` | 是否对多段对象做分段损坏检查 |
+| `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
 | `progress_interval` | `100000` | 进度打印阈值（约） |
 
-## 6. 输出文件（`output_dir` 下，append 模式）
+## 6. 输出文件（append 模式）
+
+### 结果文件（按 OwnerID 分目录，`<output_dir>/<ownerID>/<filename>`；OwnerID 为空 → `_unknown/`）
 
 | 文件 | 内容 | 何时写 |
 |---|---|---|
-| `corrupted_objects.txt` | 损坏普通对象 key | Range GET 命中 chunk-signature |
-| `multipart_objects.txt` | `<key>\|<etag>` | ETag 不匹配 `^[0-9a-f]{32}$` |
-| `list_failed.txt` | prefix + 原因 | list worker 调用失败 |
-| `check_failed.txt` | key + 原因 | checker 调用失败 / 非预期错误 |
-| `success_objects.log` | 正常对象 key | 仅 `is_success_log=true` |
-| `stats.txt` | 计时与计数 | 程序结束 |
+| `corrupted_objects.txt` | 损坏普通对象 key | Range GET 命中 chunk-signature（`is_check=true`） |
+| `multipart_objects.txt` | 多段对象 key（仅 key） | `is_multipart_check=false` 时所有多段对象 |
+| `corrupted_multipart_objects.txt` | 损坏多段对象 key | `is_multipart_check=true` 时分段检查命中 |
+| `ok_multipart_objects.txt` | 干净多段对象 key | `is_multipart_check=true` 且 `is_success_log=true` |
+| `ok_objects.txt` | 正常普通对象 key | `is_success_log=true` |
 
-`is_check=false` 时只写 `stats.txt`。
+### 处理文件（全局，根目录 `<output_dir>/<filename>`）
+
+| 文件 | 内容 | 何时写 |
+|---|---|---|
+| `list_failed.txt` | 列举失败 prefix | list worker 调用失败（list-only 模式也写） |
+| `list_failed.log` | 列举失败结构化错误（slog text，req_id/prefix/http_code/s3_code/err） | 同上 |
+| `check_failed.txt` | 普通对象校验失败 key | checker 普通对象 RangeGet 失败 |
+| `check_failed.log` | 校验失败结构化错误（slog text，req_id/key/http_code/s3_code/err） | 同上 |
+| `multipart_check_failed.txt` | 多段分段检查失败 key | `is_multipart_check=true` 时分段 RangeGet 失败 |
+| `multipart_check_failed.log` | 多段分段检查失败结构化错误（slog text） | 同上 |
+| `stats.txt` | 计时与计数（全局一份） | 程序结束 |
+
+`is_check=false` 时只写 `list_failed.*` + `stats.txt`，不创建 owner 目录。`is_check=true && is_multipart_check=false` 时 `corrupted_multipart_objects.txt` / `ok_multipart_objects.txt` / `multipart_check_failed.*` 不创建。
 
 ## 7. 编译与测试
 
@@ -132,11 +151,10 @@ Go 1.27 二进制路径：`/Users/gengyuanzhe/sdk/go1.27.1/bin/go`（若不在 P
 - **Core.ListObjectsV2 无 ctx 参数**：minio-go 限制， cancellation 在更高层（放弃 goroutine on `ctx.Done`），靠 socket 超时兜底。
 - **Checker.Handle 用 `context.Background()`**：非父 ctx（brief 逐字；改签名会级联到 Task 8）。
 - **MaybePrint 在 stats.Snapshot() 之后再取写锁**：快照原子安全，仅进度行时间戳可能略偏。
-- **进度行 `checked=` 显示 ListedTotal**：控制器简化决定，不是真实已校验数。
 - **Mode 1 根直接对象不调 `onObject`**：进度计数偏少（仅外观，stats 正确）。
 - **`workerIdx` 参数在 `Lister.Run` 未用**：保留给未来 NodePool 分配，当前是死重量。
-- **多段输出不转义 `|`**：key 中若含 `|` 会破坏 `<key>|<etag>` 格式（实践中 S3 key 罕见 `|`）。
 - **`list_type:3` 等非法值静默落到 Mode 2 分支**：可加校验。
+- **per-owner writer goroutine 的 MkdirAll/OpenFile 失败静默丢弃该行**：罕见启动期磁盘错误，第 N 个 owner 目录建不出来时该 owner 的结果行会丢，但其他 owner 不受影响。
 
 ## 9. 工作流约定
 

@@ -12,10 +12,14 @@
 
 **校验逻辑：**
 
-仅对普通对象进行校验。ETag 来自 list 响应（统一来源，**不从 Range GET response header 取**），根据 ETag 判断是普通对象还是多段：
+仅对普通对象进行强制校验；多段对象可选分段校验。ETag 来自 list 响应（统一来源，**不从 Range GET response header 取**），根据 ETag 判断是普通对象还是多段：
 
-- 如果是多段对象，直接写入 `multipart_objects.txt`，**不做 Range GET**。
-- 如果是普通对象，通过 Range GET 读前 128 字节，检查是否以 `length;chunk-signature=xxx\n` 格式开头；命中则视为损坏，写入 `corrupted_objects.txt`。
+- 如果是多段对象：
+  - 若 `is_multipart_check=true` 且 `multipart_segment_size>0`：按 `ceil(Size/segment_size)` 分段，对每段开头 128 字节做 Range GET，任一段命中 `length;chunk-signature=xxx` 格式即视为损坏，写入 `<ownerID>/corrupted_multipart_objects.txt`。某段 Range GET 报错走 `multipart_check_failed.txt`（根目录）路径并停止后续段检查；全部段均不匹配则按普通多段记入 `<ownerID>/ok_multipart_objects.txt`（仅 `is_success_log=true` 时落盘，否则只计数不写文件）。
+  - 否则直接写入 `<ownerID>/multipart_objects.txt`（仅 key，不带 ETag），**不做 Range GET**。
+- 如果是普通对象，通过 Range GET 读前 128 字节，检查是否以 `length;chunk-signature=xxx\n` 格式开头；命中则视为损坏，写入 `<ownerID>/corrupted_objects.txt`。
+
+`multipart_segment_size` 必须与上传时的 multipart part size 一致，否则 chunk-signature 不在段边界上会漏检。Size=0 的多段对象跳过分段检查，按普通多段记录。
 
 **ETag 区分（严格）**
 
@@ -26,7 +30,7 @@
 
 **多段输出格式**
 
-每行 `<key>|<etag>`，把 ETag 也写进去，用 `|` 和 key 分隔，key 在前 etag 在后。
+所有 .txt 文件（包括 `multipart_objects.txt`）**每行只存 key**，不带 ETag。
 
 **列举模式**
 
@@ -52,23 +56,40 @@ check_concurrency: 16   # 校验并发度
 output_dir: ./out       # 默认当前目录
 is_check: true          # true=列举+校验, false=仅列举
 is_success_log: false   # 是否记录正常对象
+is_multipart_check: false   # 是否对多段对象做分段损坏检查
+multipart_segment_size: 0    # 多段分段检查的段长度(字节)，需与上传 part size 一致
 progress_interval: 100000  # 进度打印阈值（约，性能优先）
 ```
 
-`is_check=false` 时只统计不校验，**不写任何对象文件**，仅写 `stats.txt`。
+`is_check=false` 时只统计不校验，**不写任何对象文件**，仅写 `stats.txt` + `list_failed.txt` + `list_failed.log`。
 
-**输出文件**（全部写到 `output_dir`，append 模式，支持断点续跑）：
+**输出文件**（全部 append 模式，支持断点续跑）：
+
+**结果文件**（按 OwnerID 分目录，路径 `<output_dir>/<ownerID>/<filename>`；OwnerID 为空时落到 `_unknown/`）：
+
+| 文件 | 内容 | 何时写 |
+|---|---|---|
+| `corrupted_objects.txt` | 损坏的普通对象 key | Range GET 命中 chunk-signature（`is_check=true`） |
+| `multipart_objects.txt` | 多段对象 key（仅 key，不带 ETag） | `is_multipart_check=false` 时所有多段对象 |
+| `corrupted_multipart_objects.txt` | 损坏的多段对象 key | `is_multipart_check=true` 时分段检查命中 |
+| `ok_multipart_objects.txt` | 干净的多段对象 key | `is_multipart_check=true` 且 `is_success_log=true` |
+| `ok_objects.txt` | 正常普通对象 key | `is_success_log=true` |
+
+**处理文件**（全局，根目录 `<output_dir>/<filename>`）：
 
 | 文件 | 内容 |
 |---|---|
-| `corrupted_objects.txt` | 损坏的普通对象 key |
-| `multipart_objects.txt` | `<key>\|<etag>` |
-| `list_failed.txt` | 列举失败的 prefix + 原因 |
-| `check_failed.txt` | 校验失败的对象 key + 原因 |
-| `success_objects.log` | 正常对象 key（仅 `is_success_log=true`） |
-| `stats.txt` | 计时与计数 |
+| `list_failed.txt` | 列举失败的 prefix（仅 prefix） |
+| `list_failed.log` | 列举失败的结构化错误信息（slog text，含 req_id/http_code/s3_code/err） |
+| `check_failed.txt` | 校验失败的普通对象 key（仅 key） |
+| `check_failed.log` | 校验失败的结构化错误信息（slog text，含 req_id/http_code/s3_code/err） |
+| `multipart_check_failed.txt` | 多段分段检查失败的对象 key（仅 key） |
+| `multipart_check_failed.log` | 多段分段检查失败的结构化错误信息（slog text，含 req_id/http_code/s3_code/err） |
+| `stats.txt` | 计时与计数（全局一份） |
 
-**统计**需要包含：对象总数、list 总次数、list 平均耗时、list 总耗时、程序执行总耗时、multipart 数、corrupted 数、list_failed 数、check_failed 数。
+`.txt` 与对应 `.log` 通过对象名/prefix 关联：`.txt` 只存 key/prefix 作关联键，错误原因在 `.log` 里。`.log` 字段顺序：`time level msg req_id key/prefix http_code s3_code err`（slog text handler，key=value 形式）。
+
+**统计**需要包含：对象总数、list 总次数、list 平均耗时、list 总耗时、get 总次数、get 平均耗时、程序执行总耗时、multipart 数、corrupted 数、corrupted_multipart 数、list_failed 数、check_failed 数、multipart_check_failed 数。
 
 ### 其他：
 

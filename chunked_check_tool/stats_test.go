@@ -17,6 +17,7 @@ func TestStatsIncrAndSnapshot(t *testing.T) {
 	s.IncrCorruptedMultipart()
 	s.IncrListFailed()
 	s.IncrCheckFailed()
+	s.IncrMultipartCheckFailed()
 	s.AddListCall(2 * time.Millisecond)
 	s.AddListCall(4 * time.Millisecond)
 	s.AddGetCall(10 * time.Millisecond)
@@ -33,6 +34,9 @@ func TestStatsIncrAndSnapshot(t *testing.T) {
 	}
 	if snap.CorruptedMultipart != 1 {
 		t.Errorf("corrupted_multipart=%d want 1", snap.CorruptedMultipart)
+	}
+	if snap.MultipartCheckFailed != 1 {
+		t.Errorf("multipart_check_failed=%d want 1", snap.MultipartCheckFailed)
 	}
 	if snap.ListCalls != 2 {
 		t.Errorf("listcalls=%d want 2", snap.ListCalls)

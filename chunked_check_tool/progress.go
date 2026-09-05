@@ -18,18 +18,19 @@ type ProgressPrinter struct {
 
 // QueueSnapshot is a live snapshot of all in-flight queues: the BFS
 // prefix queue, the objCh channel between lister and checker, and the
-// five buffered channels inside Output that feed the various .txt / .log
+// buffered channels inside Output that feed the various .txt / .log
 // writer goroutines. Reported as a group on every progress line so
 // backpressure is visible at a glance.
 type QueueSnapshot struct {
-	Prefix             int // BFS queue length (Queue.Len)
-	ObjCh              int // lister→checker channel (len(objCh))
-	Corrupted          int // → corrupted_objects.txt
-	Multipart          int // → multipart_objects.txt
-	CorruptedMultipart int // → corrupted_multipart_objects.txt
-	ListFailed         int // → list_failed.txt
-	CheckFailed        int // → check_failed.txt
-	Success            int // → success_objects.log
+	Prefix               int // BFS queue length (Queue.Len)
+	ObjCh                int // lister→checker channel (len(objCh))
+	Corrupted            int // → corrupted_objects.txt
+	Multipart            int // → multipart_objects.txt OR ok_multipart_objects.txt
+	CorruptedMultipart   int // → corrupted_multipart_objects.txt
+	ListFailed           int // → list_failed.txt
+	CheckFailed          int // → check_failed.txt
+	MultipartCheckFailed int // → multipart_check_failed.txt
+	Success              int // → ok_objects.txt
 }
 
 func NewProgressPrinter(w io.Writer) *ProgressPrinter {
@@ -51,19 +52,20 @@ func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	fmt.Fprintf(p.w,
-		"[progress] listed=%d multipart=%d corrupted=%d corrupted_mp=%d list_failed=%d check_failed=%d list_calls=%d list_avg_ms=%.2f get_calls=%d get_avg_ms=%.2f (%s=%d)",
+		"[progress] listed=%d multipart=%d corrupted=%d corrupted_mp=%d list_failed=%d check_failed=%d multipart_check_failed=%d list_calls=%d list_avg_ms=%.2f get_calls=%d get_avg_ms=%.2f (%s=%d)",
 		snap.ListedTotal,
 		snap.Multipart, snap.Corrupted,
 		snap.CorruptedMultipart,
 		snap.ListFailed, snap.CheckFailed,
+		snap.MultipartCheckFailed,
 		snap.ListCalls, snap.ListAvgLatencyMs,
 		snap.GetCalls, snap.GetAvgLatencyMs,
 		label, count,
 	)
 	if p.queueSnapshot != nil {
 		q := p.queueSnapshot()
-		fmt.Fprintf(p.w, " q=pfx:%d obj:%d cor:%d mp:%d cmp:%d lf:%d cf:%d su:%d",
-			q.Prefix, q.ObjCh, q.Corrupted, q.Multipart, q.CorruptedMultipart, q.ListFailed, q.CheckFailed, q.Success)
+		fmt.Fprintf(p.w, " q=pfx:%d obj:%d cor:%d mp:%d cmp:%d lf:%d cf:%d mcf:%d su:%d",
+			q.Prefix, q.ObjCh, q.Corrupted, q.Multipart, q.CorruptedMultipart, q.ListFailed, q.CheckFailed, q.MultipartCheckFailed, q.Success)
 	}
 	fmt.Fprintln(p.w)
 }

@@ -14,10 +14,17 @@ import (
 )
 
 // ObjectInfo is the subset of S3 object metadata we care about.
+//
+// OwnerID drives per-owner output partitioning: each owner gets its own
+// subfolder under output_dir, so result files (corrupted/ok/multipart) are
+// sharded by owner. Populated from minio.ObjectInfo.Owner.ID in ListPage.
+// Empty when the LIST response omits owner (some S3 implementations) —
+// writes then route to the "_unknown" subfolder.
 type ObjectInfo struct {
-	Key  string
-	ETag string
-	Size int64
+	Key     string
+	ETag    string
+	Size    int64
+	OwnerID string
 }
 
 // trimETagQuotes strips a single pair of surrounding double quotes that S3
@@ -148,7 +155,7 @@ func (c *S3Client) ListPage(ctx context.Context, prefix, startAfter, continuatio
 	}
 	objs := make([]ObjectInfo, 0, len(result.contents))
 	for _, o := range result.contents {
-		objs = append(objs, ObjectInfo{Key: o.Key, ETag: trimETagQuotes(o.ETag), Size: o.Size})
+		objs = append(objs, ObjectInfo{Key: o.Key, ETag: trimETagQuotes(o.ETag), Size: o.Size, OwnerID: o.Owner.ID})
 	}
 	prefixes := make([]string, 0, len(result.commonPrefixes))
 	for _, cp := range result.commonPrefixes {

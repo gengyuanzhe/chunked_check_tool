@@ -78,16 +78,17 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 	q := NewQueue()
 	lister := NewLister(q, out, stats, cfg)
 	printer.SetQueueSnapshotProvider(func() QueueSnapshot {
-		cor, mp, cmp, lf, cf, su := out.ChannelSnapshot()
+		cor, mpAll, cmp, mpOk, mcf, lf, cf, su := out.ChannelSnapshot()
 		return QueueSnapshot{
-			Prefix:             q.Len(),
-			ObjCh:              len(objCh),
-			Corrupted:          cor,
-			Multipart:          mp,
-			CorruptedMultipart: cmp,
-			ListFailed:         lf,
-			CheckFailed:        cf,
-			Success:            su,
+			Prefix:               q.Len(),
+			ObjCh:                len(objCh),
+			Corrupted:            cor,
+			Multipart:            mpAll + mpOk,
+			CorruptedMultipart:   cmp,
+			ListFailed:           lf,
+			CheckFailed:          cf,
+			MultipartCheckFailed: mcf,
+			Success:              su,
 		}
 	})
 
