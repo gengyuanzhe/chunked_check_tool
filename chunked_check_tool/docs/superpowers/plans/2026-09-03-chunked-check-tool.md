@@ -1689,7 +1689,7 @@ func (l *Lister) Run(ctx context.Context, wg *sync.WaitGroup, objCh chan<- Objec
 		}
 		l.processPrefix(ctx, prefix, objCh)
 		if l.inflight.Add(-1) == 0 {
-			l.queue.Close() // signal other workers to exit
+			l.queue.Close() // signal list_sub workers to exit
 			return
 		}
 	}

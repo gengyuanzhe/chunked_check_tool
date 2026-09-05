@@ -21,17 +21,17 @@ import (
 // queue but not yet fully processed (Seed/Add in processPrefix balance the
 // Add(-1) in Run). When a worker's Add(-1) returns 0, every prefix has
 // been drained — that worker closes the queue so blocked Pop calls in
-// other workers return (ok=false) and they exit too.
+// list_sub workers return (ok=false) and they exit too.
 //
 // Controller ruling (deviates from the original brief): s3 is NOT a field.
 // inflight must be shared across all workers — if each worker owned its
 // own Lister (as Task 10's main.go does), per-instance counters would break
 // BFS termination. Run and processPrefix therefore take s3 as a parameter.
 type Lister struct {
-	queue   *Queue
-	out     *Output
-	stats   *Stats
-	cfg     *Config
+	queue    *Queue
+	out      *Output
+	stats    *Stats
+	cfg      *Config
 	inflight atomic.Int64
 }
 
@@ -50,7 +50,7 @@ func (l *Lister) Seed(prefix string) {
 // Run is the worker loop. It pops prefixes off the queue and lists them
 // until either the context is cancelled or inflight drops to zero. The
 // worker that drives inflight to zero closes the queue, which unblocks any
-// other workers waiting in Queue.Pop.
+// list_sub workers waiting in Queue.Pop.
 //
 // onObject is invoked after each object is processed (sent to objCh in
 // check mode, classified locally in list-only mode). It is used by main to

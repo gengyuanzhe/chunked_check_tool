@@ -120,7 +120,7 @@ func TestWalkerConcurrencyCap(t *testing.T) {
 }
 
 // TestWalkerSubtreeFailureIsolation verifies that when one sub-prefix's
-// ListPage errors, the failure is recorded in list_failed and the other
+// ListPage errors, the failure is recorded in list_failed and the list_sub
 // branches are still enumerated.
 func TestWalkerSubtreeFailureIsolation(t *testing.T) {
 	tree := map[string][]pageResult{
