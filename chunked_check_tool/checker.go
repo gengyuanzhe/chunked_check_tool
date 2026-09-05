@@ -102,7 +102,7 @@ func (c *Checker) Handle(obj ObjectInfo) {
 			c.checkMultipartSegments(obj)
 		} else {
 			c.out.WriteMultipartAll(obj.OwnerID, obj.Key)
-			c.stats.IncrMultipart()
+			c.stats.IncrMultipartOk()
 		}
 		return
 	}
@@ -129,7 +129,7 @@ func (c *Checker) Handle(obj ObjectInfo) {
 
 	if chunkSigRe.Match(body) {
 		c.out.WriteCorrupted(obj.OwnerID, obj.Key)
-		c.stats.IncrCorrupted()
+		c.stats.IncrCorruptedObjects()
 	} else if c.cfg.IsSuccessLog {
 		c.out.WriteSuccess(obj.OwnerID, obj.Key)
 	}
@@ -165,5 +165,5 @@ func (c *Checker) checkMultipartSegments(obj ObjectInfo) {
 	if c.cfg.IsMultipartSuccessLog {
 		c.out.WriteMultipartOk(obj.OwnerID, obj.Key)
 	}
-	c.stats.IncrMultipart()
+	c.stats.IncrMultipartOk()
 }

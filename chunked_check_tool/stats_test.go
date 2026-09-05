@@ -12,8 +12,8 @@ func TestStatsIncrAndSnapshot(t *testing.T) {
 	s := NewStats()
 	s.IncrListed()
 	s.IncrListed()
-	s.IncrMultipart()
-	s.IncrCorrupted()
+	s.IncrMultipartOk()
+	s.IncrCorruptedObjects()
 	s.IncrCorruptedMultipart()
 	s.IncrListFailed()
 	s.IncrCheckFailed()
@@ -29,7 +29,7 @@ func TestStatsIncrAndSnapshot(t *testing.T) {
 	if snap.ListedTotal != 2 {
 		t.Errorf("listed=%d want 2", snap.ListedTotal)
 	}
-	if snap.Multipart != 1 || snap.Corrupted != 1 || snap.ListFailed != 1 || snap.CheckFailed != 1 {
+	if snap.MultipartOk != 1 || snap.CorruptedObjects != 1 || snap.ListFailed != 1 || snap.CheckFailed != 1 {
 		t.Errorf("counts wrong: %+v", snap)
 	}
 	if snap.CorruptedMultipart != 1 {
@@ -58,7 +58,7 @@ func TestStatsIncrAndSnapshot(t *testing.T) {
 func TestStatsWriteFile(t *testing.T) {
 	s := NewStats()
 	s.IncrListed()
-	s.IncrMultipart()
+	s.IncrMultipartOk()
 	s.AddListCall(1 * time.Millisecond)
 	s.SetListDuration(2 * time.Second)
 	s.SetTotalDuration(5 * time.Second)
@@ -70,7 +70,7 @@ func TestStatsWriteFile(t *testing.T) {
 	}
 	data, _ := os.ReadFile(path)
 	content := string(data)
-	for _, key := range []string{"total_objects:", "list_calls:", "list_avg_latency_ms:", "list_total_duration_sec:", "get_calls:", "get_avg_latency_ms:", "total_duration_sec:", "multipart:", "corrupted:"} {
+	for _, key := range []string{"total_objects:", "list_calls:", "list_avg_latency_ms:", "list_total_duration_sec:", "get_calls:", "get_avg_latency_ms:", "total_duration_sec:", "multipart_ok:", "corrupted_objects:"} {
 		if !strings.Contains(content, key) {
 			t.Errorf("missing %q in:\n%s", key, content)
 		}
@@ -80,7 +80,7 @@ func TestStatsWriteFile(t *testing.T) {
 func TestStatsWriteFileListOnly(t *testing.T) {
 	s := NewStats()
 	s.IncrListed()
-	s.IncrMultipart()
+	s.IncrMultipartOk()
 	s.SetListDuration(1 * time.Second)
 	s.SetTotalDuration(2 * time.Second)
 	dir := t.TempDir()
@@ -90,7 +90,7 @@ func TestStatsWriteFileListOnly(t *testing.T) {
 	}
 	data, _ := os.ReadFile(path)
 	content := string(data)
-	if strings.Contains(content, "corrupted:") {
-		t.Errorf("list-only mode should not contain corrupted: but got:\n%s", content)
+	if strings.Contains(content, "corrupted_objects:") {
+		t.Errorf("list-only mode should not contain corrupted_objects: but got:\n%s", content)
 	}
 }

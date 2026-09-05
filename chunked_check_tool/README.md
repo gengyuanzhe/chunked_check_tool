@@ -195,13 +195,20 @@ list_calls: 12350
 list_avg_latency_ms: 82.15
 list_total_duration_sec: 642.31
 total_duration_sec: 780.45
-multipart: 5230
-corrupted: 42
+multipart_ok: 5230
+corrupted_objects: 42
 corrupted_multipart: 7
 list_failed: 3
 check_failed: 7
 multipart_check_failed: 2
 ```
+
+字段含义：
+- `multipart_ok`：干净的多段对象数（switch off：所有多段；switch on：通过分段检查的）
+- `corrupted_objects`：损坏的普通对象数（写入 `<ownerID>/corrupted_objects.txt`）
+- `corrupted_multipart`：损坏的多段对象数（switch on 时分段检查命中）
+- `check_failed`：普通对象 RangeGet 失败数
+- `multipart_check_failed`：多段分段 RangeGet 失败数（switch on 时）
 
 `is_check=false` 时只写前 5 行 + `list_failed`。
 
@@ -216,7 +223,7 @@ multipart_check_failed: 2
 
 stdout 约每 `progress_interval` 个对象打印一行：
 ```
-[progress] listed=1000000 multipart=5000 corrupted=30 corrupted_mp=7 list_failed=3 check_failed=7 multipart_check_failed=2 list_calls=12350 list_avg_ms=82.15 get_calls=995000 get_avg_ms=4.21 (checked=1000000) q=pfx:12 obj:48 cor:0 mp:0 cmp:0 lf:1 cf:0 mcf:0 su:0
+[progress] listed=1000000 multipart_ok=5000 corrupted_objects=30 corrupted_mp=7 list_failed=3 check_failed=7 multipart_check_failed=2 list_calls=12350 list_avg_ms=82.15 get_calls=995000 get_avg_ms=4.21 (checked=1000000) q=pfx:12 obj:48 cor_obj:0 mp_ok:0 cmp:0 lf:1 cf:0 mcf:0 su:0
 ```
 
 `is_check=false` 时只打 `listed`/`list_calls`/`list_failed`。程序结束时打印汇总。

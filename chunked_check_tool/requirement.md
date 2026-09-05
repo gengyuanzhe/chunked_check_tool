@@ -90,7 +90,7 @@ progress_interval: 100000  # 进度打印阈值（约，性能优先）
 
 `.txt` 与对应 `.log` 通过对象名/prefix 关联：`.txt` 只存 key/prefix 作关联键，错误原因在 `.log` 里。`.log` 字段顺序：`time level msg req_id key/prefix http_code s3_code err`（slog text handler，key=value 形式）。
 
-**统计**需要包含：对象总数、list 总次数、list 平均耗时、list 总耗时、get 总次数、get 平均耗时、程序执行总耗时、multipart 数、corrupted 数、corrupted_multipart 数、list_failed 数、check_failed 数、multipart_check_failed 数。
+**统计**需要包含：对象总数、list 总次数、list 平均耗时、list 总耗时、get 总次数、get 平均耗时、程序执行总耗时、multipart_ok 数（干净多段，switch off 时为全部多段、switch on 时为通过分段检查的）、corrupted_objects 数（损坏普通对象）、corrupted_multipart 数、list_failed 数、check_failed 数（普通对象 RangeGet 失败）、multipart_check_failed 数。
 
 ### 其他：
 

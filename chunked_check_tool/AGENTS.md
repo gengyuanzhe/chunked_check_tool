@@ -65,7 +65,9 @@
 
 13. **V1/V2 分页协议对 caller 透明**：`S3Client.listPageOnce` 按 `cfg.ListAPIVersion` 分派 `Core.ListObjects`（V1，marker 游标）或 `Core.ListObjectsV2`（V2，continuation token）。两条路径都归一化进 `listResult{contents, commonPrefixes, next}`，`next` 作为下一次 `ListPage` 的 `continuationToken` 参数回传。V1 无 delimiter 且 `IsTruncated=true` 但 `NextMarker` 为空时，回退到最后一个 Contents key 作 marker；有 delimiter 时 S3 返回 `NextMarker`。caller（lister/walker/main 根分页）只需把 `next` 喂回 `continuationToken`，不感知 V1/V2 差异。`S3Client.core` 是 `minioListAPI` 接口（非 `*minio.Core`）以支持测试注入。
 
-14. **多段分段检查的失败分流**：分段 RangeGet 报错走 `multipart_check_failed` 路径（`WriteMultipartCheckFailed` + `IncrMultipartCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_multipart_objects.txt` 并 `IncrCorruptedMultipart`（同时**不** `IncrMultipart`）。干净的多段对象 `IncrMultipart`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_multipart_objects.txt`（与普通对象的 `is_success_log` 独立，互不影响）。
+14. **多段分段检查的失败分流**：分段 RangeGet 报错走 `multipart_check_failed` 路径（`WriteMultipartCheckFailed` + `IncrMultipartCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_multipart_objects.txt` 并 `IncrCorruptedMultipart`（同时**不** `IncrMultipartOk`）。干净的多段对象 `IncrMultipartOk`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_multipart_objects.txt`（与普通对象的 `is_success_log` 独立，互不影响）。
+
+15. **统计字段命名**：`multipart_ok`（干净多段；switch off=全部多段、switch on=通过分段检查的）/ `corrupted_objects`（损坏普通对象）/ `corrupted_multipart`（损坏多段）/ `check_failed`（普通对象 RangeGet 失败）/ `multipart_check_failed`（多段分段 RangeGet 失败）/ `list_failed`。**禁止用单字 `multipart` 或 `corrupted` 做字段名**——会有"全部多段？损坏？成功多段？"歧义。
 
 ## 5. CLI 与配置
 

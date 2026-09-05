@@ -25,7 +25,7 @@ import (
 // Counting rule mirrors Lister.processPrefix: in check mode the walker
 // does NOT IncrListed — the checker bumps listedTotal once per consumed
 // object. In list-only mode the walker is the sole counter and bumps
-// IncrListed (and IncrMultipart for non-32-hex ETags) per object.
+// IncrListed (and IncrMultipartOk for non-32-hex ETags) per object.
 //
 // Failure handling: a ListPage error writes the prefix to list_failed,
 // bumps ListFailed, and returns — the subtree under that prefix is
@@ -64,7 +64,7 @@ func runRecursiveWalk(ctx context.Context, s3 S3API, prefix string, objCh chan<-
 				} else {
 					stats.IncrListed()
 					if !isNormalETag(o.ETag) {
-						stats.IncrMultipart()
+						stats.IncrMultipartOk()
 					}
 				}
 				if onObject != nil {

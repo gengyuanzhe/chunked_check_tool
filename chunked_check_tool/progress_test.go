@@ -46,8 +46,9 @@ func TestProgressPrintsQueueLengths(t *testing.T) {
 	pp.SetQueueSnapshotProvider(func() QueueSnapshot {
 		return QueueSnapshot{
 			Prefix: 7, ObjCh: 42,
-			Corrupted: 1, Multipart: 2, ListFailed: 3, CheckFailed: 4, Success: 5,
+			CorruptedObjects: 1, MultipartOk: 2,
 			CorruptedMultipart:   6,
+			ListFailed:           3, CheckFailed: 4, Success: 5,
 			MultipartCheckFailed: 8,
 		}
 	})
@@ -60,8 +61,8 @@ func TestProgressPrintsQueueLengths(t *testing.T) {
 		`get_calls=1`,
 		`q=pfx:7`,
 		`obj:42`,
-		`cor:1`,
-		`mp:2`,
+		`cor_obj:1`,
+		`mp_ok:2`,
 		`cmp:6`,
 		`mcf:8`,
 		`lf:3`,

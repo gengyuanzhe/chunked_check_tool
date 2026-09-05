@@ -82,8 +82,8 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 		return QueueSnapshot{
 			Prefix:               q.Len(),
 			ObjCh:                len(objCh),
-			Corrupted:            cor,
-			Multipart:            mpAll + mpOk,
+			CorruptedObjects:     cor,
+			MultipartOk:          mpAll + mpOk,
 			CorruptedMultipart:   cmp,
 			ListFailed:           lf,
 			CheckFailed:          cf,
@@ -164,7 +164,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 					// and classifies root direct objects here too.
 					stats.IncrListed()
 					if !isNormalETag(o.ETag) {
-						stats.IncrMultipart()
+						stats.IncrMultipartOk()
 					}
 				}
 			}

@@ -73,8 +73,8 @@ func TestCheckerHandleCorrupted(t *testing.T) {
 	worker := &FakeS3{Body: body}
 	c := NewChecker(worker, out, s, cfg)
 	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef", Size: 1})
-	if s.Snapshot().Corrupted != 1 {
-		t.Errorf("corrupted=%d want 1", s.Snapshot().Corrupted)
+	if s.Snapshot().CorruptedObjects != 1 {
+		t.Errorf("corrupted=%d want 1", s.Snapshot().CorruptedObjects)
 	}
 }
 
@@ -95,8 +95,8 @@ func TestCheckerHandleMultipartSkipsRangeGet(t *testing.T) {
 	if called {
 		t.Error("RangeGet should not be called for multipart")
 	}
-	if s.Snapshot().Multipart != 1 {
-		t.Errorf("multipart=%d want 1", s.Snapshot().Multipart)
+	if s.Snapshot().MultipartOk != 1 {
+		t.Errorf("multipart=%d want 1", s.Snapshot().MultipartOk)
 	}
 }
 
@@ -223,7 +223,7 @@ func TestCheckerMultipartSegmentCheckCorrupted(t *testing.T) {
 	if got := s.Snapshot().CorruptedMultipart; got != 1 {
 		t.Errorf("corrupted_multipart=%d want 1", got)
 	}
-	if got := s.Snapshot().Multipart; got != 0 {
+	if got := s.Snapshot().MultipartOk; got != 0 {
 		t.Errorf("multipart=%d want 0 (corrupted multipart should not also count as plain multipart)", got)
 	}
 	if err := out.Close(); err != nil {
@@ -250,7 +250,7 @@ func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 	if got := s.Snapshot().CorruptedMultipart; got != 0 {
 		t.Errorf("corrupted_multipart=%d want 0", got)
 	}
-	if got := s.Snapshot().Multipart; got != 1 {
+	if got := s.Snapshot().MultipartOk; got != 1 {
 		t.Errorf("multipart=%d want 1 (clean multipart should still be recorded as multipart)", got)
 	}
 	if err := out.Close(); err != nil {
@@ -312,7 +312,7 @@ func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 	if got := s.Snapshot().CorruptedMultipart; got != 0 {
 		t.Errorf("corrupted_multipart=%d want 0 (switch off)", got)
 	}
-	if got := s.Snapshot().Multipart; got != 1 {
+	if got := s.Snapshot().MultipartOk; got != 1 {
 		t.Errorf("multipart=%d want 1 (switch off, plain multipart)", got)
 	}
 	if err := out.Close(); err != nil {

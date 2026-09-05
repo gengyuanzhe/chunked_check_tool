@@ -24,8 +24,8 @@ type ProgressPrinter struct {
 type QueueSnapshot struct {
 	Prefix               int // BFS queue length (Queue.Len)
 	ObjCh                int // lister→checker channel (len(objCh))
-	Corrupted            int // → corrupted_objects.txt
-	Multipart            int // → multipart_objects.txt OR ok_multipart_objects.txt
+	CorruptedObjects     int // → corrupted_objects.txt
+	MultipartOk          int // → multipart_objects.txt OR ok_multipart_objects.txt
 	CorruptedMultipart   int // → corrupted_multipart_objects.txt
 	ListFailed           int // → list_failed.txt
 	CheckFailed          int // → check_failed.txt
@@ -52,9 +52,9 @@ func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	fmt.Fprintf(p.w,
-		"[progress] listed=%d multipart=%d corrupted=%d corrupted_mp=%d list_failed=%d check_failed=%d multipart_check_failed=%d list_calls=%d list_avg_ms=%.2f get_calls=%d get_avg_ms=%.2f (%s=%d)",
+		"[progress] listed=%d multipart_ok=%d corrupted_objects=%d corrupted_mp=%d list_failed=%d check_failed=%d multipart_check_failed=%d list_calls=%d list_avg_ms=%.2f get_calls=%d get_avg_ms=%.2f (%s=%d)",
 		snap.ListedTotal,
-		snap.Multipart, snap.Corrupted,
+		snap.MultipartOk, snap.CorruptedObjects,
 		snap.CorruptedMultipart,
 		snap.ListFailed, snap.CheckFailed,
 		snap.MultipartCheckFailed,
@@ -64,8 +64,8 @@ func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
 	)
 	if p.queueSnapshot != nil {
 		q := p.queueSnapshot()
-		fmt.Fprintf(p.w, " q=pfx:%d obj:%d cor:%d mp:%d cmp:%d lf:%d cf:%d mcf:%d su:%d",
-			q.Prefix, q.ObjCh, q.Corrupted, q.Multipart, q.CorruptedMultipart, q.ListFailed, q.CheckFailed, q.MultipartCheckFailed, q.Success)
+		fmt.Fprintf(p.w, " q=pfx:%d obj:%d cor_obj:%d mp_ok:%d cmp:%d lf:%d cf:%d mcf:%d su:%d",
+			q.Prefix, q.ObjCh, q.CorruptedObjects, q.MultipartOk, q.CorruptedMultipart, q.ListFailed, q.CheckFailed, q.MultipartCheckFailed, q.Success)
 	}
 	fmt.Fprintln(p.w)
 }
