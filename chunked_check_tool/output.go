@@ -77,7 +77,7 @@ func NewOutput(cfg *Config) (*Output, error) {
 		corruptedEnabled:            isCheck,
 		multipartAllEnabled:         isCheck && !isMP,
 		corruptedMultipartEnabled:   isCheck && isMP,
-		multipartOkEnabled:          isCheck && isMP && cfg.IsSuccessLog,
+		multipartOkEnabled:          isCheck && isMP && cfg.IsMultipartSuccessLog,
 		multipartCheckFailedEnabled: isCheck && isMP,
 		checkEnabled:                isCheck,
 		successEnabled:              isCheck && cfg.IsSuccessLog,

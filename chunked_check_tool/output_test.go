@@ -80,11 +80,11 @@ func TestOutputCorruptedMultipartPerOwner(t *testing.T) {
 	}
 }
 
-// TestOutputMultipartOkPerOwner — switch on + is_success_log: clean multipart
-// writes to <owner>/ok_multipart_objects.txt.
+// TestOutputMultipartOkPerOwner — switch on + is_multipart_success_log: clean
+// multipart writes to <owner>/ok_multipart_objects.txt.
 func TestOutputMultipartOkPerOwner(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, IsSuccessLog: true, MultipartSegmentSize: 5 * 1024 * 1024}
+	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, IsSuccessLog: true, IsMultipartSuccessLog: true, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg)
 	o.WriteMultipartOk("owner-A", "mp/clean")
 	o.Close()
@@ -94,16 +94,16 @@ func TestOutputMultipartOkPerOwner(t *testing.T) {
 	}
 }
 
-// TestOutputMultipartOkSkippedWhenSuccessLogOff — switch on but is_success_log
-// off: ok_multipart file must not be created.
+// TestOutputMultipartOkSkippedWhenSuccessLogOff — switch on but
+// is_multipart_success_log off: ok_multipart file must not be created.
 func TestOutputMultipartOkSkippedWhenSuccessLogOff(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, IsSuccessLog: false, MultipartSegmentSize: 5 * 1024 * 1024}
+	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, IsSuccessLog: true, IsMultipartSuccessLog: false, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg)
 	o.WriteMultipartOk("owner-A", "mp/clean") // no-op
 	o.Close()
 	if _, err := os.Stat(ownerSub(dir, "owner-A", "ok_multipart_objects.txt")); !os.IsNotExist(err) {
-		t.Errorf("ok_multipart_objects.txt should not exist when is_success_log off, got %v", err)
+		t.Errorf("ok_multipart_objects.txt should not exist when is_multipart_success_log off, got %v", err)
 	}
 }
 

@@ -38,9 +38,10 @@ list_concurrency: 8
 check_concurrency: 16
 output_dir: ./out
 is_check: true          # true=列举+校验, false=仅列举
-is_success_log: false   # 是否记录正常对象
+is_success_log: false   # 是否记录正常普通对象到 <ownerID>/ok_objects.txt
 is_multipart_check: false   # 是否对多段对象做分段损坏检查
 multipart_segment_size: 0    # 多段分段检查的段长度(字节)，需与上传 part size 一致
+is_multipart_success_log: false  # 是否记录干净的多段对象到 <ownerID>/ok_multipart_objects.txt
 progress_interval: 100000
 obj_ch_capacity: 0           # lister→checker channel 容量；0=max(check_concurrency*4, 2000)
 output_ch_capacity: 0        # output writer channel 容量；0=1024
@@ -57,9 +58,10 @@ output_ch_capacity: 0        # output writer channel 容量；0=1024
 | `check_concurrency` | `16` | 校验 worker 数 |
 | `output_dir` | `.` | 输出目录（自动创建） |
 | `is_check` | `true` | `false` 时只列举不校验，仅写 `stats.txt` + `list_failed.*` |
-| `is_success_log` | `false` | `true` 时把正常对象 key 写入 `<ownerID>/ok_objects.txt`，干净的多段写入 `<ownerID>/ok_multipart_objects.txt` |
+| `is_success_log` | `false` | `true` 时把正常普通对象 key 写入 `<ownerID>/ok_objects.txt` |
 | `is_multipart_check` | `false` | `true` 时对多段对象做分段损坏检查 |
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
+| `is_multipart_success_log` | `false` | `true` 时把干净的多段对象 key 写入 `<ownerID>/ok_multipart_objects.txt` |
 | `progress_interval` | `100000` | stdout 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；0 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；0 走默认 |

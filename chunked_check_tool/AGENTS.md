@@ -65,7 +65,7 @@
 
 13. **V1/V2 分页协议对 caller 透明**：`S3Client.listPageOnce` 按 `cfg.ListAPIVersion` 分派 `Core.ListObjects`（V1，marker 游标）或 `Core.ListObjectsV2`（V2，continuation token）。两条路径都归一化进 `listResult{contents, commonPrefixes, next}`，`next` 作为下一次 `ListPage` 的 `continuationToken` 参数回传。V1 无 delimiter 且 `IsTruncated=true` 但 `NextMarker` 为空时，回退到最后一个 Contents key 作 marker；有 delimiter 时 S3 返回 `NextMarker`。caller（lister/walker/main 根分页）只需把 `next` 喂回 `continuationToken`，不感知 V1/V2 差异。`S3Client.core` 是 `minioListAPI` 接口（非 `*minio.Core`）以支持测试注入。
 
-14. **多段分段检查的失败分流**：分段 RangeGet 报错走 `multipart_check_failed` 路径（`WriteMultipartCheckFailed` + `IncrMultipartCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_multipart_objects.txt` 并 `IncrCorruptedMultipart`（同时**不** `IncrMultipart`）。干净的多段对象 `IncrMultipart`，仅 `is_success_log=true` 时写 `<ownerID>/ok_multipart_objects.txt`。
+14. **多段分段检查的失败分流**：分段 RangeGet 报错走 `multipart_check_failed` 路径（`WriteMultipartCheckFailed` + `IncrMultipartCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_multipart_objects.txt` 并 `IncrCorruptedMultipart`（同时**不** `IncrMultipart`）。干净的多段对象 `IncrMultipart`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_multipart_objects.txt`（与普通对象的 `is_success_log` 独立，互不影响）。
 
 ## 5. CLI 与配置
 
@@ -89,9 +89,10 @@
 | `check_concurrency` | `16` | 校验并发度 |
 | `output_dir` | `.` | 输出目录 |
 | `is_check` | `true` | true=列举+校验；false=仅列举（只写 stats.txt + list_failed.*） |
-| `is_success_log` | `false` | 是否记录正常对象到 `<ownerID>/ok_objects.txt` + 干净多段到 `<ownerID>/ok_multipart_objects.txt` |
+| `is_success_log` | `false` | 是否记录正常普通对象到 `<ownerID>/ok_objects.txt` |
 | `is_multipart_check` | `false` | 是否对多段对象做分段损坏检查 |
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
+| `is_multipart_success_log` | `false` | 是否记录干净的多段对象到 `<ownerID>/ok_multipart_objects.txt` |
 | `progress_interval` | `100000` | 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；`0` 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；`0` 走默认 |

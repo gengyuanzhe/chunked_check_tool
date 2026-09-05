@@ -162,7 +162,7 @@ func (c *Checker) checkMultipartSegments(obj ObjectInfo) {
 		}
 	}
 	// No segment matched — record as a clean multipart.
-	if c.cfg.IsSuccessLog {
+	if c.cfg.IsMultipartSuccessLog {
 		c.out.WriteMultipartOk(obj.OwnerID, obj.Key)
 	}
 	c.stats.IncrMultipart()

@@ -198,11 +198,12 @@ var chunkSigBody = []byte("1000;chunk-signature=00000000000000000000000000000000
 // the given segment size. Used by the TestCheckerMultipartSegmentCheck* tests.
 func multipartCfg(dir string, segSize int64) *Config {
 	return &Config{
-		OutputDir:            dir,
-		IsCheck:              true,
-		IsMultipartCheck:     true,
-		IsSuccessLog:         true,
-		MultipartSegmentSize: segSize,
+		OutputDir:             dir,
+		IsCheck:               true,
+		IsMultipartCheck:      true,
+		IsSuccessLog:          true,
+		IsMultipartSuccessLog: true,
+		MultipartSegmentSize:  segSize,
 	}
 }
 
