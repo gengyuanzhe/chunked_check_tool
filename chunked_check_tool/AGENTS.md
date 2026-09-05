@@ -93,6 +93,8 @@
 | `is_multipart_check` | `false` | 是否对多段对象做分段损坏检查 |
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
 | `progress_interval` | `100000` | 进度打印阈值（约） |
+| `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；`0` 走默认 |
+| `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；`0` 走默认 |
 
 ## 6. 输出文件（append 模式）
 
