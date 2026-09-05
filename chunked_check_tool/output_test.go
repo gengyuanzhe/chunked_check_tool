@@ -19,7 +19,7 @@ func ownerSub(dir, ownerID, name string) string {
 func TestOutputPerOwnerRouting(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsSuccessLog: true}
-	o, _ := NewOutput(cfg)
+	o, _ := NewOutput(cfg, "test-bkt")
 	o.WriteCorrupted("owner-A", "obj/a1")
 	o.WriteCorrupted("owner-B", "obj/b1")
 	o.WriteSuccess("owner-A", "obj/a-ok")
@@ -31,10 +31,10 @@ func TestOutputPerOwnerRouting(t *testing.T) {
 		path string
 		want string
 	}{
-		{ownerSub(dir, "owner-A", "corrupted_objects.txt"), "obj/a1"},
-		{ownerSub(dir, "owner-B", "corrupted_objects.txt"), "obj/b1"},
-		{ownerSub(dir, "owner-A", "ok_objects.txt"), "obj/a-ok"},
-		{ownerSub(dir, "owner-B", "mp.txt"), "obj/b-mp"},
+		{ownerSub(dir, "owner-A", "corrupted_objects.txt"), "test-bkt|obj/a1"},
+		{ownerSub(dir, "owner-B", "corrupted_objects.txt"), "test-bkt|obj/b1"},
+		{ownerSub(dir, "owner-A", "ok_objects.txt"), "test-bkt|obj/a-ok"},
+		{ownerSub(dir, "owner-B", "mp.txt"), "test-bkt|obj/b-mp"},
 	} {
 		data, err := os.ReadFile(c.path)
 		if err != nil {
@@ -57,12 +57,12 @@ func TestOutputPerOwnerRouting(t *testing.T) {
 func TestOutputMultipartAllKeyOnly(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
-	o, _ := NewOutput(cfg)
+	o, _ := NewOutput(cfg, "test-bkt")
 	o.WriteMultipartAll("owner-A", "key/with|pipe")
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "mp.txt"))
-	if line := strings.TrimSpace(string(data)); line != "key/with|pipe" {
-		t.Errorf("multipart line = %q, want %q (key only, no etag)", line, "key/with|pipe")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|key/with|pipe" {
+		t.Errorf("multipart line = %q, want %q (bucket|key, key may contain |)", line, "test-bkt|key/with|pipe")
 	}
 }
 
@@ -71,12 +71,12 @@ func TestOutputMultipartAllKeyOnly(t *testing.T) {
 func TestOutputCorruptedMultipartPerOwner(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, MultipartSegmentSize: 5 * 1024 * 1024}
-	o, _ := NewOutput(cfg)
+	o, _ := NewOutput(cfg, "test-bkt")
 	o.WriteCorruptedMultipart("owner-A", "mp/k1")
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
-	if line := strings.TrimSpace(string(data)); line != "mp/k1" {
-		t.Errorf("corrupted_mp = %q, want %q", line, "mp/k1")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/k1" {
+		t.Errorf("corrupted_mp = %q, want %q", line, "test-bkt|mp/k1")
 	}
 }
 
@@ -85,12 +85,12 @@ func TestOutputCorruptedMultipartPerOwner(t *testing.T) {
 func TestOutputMultipartOkPerOwner(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, IsSuccessLog: true, IsMultipartSuccessLog: true, MultipartSegmentSize: 5 * 1024 * 1024}
-	o, _ := NewOutput(cfg)
+	o, _ := NewOutput(cfg, "test-bkt")
 	o.WriteMultipartOk("owner-A", "mp/clean")
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "ok_mp.txt"))
-	if line := strings.TrimSpace(string(data)); line != "mp/clean" {
-		t.Errorf("ok_multipart = %q, want %q", line, "mp/clean")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/clean" {
+		t.Errorf("ok_multipart = %q, want %q", line, "test-bkt|mp/clean")
 	}
 }
 
@@ -99,7 +99,7 @@ func TestOutputMultipartOkPerOwner(t *testing.T) {
 func TestOutputMultipartOkSkippedWhenSuccessLogOff(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, IsSuccessLog: true, IsMultipartSuccessLog: false, MultipartSegmentSize: 5 * 1024 * 1024}
-	o, _ := NewOutput(cfg)
+	o, _ := NewOutput(cfg, "test-bkt")
 	o.WriteMultipartOk("owner-A", "mp/clean") // no-op
 	o.Close()
 	if _, err := os.Stat(ownerSub(dir, "owner-A", "ok_mp.txt")); !os.IsNotExist(err) {
@@ -112,7 +112,7 @@ func TestOutputMultipartOkSkippedWhenSuccessLogOff(t *testing.T) {
 func TestOutputCheckFailedAtRoot(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
-	o, _ := NewOutput(cfg)
+	o, _ := NewOutput(cfg, "test-bkt")
 	o.WriteCheckFailed("obj/c")
 	o.Close()
 	data, _ := os.ReadFile(filepath.Join(dir, "check_failed.txt"))
@@ -130,7 +130,7 @@ func TestOutputCheckFailedAtRoot(t *testing.T) {
 func TestOutputMultipartCheckFailedAtRoot(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, MultipartSegmentSize: 5 * 1024 * 1024}
-	o, _ := NewOutput(cfg)
+	o, _ := NewOutput(cfg, "test-bkt")
 	o.WriteMultipartCheckFailed("mp/k1")
 	o.Close()
 	data, _ := os.ReadFile(filepath.Join(dir, "multipart_check_failed.txt"))
@@ -144,7 +144,7 @@ func TestOutputMultipartCheckFailedAtRoot(t *testing.T) {
 func TestOutputMultipartCheckFailedSkippedWhenSwitchOff(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: false}
-	o, _ := NewOutput(cfg)
+	o, _ := NewOutput(cfg, "test-bkt")
 	o.WriteMultipartCheckFailed("mp/k1") // no-op
 	o.Close()
 	if _, err := os.Stat(filepath.Join(dir, "multipart_check_failed.txt")); !os.IsNotExist(err) {
@@ -159,7 +159,7 @@ func TestOutputMultipartCheckFailedSkippedWhenSwitchOff(t *testing.T) {
 func TestOutputListFailedLogStructured(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: false}
-	o, _ := NewOutput(cfg)
+	o, _ := NewOutput(cfg, "test-bkt")
 	er := minio.ErrorResponse{
 		Code:       "InternalError",
 		Message:    "we crashed",
@@ -189,6 +189,7 @@ func TestOutputListFailedLogStructured(t *testing.T) {
 		`level=ERROR`,
 		`msg="list failed"`,
 		`req_id=REQ-LF-1`,
+		`bucket=test-bkt`,
 		`prefix=prefix/x`,
 		`http_code=500`,
 		`s3_code=InternalError`,
@@ -205,7 +206,7 @@ func TestOutputListFailedLogStructured(t *testing.T) {
 func TestOutputListOnlySkipsPerOwnerFiles(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: false, IsSuccessLog: false}
-	o, err := NewOutput(cfg)
+	o, err := NewOutput(cfg, "test-bkt")
 	if err != nil {
 		t.Fatal(err)
 	}

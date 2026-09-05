@@ -45,6 +45,7 @@ is_multipart_success_log: false  # 是否记录干净的多段对象到 <ownerID
 progress_interval: 100000
 obj_ch_capacity: 0           # lister→checker channel 容量；0=max(check_concurrency*4, 2000)
 output_ch_capacity: 0        # output writer channel 容量；0=1024
+result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>/<key>/<owner> 占位符
 ```
 
 | 字段 | 默认 | 说明 |
@@ -65,6 +66,7 @@ output_ch_capacity: 0        # output writer channel 容量；0=1024
 | `progress_interval` | `100000` | stdout 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；0 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；0 走默认 |
+| `result_line_format` | `<bucket>\|<key>` | 结果文件每行格式，支持 `<bucket>`/`<key>`/`<owner>` 占位符；只影响 per-owner 结果文件，处理文件（list_failed/check_failed/multipart_check_failed）始终只存 key/prefix |
 
 ### 配置示例
 
@@ -121,6 +123,10 @@ multipart_segment_size: 5242880   # 5 MiB，需与上传 multipart part size 一
 
 按 `Ctrl+C`（SIGINT）或 `SIGTERM` 会触发优雅关闭：种子循环中断，但已缓冲的输出和统计仍会落盘。
 
+### 启动输出与 run.log
+
+启动时程序会把所有配置项（ak/sk 屏蔽为 `***`）和 CLI 参数（bucket/prefix/nextmarker）打印到 stdout，同时 stdout 与 stderr 都 tee 到 `<output_dir>/run.log`（append 模式，支持断点续跑）。进度行、节点故障告警、最终 summary 都会进 run.log，方便事后排查。
+
 ## 列举模式
 
 ### Mode 1（`list_type: 1`，子目录 + 平铺 nextmarker）
@@ -175,14 +181,21 @@ multipart_segment_size: 5242880   # 5 MiB，需与上传 multipart part size 一
 | `multipart_check_failed.log` | 多段分段检查失败结构化错误信息（slog text） | 同上 |
 | `stats.txt` | 计时与计数（全局一份） | 程序结束 |
 
+### 结果文件行格式
+
+每行按 `result_line_format` 配置渲染（默认 `<bucket>|<key>`）。支持占位符 `<bucket>`、`<key>`、`<owner>`，其他字符按字面输出。例：
+```
+mybucket|data/2026/01/file.bin
+```
+
 `is_check=false` 时只写 `list_failed.*` + `stats.txt`，不写任何对象文件，不创建 owner 目录。
 
 ### mp.txt 格式
 
-每行只存 key，不带 ETag：
+每行按 `result_line_format` 渲染（默认 `<bucket>|<key>`），不带 ETag：
 ```
-data/2026/01/file.bin
-data/2026/02/no-etag.bin
+mybucket|data/2026/01/file.bin
+mybucket|data/2026/02/no-etag.bin
 ```
 
 多段判定**严格**：只有 `^[0-9a-f]{32}$`（32 位小写 MD5 hex）算普通对象，任何其他格式（`<hex>-N`、大写、长度不对、空值）一律按多段处理。原则：绝不把多段误判为普通对象。

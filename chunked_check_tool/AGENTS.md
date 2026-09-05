@@ -41,7 +41,7 @@
 
 1. **多段判定严格**：仅 `^[0-9a-f]{32}$`（32 位小写 MD5 hex）算普通对象。大写、长度不对、`<hex>-N`、空值一律按多段处理。**绝不把多段误判为普通对象**。`isNormalETag` 用逐字节循环实现（非正则），不要改成宽松匹配。
 
-2. **多段对象跳过 Range GET**：直接写 `<ownerID>/mp.txt`（仅 key，不带 ETag）。不要给多段对象发 Range GET（浪费请求 + 可能误判）。
+2. **多段对象跳过 Range GET**：直接写 `<ownerID>/mp.txt`。每行按 `result_line_format` 渲染（默认 `<bucket>|<key>`），不带 ETag。不要给多段对象发 Range GET（浪费请求 + 可能误判）。
 
 3. **ETag 来源**：list 响应（统一），**不从 Range GET response header 取**。OwnerID 同样来自 list 响应（minio-go v7.3.0 默认 `fetchOwner=true`，无额外请求开销）。
 
@@ -98,6 +98,7 @@
 | `progress_interval` | `100000` | 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；`0` 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；`0` 走默认 |
+| `result_line_format` | `<bucket>\|<key>` | 结果文件每行格式，支持 `<bucket>`/`<key>`/`<owner>` 占位符；只影响 per-owner 结果文件，处理文件始终只存 key/prefix |
 
 ## 6. 输出文件（append 模式）
 
@@ -124,6 +125,14 @@
 | `stats.txt` | 计时与计数（全局一份） | 程序结束 |
 
 `is_check=false` 时只写 `list_failed.*` + `stats.txt`，不创建 owner 目录。`is_check=true && is_multipart_check=false` 时 `corrupted_mp.txt` / `ok_mp.txt` / `multipart_check_failed.*` 不创建。
+
+### 结果文件行格式
+
+per-owner 结果文件每行按 `result_line_format` 配置渲染（默认 `<bucket>|<key>`），启动时在配置快照里打印实际生效值。解析在 `NewOutput` 完成（`parseLineFormat`），未知占位符 / 未闭合 `<` 报错并中止启动。处理文件（`list_failed`/`check_failed`/`multipart_check_failed` 的 .txt 与 .log）**不**套用此格式，始终只写 key/prefix（.log 已含 `bucket` 字段）。
+
+### 启动输出 / run.log
+
+`main` 启动时：先 `MkdirAll(output_dir)`，再 append 打开 `<output_dir>/run.log`，构造 `mwOut=MultiWriter(os.Stdout, runLog)` 与 `mwErr=MultiWriter(os.Stderr, runLog)`，`log.SetOutput(mwErr)`（nodepool 告警 / `log.Fatalf` 进 run.log），进度行与 summary 走 `mwOut`。随后打印完整配置快照（ak/sk 屏蔽为 `***`）到 `mwOut`。run.log 全程 append，断点续跑不覆盖。
 
 ## 7. 编译与测试
 

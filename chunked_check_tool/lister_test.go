@@ -20,7 +20,7 @@ func TestListerMode2BFSPrefixes(t *testing.T) {
 	}
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, ListType: 2, ListConcurrency: 2, CheckConcurrency: 2, IsCheck: true}
-	out, err := NewOutput(cfg)
+	out, err := NewOutput(cfg, "test-bkt")
 	if err != nil {
 		t.Fatalf("NewOutput: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestListerMode2CommonPrefixesOnlyPage(t *testing.T) {
 	}
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, ListType: 2, ListConcurrency: 1, CheckConcurrency: 1, IsCheck: true}
-	out, err := NewOutput(cfg)
+	out, err := NewOutput(cfg, "test-bkt")
 	if err != nil {
 		t.Fatalf("NewOutput: %v", err)
 	}

@@ -30,7 +30,7 @@
 
 **多段输出格式**
 
-所有 .txt 文件（包括 `mp.txt`）**每行只存 key**，不带 ETag。
+所有结果 .txt 文件（包括 `mp.txt`）每行按 `result_line_format` 配置渲染（默认 `<bucket>|<key>`），不带 ETag。处理文件（`list_failed.txt`/`check_failed.txt`/`multipart_check_failed.txt`）只存 key/prefix，不套用此格式（错误原因在对应 .log 里，.log 已含 bucket 字段）。
 
 **列举模式**
 
@@ -60,6 +60,7 @@ is_multipart_check: false   # 是否对多段对象做分段损坏检查
 multipart_segment_size: 0    # 多段分段检查的段长度(字节)，需与上传 part size 一致
 is_multipart_success_log: false  # 是否记录干净的多段对象
 progress_interval: 100000  # 进度打印阈值（约，性能优先）
+result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>/<key>/<owner> 占位符；默认 <bucket>|<key>
 ```
 
 `is_check=false` 时只统计不校验，**不写任何对象文件**，仅写 `stats.txt` + `list_failed.txt` + `list_failed.log`。
@@ -100,3 +101,5 @@ progress_interval: 100000  # 进度打印阈值（约，性能优先）
 4. **进度打印**：stdout 每处理约 `progress_interval` 个对象打印一行，不要过多但得有。打印节奏不要求精确到 `progress_interval`，大约在这个数字就好，**以性能优先**（每 worker 本地计数器，避免 per-obj atomic 开销）。
 5. **S3 客户端**：用 `github.com/minio/minio-go/v7`（MinIO SDK v7，非 AWS SDK）。配置文件里指定 `scheme`（http/https，https 时 `InsecureSkipVerify=true` 忽略证书）。
 6. **性能优先但保持可读性**：关注长连接复用（minio-go 自带连接池，不要自建）、文件写入性能（`bufio.Writer` 包裹）、合理的 channel 容量、避免每对象分配。但**不要为了性能把代码变得过于复杂**——如果要写一段很复杂难读的代码（如手写内存池、unsafe、复杂 lock-free 结构），**需要提前向我请求确认**，不要直接写。可读性 > 微优化。
+7. **启动配置打印 + run.log**：进程启动后把所有配置项（ak/sk 屏蔽为 `***`）和 CLI 参数（bucket/prefix/nextmarker）打印到 stdout；同时 stdout 与 stderr 都 tee 到 `<output_dir>/run.log`（append 模式，支持断点续跑）。进度行、节点故障告警、最终 summary 都进 run.log，方便事后排查。
+8. **结果文件行格式可配置**：per-owner 结果文件（`corrupted_objects.txt`/`mp.txt`/`corrupted_mp.txt`/`ok_mp.txt`/`ok_objects.txt`）每行按 `result_line_format` 配置渲染，支持占位符 `<bucket>`、`<key>`、`<owner>`，其他字符按字面输出，默认 `<bucket>|<key>`。处理文件（`list_failed`/`check_failed`/`multipart_check_failed` 的 .txt）不套用此格式，始终只存 key/prefix；.log 已含 `bucket` 字段。

@@ -54,7 +54,7 @@ func TestChunkSigRegex(t *testing.T) {
 func TestCheckerHandleNormal(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg)
+	out, _ := NewOutput(cfg, "test-bkt")
 	defer out.Close()
 	s := NewStats()
 	worker := &FakeS3{Body: []byte("normal object content here")}
@@ -66,7 +66,7 @@ func TestCheckerHandleNormal(t *testing.T) {
 func TestCheckerHandleCorrupted(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg)
+	out, _ := NewOutput(cfg, "test-bkt")
 	defer out.Close()
 	s := NewStats()
 	body := []byte("1000;chunk-signature=0000000000000000000000000000000000000000000000000000000000000000\r\n")
@@ -81,7 +81,7 @@ func TestCheckerHandleCorrupted(t *testing.T) {
 func TestCheckerHandleMultipartSkipsRangeGet(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg)
+	out, _ := NewOutput(cfg, "test-bkt")
 	defer out.Close()
 	s := NewStats()
 	called := false
@@ -103,7 +103,7 @@ func TestCheckerHandleMultipartSkipsRangeGet(t *testing.T) {
 func TestCheckerHandleRangeGetError(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg)
+	out, _ := NewOutput(cfg, "test-bkt")
 	defer out.Close()
 	s := NewStats()
 	worker := &FakeS3{Err: context.DeadlineExceeded}
@@ -117,7 +117,7 @@ func TestCheckerHandleRangeGetError(t *testing.T) {
 func TestCheckerHandleEmptyObjectSkipsRangeGet(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg)
+	out, _ := NewOutput(cfg, "test-bkt")
 	defer out.Close()
 	s := NewStats()
 	called := false
@@ -137,7 +137,7 @@ var errFake416 = errors.New("416 Range Not Satisfiable")
 func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
-	out, _ := NewOutput(cfg)
+	out, _ := NewOutput(cfg, "test-bkt")
 	s := NewStats()
 	worker := &FakeS3{Err: minio.ErrorResponse{
 		Code:       "InvalidRange",
@@ -172,6 +172,7 @@ func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 		`level=ERROR`,
 		`msg="check failed"`,
 		`req_id=REQ-1234-ABCD`,
+		`bucket=test-bkt`,
 		`key=path/obj`,
 		`http_code=416`,
 		`s3_code=InvalidRange`,
@@ -213,7 +214,7 @@ func multipartCfg(dir string, segSize int64) *Config {
 func TestCheckerMultipartSegmentCheckCorrupted(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg)
+	out, _ := NewOutput(cfg, "test-bkt")
 	s := NewStats()
 	worker := &FakeS3{Body: chunkSigBody}
 	c := NewChecker(worker, out, s, cfg)
@@ -229,20 +230,20 @@ func TestCheckerMultipartSegmentCheckCorrupted(t *testing.T) {
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// Per-owner file must exist with the key.
+	// Per-owner file must exist with the key (default format <bucket>|<key>).
 	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "corrupted_mp.txt"))
 	if err != nil {
 		t.Fatalf("read corrupted_mp: %v", err)
 	}
-	if line := strings.TrimSpace(string(data)); line != "k" {
-		t.Errorf("corrupted_mp.txt = %q, want %q", line, "k")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|k" {
+		t.Errorf("corrupted_mp.txt = %q, want %q", line, "test-bkt|k")
 	}
 }
 
 func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg)
+	out, _ := NewOutput(cfg, "test-bkt")
 	s := NewStats()
 	worker := &FakeS3{Body: []byte("normal object body, no chunk signature here")}
 	c := NewChecker(worker, out, s, cfg)
@@ -256,13 +257,13 @@ func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// IsSuccessLog=true → clean multipart goes to <owner>/ok_mp.txt
+	// IsSuccessLog=true → clean multipart goes to <owner>/ok_mp.txt (bucket|key)
 	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "ok_mp.txt"))
 	if err != nil {
 		t.Fatalf("read ok_multipart: %v", err)
 	}
-	if line := strings.TrimSpace(string(data)); line != "k" {
-		t.Errorf("ok_mp.txt = %q, want %q", line, "k")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|k" {
+		t.Errorf("ok_mp.txt = %q, want %q", line, "test-bkt|k")
 	}
 }
 
@@ -272,7 +273,7 @@ func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg)
+	out, _ := NewOutput(cfg, "test-bkt")
 	s := NewStats()
 	worker := &FakeS3{Err: context.DeadlineExceeded}
 	c := NewChecker(worker, out, s, cfg)
@@ -304,7 +305,7 @@ func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: false, MultipartSegmentSize: 5 * 1024 * 1024}
-	out, _ := NewOutput(cfg)
+	out, _ := NewOutput(cfg, "test-bkt")
 	s := NewStats()
 	worker := &FakeS3{Body: chunkSigBody} // would match if we checked — but we don't
 	c := NewChecker(worker, out, s, cfg)
@@ -322,8 +323,8 @@ func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read mp: %v", err)
 	}
-	if line := strings.TrimSpace(string(data)); line != "k" {
-		t.Errorf("mp.txt = %q, want %q (key only)", line, "k")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|k" {
+		t.Errorf("mp.txt = %q, want %q (bucket|key)", line, "test-bkt|k")
 	}
 }
 
@@ -334,7 +335,7 @@ func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 func TestCheckerMultipartSegmentCheckSecondSegmentMatches(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg)
+	out, _ := NewOutput(cfg, "test-bkt")
 	defer out.Close()
 	s := NewStats()
 	cleanBody := []byte("clean segment, no signature")

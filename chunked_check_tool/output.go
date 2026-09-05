@@ -19,7 +19,13 @@ type ownerLine struct {
 }
 
 type Output struct {
-	dir string
+	dir    string
+	bucket string
+
+	// compiled result-line format (per-owner result files only). Process
+	// files (list_failed/check_failed/multipart_check_failed) always write
+	// the raw key/prefix — the format only applies to per-owner result files.
+	lineFmt compiledLineFormat
 
 	// per-owner channels (each carries ownerID + key)
 	corruptedCh          chan ownerLine
@@ -54,7 +60,7 @@ type Output struct {
 	files []*os.File // root files only — per-owner files are owned by their goroutines
 }
 
-func NewOutput(cfg *Config) (*Output, error) {
+func NewOutput(cfg *Config, bucket string) (*Output, error) {
 	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
 		return nil, fmt.Errorf("mkdir output: %w", err)
 	}
@@ -64,8 +70,18 @@ func NewOutput(cfg *Config) (*Output, error) {
 	}
 	isCheck := cfg.IsCheck
 	isMP := cfg.IsMultipartCheck
+	format := cfg.ResultLineFormat
+	if format == "" {
+		format = "<bucket>|<key>"
+	}
+	lineFmt, err := parseLineFormat(format)
+	if err != nil {
+		return nil, err
+	}
 	o := &Output{
 		dir:                         cfg.OutputDir,
+		bucket:                      bucket,
+		lineFmt:                     lineFmt,
 		corruptedCh:                 make(chan ownerLine, chCap),
 		multipartAllCh:              make(chan ownerLine, chCap),
 		corruptedMultipartCh:        make(chan ownerLine, chCap),
@@ -208,7 +224,7 @@ func (o *Output) openAndStartOwner(name string, ch chan ownerLine) error {
 				w = bufio.NewWriterSize(f, 64*1024)
 				writers[dirName] = w
 			}
-			w.WriteString(ol.key)
+			o.lineFmt.writeTo(w, o.bucket, ol.ownerID, ol.key)
 			w.WriteByte('\n')
 		}
 	}()
@@ -307,7 +323,7 @@ func (o *Output) WriteListFailedLog(prefix string, statusCode int, s3Code, reqID
 	if o.listLogger == nil {
 		return
 	}
-	attrs := []any{slog.String("req_id", orDash(reqID))}
+	attrs := []any{slog.String("req_id", orDash(reqID)), slog.String("bucket", orDash(o.bucket))}
 	attrs = append(attrs, slog.String("prefix", prefix))
 	if statusCode > 0 {
 		attrs = append(attrs, slog.Int("http_code", statusCode))
@@ -329,7 +345,7 @@ func (o *Output) WriteCheckFailedLog(key string, statusCode int, s3Code, reqID s
 	if !o.checkEnabled || o.checkLogger == nil {
 		return
 	}
-	attrs := []any{slog.String("req_id", orDash(reqID))}
+	attrs := []any{slog.String("req_id", orDash(reqID)), slog.String("bucket", orDash(o.bucket))}
 	attrs = append(attrs, slog.String("key", key))
 	if statusCode > 0 {
 		attrs = append(attrs, slog.Int("http_code", statusCode))
@@ -351,7 +367,7 @@ func (o *Output) WriteMultipartCheckFailedLog(key string, statusCode int, s3Code
 	if !o.multipartCheckFailedEnabled || o.multipartCheckFailedLogger == nil {
 		return
 	}
-	attrs := []any{slog.String("req_id", orDash(reqID))}
+	attrs := []any{slog.String("req_id", orDash(reqID)), slog.String("bucket", orDash(o.bucket))}
 	attrs = append(attrs, slog.String("key", key))
 	if statusCode > 0 {
 		attrs = append(attrs, slog.Int("http_code", statusCode))

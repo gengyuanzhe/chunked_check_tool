@@ -4,10 +4,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -30,12 +32,67 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
+	// Open run.log at output_dir root and tee stdout+stderr into it. We
+	// open it before NewOutput so that NewOutput's mkdir error (if any)
+	// is also captured. The dir may not exist yet, so mkdir here first.
+	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
+		log.Fatalf("mkdir output dir: %v", err)
+	}
+	runLogPath := filepath.Join(cfg.OutputDir, "run.log")
+	runLog, err := os.OpenFile(runLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatalf("open run.log: %v", err)
+	}
+	defer runLog.Close()
+	mwOut := io.MultiWriter(os.Stdout, runLog)
+	mwErr := io.MultiWriter(os.Stderr, runLog)
+	log.SetOutput(mwErr)
+
+	printConfig(mwOut, *cfgPath, cfg, *bucket, *prefix, *startAfter, runLogPath)
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := run(ctx, cfg, *bucket, *prefix, *startAfter); err != nil {
+	if err := run(ctx, cfg, *bucket, *prefix, *startAfter, mwOut); err != nil {
 		log.Fatalf("run: %v", err)
 	}
+}
+
+// printConfig writes a config snapshot to w at startup. ak/sk are masked
+// so the run.log (which persists) doesn't leak credentials.
+func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, startAfter, runLogPath string) {
+	fmt.Fprintf(w, "=== config ===\n")
+	fmt.Fprintf(w, "config: %s\n", cfgPath)
+	fmt.Fprintf(w, "bucket: %s\n", bucket)
+	fmt.Fprintf(w, "prefix: %s\n", orEmpty(prefix))
+	fmt.Fprintf(w, "nextmarker: %s\n", orEmpty(startAfter))
+	fmt.Fprintf(w, "endpoints: %s\n", strings.Join(cfg.Endpoints, ", "))
+	fmt.Fprintf(w, "scheme: %s\n", cfg.Scheme)
+	fmt.Fprintf(w, "ak: ***\n")
+	fmt.Fprintf(w, "sk: ***\n")
+	fmt.Fprintf(w, "list_type: %d\n", cfg.ListType)
+	fmt.Fprintf(w, "list_api_version: %d\n", cfg.ListAPIVersion)
+	fmt.Fprintf(w, "list_concurrency: %d\n", cfg.ListConcurrency)
+	fmt.Fprintf(w, "check_concurrency: %d\n", cfg.CheckConcurrency)
+	fmt.Fprintf(w, "output_dir: %s\n", cfg.OutputDir)
+	fmt.Fprintf(w, "is_check: %t\n", cfg.IsCheck)
+	fmt.Fprintf(w, "is_success_log: %t\n", cfg.IsSuccessLog)
+	fmt.Fprintf(w, "is_multipart_check: %t\n", cfg.IsMultipartCheck)
+	fmt.Fprintf(w, "multipart_segment_size: %d\n", cfg.MultipartSegmentSize)
+	fmt.Fprintf(w, "is_multipart_success_log: %t\n", cfg.IsMultipartSuccessLog)
+	fmt.Fprintf(w, "progress_interval: %d\n", cfg.ProgressInterval)
+	fmt.Fprintf(w, "obj_ch_capacity: %d\n", cfg.ObjChCapacity)
+	fmt.Fprintf(w, "output_ch_capacity: %d\n", cfg.OutputChCapacity)
+	fmt.Fprintf(w, "result_line_format: %s\n", cfg.ResultLineFormat)
+	fmt.Fprintf(w, "run_log: %s\n", runLogPath)
+	fmt.Fprintf(w, "=== end config ===\n")
+}
+
+func orEmpty(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
 }
 
 // run wires NodePool, Output, Stats, Lister, and Checker workers together.
@@ -56,14 +113,14 @@ func main() {
 // which unblocks check workers. If nothing was seeded (e.g. Mode 1 root
 // pagination returned no sub-prefixes), the queue is closed explicitly so
 // list workers exit immediately.
-func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) error {
+func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string, stdout io.Writer) error {
 	pool := NewNodePool(cfg)
-	out, err := NewOutput(cfg)
+	out, err := NewOutput(cfg, bucket)
 	if err != nil {
 		return fmt.Errorf("output: %w", err)
 	}
 	stats := NewStats()
-	printer := NewProgressPrinter(os.Stdout)
+	printer := NewProgressPrinter(stdout)
 	start := time.Now()
 
 	objChCap := cfg.ObjChCapacity
@@ -232,7 +289,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 	if err := stats.WriteToFile(statsPath, cfg.IsCheck); err != nil {
 		return fmt.Errorf("write stats: %w", err)
 	}
-	stats.PrintSummary(cfg.IsCheck)
+	stats.PrintSummary(stdout, cfg.IsCheck)
 	// Return the seed-loop error (e.g. ctx.Err() on SIGINT) AFTER shutdown
 	// has flushed buffered output and written stats. main logs the interrupt
 	// and exits non-zero, but no data is lost.

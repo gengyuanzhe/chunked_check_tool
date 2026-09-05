@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"sync/atomic"
 	"time"
@@ -129,17 +130,17 @@ func (s *Stats) WriteToFile(path string, isCheck bool) error {
 	return os.WriteFile(path, b, 0644)
 }
 
-func (s *Stats) PrintSummary(isCheck bool) {
+func (s *Stats) PrintSummary(w io.Writer, isCheck bool) {
 	snap := s.Snapshot()
-	fmt.Printf("=== summary ===\n")
-	fmt.Printf("total_objects: %d total_sec: %.2f\n", snap.ListedTotal, snap.TotalSec)
-	fmt.Printf("list_calls: %d avg_latency_ms: %.2f list_total_sec: %.2f\n",
+	fmt.Fprintf(w, "=== summary ===\n")
+	fmt.Fprintf(w, "total_objects: %d total_sec: %.2f\n", snap.ListedTotal, snap.TotalSec)
+	fmt.Fprintf(w, "list_calls: %d avg_latency_ms: %.2f list_total_sec: %.2f\n",
 		snap.ListCalls, snap.ListAvgLatencyMs, snap.ListTotalSec)
 	if isCheck {
-		fmt.Printf("get_calls: %d avg_latency_ms: %.2f get_total_sec: %.2f\n", snap.GetCalls, snap.GetAvgLatencyMs, snap.GetTotalSec)
-		fmt.Printf("ok_objects: %d corrupted_objects: %d ok_mp: %d corrupted_mp: %d list_failed: %d check_failed: %d multipart_check_failed: %d\n",
+		fmt.Fprintf(w, "get_calls: %d avg_latency_ms: %.2f get_total_sec: %.2f\n", snap.GetCalls, snap.GetAvgLatencyMs, snap.GetTotalSec)
+		fmt.Fprintf(w, "ok_objects: %d corrupted_objects: %d ok_mp: %d corrupted_mp: %d list_failed: %d check_failed: %d multipart_check_failed: %d\n",
 			snap.OkObjects, snap.CorruptedObjects, snap.OkMp, snap.CorruptedMp, snap.ListFailed, snap.CheckFailed, snap.MultipartCheckFailed)
 	} else {
-		fmt.Printf("list_failed: %d\n", snap.ListFailed)
+		fmt.Fprintf(w, "list_failed: %d\n", snap.ListFailed)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sync"
 )
 
@@ -37,7 +38,7 @@ func (p *NodePool) MarkFailed(idx int) {
 	p.mu.Lock()
 	if _, ok := p.failed[idx]; !ok {
 		p.failed[idx] = struct{}{}
-		fmt.Printf("[nodepool] node %d (%s) marked failed\n", idx, p.endpoints[idx])
+		log.Printf("[nodepool] node %d (%s) marked failed", idx, p.endpoints[idx])
 	}
 	p.mu.Unlock()
 }

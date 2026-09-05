@@ -25,6 +25,7 @@ type Config struct {
 	ProgressInterval      int      `yaml:"progress_interval"`
 	ObjChCapacity         int      `yaml:"obj_ch_capacity"`
 	OutputChCapacity      int      `yaml:"output_ch_capacity"`
+	ResultLineFormat      string   `yaml:"result_line_format"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -59,6 +60,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.ListAPIVersion == 0 {
 		cfg.ListAPIVersion = 2
+	}
+	if cfg.ResultLineFormat == "" {
+		cfg.ResultLineFormat = "<bucket>|<key>"
 	}
 	return &cfg, nil
 }
