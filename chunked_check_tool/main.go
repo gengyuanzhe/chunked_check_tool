@@ -83,12 +83,12 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 			Prefix:               q.Len(),
 			ObjCh:                len(objCh),
 			CorruptedObjects:     cor,
-			MultipartOk:          mpAll + mpOk,
-			CorruptedMultipart:   cmp,
+			OkMp:                 mpAll + mpOk,
+			CorruptedMp:          cmp,
 			ListFailed:           lf,
 			CheckFailed:          cf,
 			MultipartCheckFailed: mcf,
-			Success:              su,
+			OkObjects:            su,
 		}
 	})
 
@@ -164,7 +164,9 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string) er
 					// and classifies root direct objects here too.
 					stats.IncrListed()
 					if !isNormalETag(o.ETag) {
-						stats.IncrMultipartOk()
+						stats.IncrOkMp()
+					} else {
+						stats.IncrOkObjects()
 					}
 				}
 			}

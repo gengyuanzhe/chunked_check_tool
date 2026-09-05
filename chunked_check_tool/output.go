@@ -98,17 +98,17 @@ func NewOutput(cfg *Config) (*Output, error) {
 		}
 	}
 	if o.multipartAllEnabled {
-		if err := o.openAndStartOwner("multipart_objects.txt", o.multipartAllCh); err != nil {
+		if err := o.openAndStartOwner("mp.txt", o.multipartAllCh); err != nil {
 			return nil, err
 		}
 	}
 	if o.corruptedMultipartEnabled {
-		if err := o.openAndStartOwner("corrupted_multipart_objects.txt", o.corruptedMultipartCh); err != nil {
+		if err := o.openAndStartOwner("corrupted_mp.txt", o.corruptedMultipartCh); err != nil {
 			return nil, err
 		}
 	}
 	if o.multipartOkEnabled {
-		if err := o.openAndStartOwner("ok_multipart_objects.txt", o.multipartOkCh); err != nil {
+		if err := o.openAndStartOwner("ok_mp.txt", o.multipartOkCh); err != nil {
 			return nil, err
 		}
 	}

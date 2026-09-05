@@ -41,7 +41,7 @@ is_check: true          # true=列举+校验, false=仅列举
 is_success_log: false   # 是否记录正常普通对象到 <ownerID>/ok_objects.txt
 is_multipart_check: false   # 是否对多段对象做分段损坏检查
 multipart_segment_size: 0    # 多段分段检查的段长度(字节)，需与上传 part size 一致
-is_multipart_success_log: false  # 是否记录干净的多段对象到 <ownerID>/ok_multipart_objects.txt
+is_multipart_success_log: false  # 是否记录干净的多段对象到 <ownerID>/ok_mp.txt
 progress_interval: 100000
 obj_ch_capacity: 0           # lister→checker channel 容量；0=max(check_concurrency*4, 2000)
 output_ch_capacity: 0        # output writer channel 容量；0=1024
@@ -61,7 +61,7 @@ output_ch_capacity: 0        # output writer channel 容量；0=1024
 | `is_success_log` | `false` | `true` 时把正常普通对象 key 写入 `<ownerID>/ok_objects.txt` |
 | `is_multipart_check` | `false` | `true` 时对多段对象做分段损坏检查 |
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
-| `is_multipart_success_log` | `false` | `true` 时把干净的多段对象 key 写入 `<ownerID>/ok_multipart_objects.txt` |
+| `is_multipart_success_log` | `false` | `true` 时把干净的多段对象 key 写入 `<ownerID>/ok_mp.txt` |
 | `progress_interval` | `100000` | stdout 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；0 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；0 走默认 |
@@ -100,9 +100,9 @@ is_multipart_check: true
 multipart_segment_size: 5242880   # 5 MiB，需与上传 multipart part size 一致
 ```
 
-适用：怀疑多段对象也写入了 chunked 签名（如客户端对每个 part 单独走 aws-chunked 编码）。开启后对每个多段对象按 `ceil(Size/segment_size)` 分段，对每段开头 128 字节做 Range GET，任一段命中 `length;chunk-signature=…` 正则即视为损坏，写入 `<ownerID>/corrupted_multipart_objects.txt`。
+适用：怀疑多段对象也写入了 chunked 签名（如客户端对每个 part 单独走 aws-chunked 编码）。开启后对每个多段对象按 `ceil(Size/segment_size)` 分段，对每段开头 128 字节做 Range GET，任一段命中 `length;chunk-signature=…` 正则即视为损坏，写入 `<ownerID>/corrupted_mp.txt`。
 
-注意：`multipart_segment_size` **必须**与上传时的 part size 一致——chunk-signature 出现在每个 part body 的开头，分段边界错位会漏检。Size=0 的多段对象跳过分段检查（按普通多段记录）。某段 Range GET 报错走 `multipart_check_failed.txt`/`multipart_check_failed.log`（根目录），停止后续段检查。
+注意：`multipart_segment_size` **必须**与上传时的 part size 一致——chunk-signature 出现在每个 part body 的开头，分段边界错位会漏检。Size=0 的多段对象跳过分段检查（按普通多段记录）。某段 Range GET 报错走 `multipart_check_failed.txt`/`multipart_check_failed.log`（根目录），停止后续段检查。命中分段签名的对象写入 `<ownerID>/corrupted_mp.txt`。
 
 ## 运行
 
@@ -158,9 +158,9 @@ multipart_segment_size: 5242880   # 5 MiB，需与上传 multipart part size 一
 | 文件 | 内容 | 何时写 |
 |---|---|---|
 | `corrupted_objects.txt` | 损坏的普通对象 key | Range GET 前 128 字节命中 chunk-signature 正则 |
-| `multipart_objects.txt` | 多段对象 key（仅 key） | `is_multipart_check=false` 时所有多段对象 |
-| `corrupted_multipart_objects.txt` | 损坏的多段对象 key | `is_multipart_check=true` 时分段检查命中 |
-| `ok_multipart_objects.txt` | 干净的多段对象 key | `is_multipart_check=true` 且 `is_success_log=true` |
+| `mp.txt` | 多段对象 key（仅 key） | `is_multipart_check=false` 时所有多段对象 |
+| `corrupted_mp.txt` | 损坏的多段对象 key | `is_multipart_check=true` 时分段检查命中 |
+| `ok_mp.txt` | 干净的多段对象 key | `is_multipart_check=true` 且 `is_multipart_success_log=true` |
 | `ok_objects.txt` | 正常普通对象 key | `is_success_log=true` |
 
 ### 处理文件（全局，根目录 `<output_dir>/<filename>`）
@@ -177,7 +177,7 @@ multipart_segment_size: 5242880   # 5 MiB，需与上传 multipart part size 一
 
 `is_check=false` 时只写 `list_failed.*` + `stats.txt`，不写任何对象文件，不创建 owner 目录。
 
-### multipart_objects.txt 格式
+### mp.txt 格式
 
 每行只存 key，不带 ETag：
 ```
@@ -190,27 +190,31 @@ data/2026/02/no-etag.bin
 ## 统计（stats.txt 示例）
 
 ```
-total_objects: 12345678
+total_objects: 12345678 total_sec: 780.45
 list_calls: 12350
 list_avg_latency_ms: 82.15
-list_total_duration_sec: 642.31
-total_duration_sec: 780.45
-multipart_ok: 5230
-corrupted_objects: 42
-corrupted_multipart: 7
+list_total_sec: 642.31
+get_calls: 995000
+get_avg_latency_ms: 4.21
+get_total_sec: 4179.45
 list_failed: 3
+ok_objects: 12340000
+corrupted_objects: 42
+ok_mp: 5230
+corrupted_mp: 7
 check_failed: 7
 multipart_check_failed: 2
 ```
 
 字段含义：
-- `multipart_ok`：干净的多段对象数（switch off：所有多段；switch on：通过分段检查的）
+- `ok_objects`：干净的普通对象数（写入 `<ownerID>/ok_objects.txt` 的来源；不论 `is_success_log` 与否都计数）
 - `corrupted_objects`：损坏的普通对象数（写入 `<ownerID>/corrupted_objects.txt`）
-- `corrupted_multipart`：损坏的多段对象数（switch on 时分段检查命中）
+- `ok_mp`：干净的多段对象数（switch off：所有多段；switch on：通过分段检查的）
+- `corrupted_mp`：损坏的多段对象数（switch on 时分段检查命中）
 - `check_failed`：普通对象 RangeGet 失败数
 - `multipart_check_failed`：多段分段 RangeGet 失败数（switch on 时）
 
-`is_check=false` 时只写前 5 行 + `list_failed`。
+`is_check=false` 时只写 `total_objects`/`total_sec`/`list_calls`/`list_avg_latency_ms`/`list_total_sec`/`list_failed`。
 
 ## 节点故障处理
 
@@ -223,7 +227,7 @@ multipart_check_failed: 2
 
 stdout 约每 `progress_interval` 个对象打印一行：
 ```
-[progress] listed=1000000 multipart_ok=5000 corrupted_objects=30 corrupted_mp=7 list_failed=3 check_failed=7 multipart_check_failed=2 list_calls=12350 list_avg_ms=82.15 get_calls=995000 get_avg_ms=4.21 (checked=1000000) q=pfx:12 obj:48 cor_obj:0 mp_ok:0 cmp:0 lf:1 cf:0 mcf:0 su:0
+[progress] listed=1000000 ok_objects=995000 corrupted_objects=30 ok_mp=5000 corrupted_mp=7 list_failed=3 check_failed=7 multipart_check_failed=2 list_calls=12350 list_avg_ms=82.15 get_calls=995000 get_avg_ms=4.21 (checked=1000000) q=pfx:12 obj:48 cor_obj:0 ok_o:0 ok_mp:0 cor_mp:0 lf:1 cf:0 mcf:0
 ```
 
 `is_check=false` 时只打 `listed`/`list_calls`/`list_failed`。程序结束时打印汇总。

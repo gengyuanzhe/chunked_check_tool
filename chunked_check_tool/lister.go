@@ -108,7 +108,9 @@ func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- 
 				// list-only mode: lister is the sole counter/classifier.
 				l.stats.IncrListed()
 				if !isNormalETag(o.ETag) {
-					l.stats.IncrMultipartOk()
+					l.stats.IncrOkMp()
+				} else {
+					l.stats.IncrOkObjects()
 				}
 			}
 			if onObject != nil {

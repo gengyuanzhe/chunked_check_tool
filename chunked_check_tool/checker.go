@@ -102,7 +102,7 @@ func (c *Checker) Handle(obj ObjectInfo) {
 			c.checkMultipartSegments(obj)
 		} else {
 			c.out.WriteMultipartAll(obj.OwnerID, obj.Key)
-			c.stats.IncrMultipartOk()
+			c.stats.IncrOkMp()
 		}
 		return
 	}
@@ -113,6 +113,7 @@ func (c *Checker) Handle(obj ObjectInfo) {
 	// signature, so the corruption check is inconclusive — treat as
 	// normal.
 	if obj.Size == 0 {
+		c.stats.IncrOkObjects()
 		if c.cfg.IsSuccessLog {
 			c.out.WriteSuccess(obj.OwnerID, obj.Key)
 		}
@@ -130,8 +131,11 @@ func (c *Checker) Handle(obj ObjectInfo) {
 	if chunkSigRe.Match(body) {
 		c.out.WriteCorrupted(obj.OwnerID, obj.Key)
 		c.stats.IncrCorruptedObjects()
-	} else if c.cfg.IsSuccessLog {
-		c.out.WriteSuccess(obj.OwnerID, obj.Key)
+	} else {
+		c.stats.IncrOkObjects()
+		if c.cfg.IsSuccessLog {
+			c.out.WriteSuccess(obj.OwnerID, obj.Key)
+		}
 	}
 }
 
@@ -142,7 +146,7 @@ func (c *Checker) Handle(obj ObjectInfo) {
 // returns an error, the object is flagged as multipart_check_failed (distinct
 // from check_failed — segment GET errors are a separate failure mode and get
 // their own file + counter). Otherwise the object is recorded as a clean
-// multipart (→ ok_multipart_objects.txt when is_success_log, else dropped).
+// multipart (→ ok_mp.txt when is_multipart_success_log, else dropped).
 func (c *Checker) checkMultipartSegments(obj ObjectInfo) {
 	segSize := c.cfg.MultipartSegmentSize
 	numSegs := (obj.Size + segSize - 1) / segSize
@@ -157,7 +161,7 @@ func (c *Checker) checkMultipartSegments(obj ObjectInfo) {
 		}
 		if chunkSigRe.Match(body) {
 			c.out.WriteCorruptedMultipart(obj.OwnerID, obj.Key)
-			c.stats.IncrCorruptedMultipart()
+			c.stats.IncrCorruptedMp()
 			return
 		}
 	}
@@ -165,5 +169,5 @@ func (c *Checker) checkMultipartSegments(obj ObjectInfo) {
 	if c.cfg.IsMultipartSuccessLog {
 		c.out.WriteMultipartOk(obj.OwnerID, obj.Key)
 	}
-	c.stats.IncrMultipartOk()
+	c.stats.IncrOkMp()
 }

@@ -34,7 +34,7 @@ func TestOutputPerOwnerRouting(t *testing.T) {
 		{ownerSub(dir, "owner-A", "corrupted_objects.txt"), "obj/a1"},
 		{ownerSub(dir, "owner-B", "corrupted_objects.txt"), "obj/b1"},
 		{ownerSub(dir, "owner-A", "ok_objects.txt"), "obj/a-ok"},
-		{ownerSub(dir, "owner-B", "multipart_objects.txt"), "obj/b-mp"},
+		{ownerSub(dir, "owner-B", "mp.txt"), "obj/b-mp"},
 	} {
 		data, err := os.ReadFile(c.path)
 		if err != nil {
@@ -45,7 +45,7 @@ func TestOutputPerOwnerRouting(t *testing.T) {
 		}
 	}
 	// Root must NOT have these files — they live per-owner.
-	for _, name := range []string{"corrupted_objects.txt", "ok_objects.txt", "multipart_objects.txt"} {
+	for _, name := range []string{"corrupted_objects.txt", "ok_objects.txt", "mp.txt"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
 			t.Errorf("%s should not exist at root, got %v", name, err)
 		}
@@ -60,35 +60,35 @@ func TestOutputMultipartAllKeyOnly(t *testing.T) {
 	o, _ := NewOutput(cfg)
 	o.WriteMultipartAll("owner-A", "key/with|pipe")
 	o.Close()
-	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "multipart_objects.txt"))
+	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "mp.txt"))
 	if line := strings.TrimSpace(string(data)); line != "key/with|pipe" {
 		t.Errorf("multipart line = %q, want %q (key only, no etag)", line, "key/with|pipe")
 	}
 }
 
 // TestOutputCorruptedMultipartPerOwner — switch on: corrupted multipart
-// writes to <owner>/corrupted_multipart_objects.txt.
+// writes to <owner>/corrupted_mp.txt.
 func TestOutputCorruptedMultipartPerOwner(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg)
 	o.WriteCorruptedMultipart("owner-A", "mp/k1")
 	o.Close()
-	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_multipart_objects.txt"))
+	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
 	if line := strings.TrimSpace(string(data)); line != "mp/k1" {
-		t.Errorf("corrupted_multipart = %q, want %q", line, "mp/k1")
+		t.Errorf("corrupted_mp = %q, want %q", line, "mp/k1")
 	}
 }
 
 // TestOutputMultipartOkPerOwner — switch on + is_multipart_success_log: clean
-// multipart writes to <owner>/ok_multipart_objects.txt.
+// multipart writes to <owner>/ok_mp.txt.
 func TestOutputMultipartOkPerOwner(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, IsSuccessLog: true, IsMultipartSuccessLog: true, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg)
 	o.WriteMultipartOk("owner-A", "mp/clean")
 	o.Close()
-	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "ok_multipart_objects.txt"))
+	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "ok_mp.txt"))
 	if line := strings.TrimSpace(string(data)); line != "mp/clean" {
 		t.Errorf("ok_multipart = %q, want %q", line, "mp/clean")
 	}
@@ -102,8 +102,8 @@ func TestOutputMultipartOkSkippedWhenSuccessLogOff(t *testing.T) {
 	o, _ := NewOutput(cfg)
 	o.WriteMultipartOk("owner-A", "mp/clean") // no-op
 	o.Close()
-	if _, err := os.Stat(ownerSub(dir, "owner-A", "ok_multipart_objects.txt")); !os.IsNotExist(err) {
-		t.Errorf("ok_multipart_objects.txt should not exist when is_multipart_success_log off, got %v", err)
+	if _, err := os.Stat(ownerSub(dir, "owner-A", "ok_mp.txt")); !os.IsNotExist(err) {
+		t.Errorf("ok_mp.txt should not exist when is_multipart_success_log off, got %v", err)
 	}
 }
 
@@ -226,9 +226,9 @@ func TestOutputListOnlySkipsPerOwnerFiles(t *testing.T) {
 	// Per-owner and other root process files must NOT exist.
 	for _, name := range []string{
 		"corrupted_objects.txt",
-		"multipart_objects.txt",
-		"corrupted_multipart_objects.txt",
-		"ok_multipart_objects.txt",
+		"mp.txt",
+		"corrupted_mp.txt",
+		"ok_mp.txt",
 		"check_failed.txt",
 		"multipart_check_failed.txt",
 		"ok_objects.txt",

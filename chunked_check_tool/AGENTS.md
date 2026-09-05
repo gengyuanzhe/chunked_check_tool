@@ -8,7 +8,7 @@
 
 本工具**并发**列举并校验对象：
 - 普通对象（ETag 为 32 位小写 MD5 hex）→ Range GET 前 128 字节，匹配 chunk-signature 正则 → 命中即视为损坏。
-- 多段对象（任何非 `^[0-9a-f]{32}$` 的 ETag）→ 直接入 `multipart_objects.txt`，**不做 Range GET**。
+- 多段对象（任何非 `^[0-9a-f]{32}$` 的 ETag）→ 直接入 `mp.txt`，**不做 Range GET**。
 - 列举失败、校验失败分别落不同文件。
 - 支持几十亿对象规模，内存有界，背压自调节。
 
@@ -41,11 +41,11 @@
 
 1. **多段判定严格**：仅 `^[0-9a-f]{32}$`（32 位小写 MD5 hex）算普通对象。大写、长度不对、`<hex>-N`、空值一律按多段处理。**绝不把多段误判为普通对象**。`isNormalETag` 用逐字节循环实现（非正则），不要改成宽松匹配。
 
-2. **多段对象跳过 Range GET**：直接写 `<ownerID>/multipart_objects.txt`（仅 key，不带 ETag）。不要给多段对象发 Range GET（浪费请求 + 可能误判）。
+2. **多段对象跳过 Range GET**：直接写 `<ownerID>/mp.txt`（仅 key，不带 ETag）。不要给多段对象发 Range GET（浪费请求 + 可能误判）。
 
 3. **ETag 来源**：list 响应（统一），**不从 Range GET response header 取**。OwnerID 同样来自 list 响应（minio-go v7.3.0 默认 `fetchOwner=true`，无额外请求开销）。
 
-4. **结果文件按 OwnerID 分目录，处理文件全局**：`corrupted`/`multipart`/`corrupted_multipart`/`ok_multipart`/`ok` 这五类结果文件按 `<ownerID>/<filename>` 路由（OwnerID 为空 → `_unknown/`）；`list_failed`/`check_failed`/`multipart_check_failed`/`stats` 留根目录全局。理由：结果文件数量大且天然按 owner 分桶有意义；处理文件全局方便运维统一排查；stats 全局一份避免 owner 分桶后还要汇总。ownerDirName 折叠空/`.`/`..`/含路径分隔符的 OwnerID 到 `_unknown`，防止路径穿越。
+4. **结果文件按 OwnerID 分目录，处理文件全局**：`corrupted_objects`/`mp`/`corrupted_mp`/`ok_mp`/`ok_objects` 这五类结果文件按 `<ownerID>/<filename>` 路由（OwnerID 为空 → `_unknown/`）；`list_failed`/`check_failed`/`multipart_check_failed`/`stats` 留根目录全局。理由：结果文件数量大且天然按 owner 分桶有意义；处理文件全局方便运维统一排查；stats 全局一份避免 owner 分桶后还要汇总。ownerDirName 折叠空/`.`/`..`/含路径分隔符的 OwnerID 到 `_unknown`，防止路径穿越。
 
 5. **checker goroutine 绝不退出**：任何错误写 `check_failed`（普通对象）/ `multipart_check_failed`（多段分段）后继续。若 checker 退出，`objCh` 无人消费，list worker 永久阻塞。
 
@@ -65,9 +65,9 @@
 
 13. **V1/V2 分页协议对 caller 透明**：`S3Client.listPageOnce` 按 `cfg.ListAPIVersion` 分派 `Core.ListObjects`（V1，marker 游标）或 `Core.ListObjectsV2`（V2，continuation token）。两条路径都归一化进 `listResult{contents, commonPrefixes, next}`，`next` 作为下一次 `ListPage` 的 `continuationToken` 参数回传。V1 无 delimiter 且 `IsTruncated=true` 但 `NextMarker` 为空时，回退到最后一个 Contents key 作 marker；有 delimiter 时 S3 返回 `NextMarker`。caller（lister/walker/main 根分页）只需把 `next` 喂回 `continuationToken`，不感知 V1/V2 差异。`S3Client.core` 是 `minioListAPI` 接口（非 `*minio.Core`）以支持测试注入。
 
-14. **多段分段检查的失败分流**：分段 RangeGet 报错走 `multipart_check_failed` 路径（`WriteMultipartCheckFailed` + `IncrMultipartCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_multipart_objects.txt` 并 `IncrCorruptedMultipart`（同时**不** `IncrMultipartOk`）。干净的多段对象 `IncrMultipartOk`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_multipart_objects.txt`（与普通对象的 `is_success_log` 独立，互不影响）。
+14. **多段分段检查的失败分流**：分段 RangeGet 报错走 `multipart_check_failed` 路径（`WriteMultipartCheckFailed` + `IncrMultipartCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）。
 
-15. **统计字段命名**：`multipart_ok`（干净多段；switch off=全部多段、switch on=通过分段检查的）/ `corrupted_objects`（损坏普通对象）/ `corrupted_multipart`（损坏多段）/ `check_failed`（普通对象 RangeGet 失败）/ `multipart_check_failed`（多段分段 RangeGet 失败）/ `list_failed`。**禁止用单字 `multipart` 或 `corrupted` 做字段名**——会有"全部多段？损坏？成功多段？"歧义。
+15. **统计字段命名**：`ok_objects`（干净普通对象）/ `ok_mp`（干净多段；switch off=全部多段、switch on=通过分段检查的）/ `corrupted_objects`（损坏普通对象）/ `corrupted_mp`（损坏多段）/ `check_failed`（普通对象 RangeGet 失败）/ `multipart_check_failed`（多段分段 RangeGet 失败）/ `list_failed`。文件名与字段名一致：`ok_objects.txt`↔`ok_objects`、`mp.txt`+`ok_mp.txt`↔`ok_mp`、`corrupted_mp.txt`↔`corrupted_mp`。
 
 ## 5. CLI 与配置
 
@@ -94,7 +94,7 @@
 | `is_success_log` | `false` | 是否记录正常普通对象到 `<ownerID>/ok_objects.txt` |
 | `is_multipart_check` | `false` | 是否对多段对象做分段损坏检查 |
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
-| `is_multipart_success_log` | `false` | 是否记录干净的多段对象到 `<ownerID>/ok_multipart_objects.txt` |
+| `is_multipart_success_log` | `false` | 是否记录干净的多段对象到 `<ownerID>/ok_mp.txt` |
 | `progress_interval` | `100000` | 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；`0` 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；`0` 走默认 |
@@ -106,9 +106,9 @@
 | 文件 | 内容 | 何时写 |
 |---|---|---|
 | `corrupted_objects.txt` | 损坏普通对象 key | Range GET 命中 chunk-signature（`is_check=true`） |
-| `multipart_objects.txt` | 多段对象 key（仅 key） | `is_multipart_check=false` 时所有多段对象 |
-| `corrupted_multipart_objects.txt` | 损坏多段对象 key | `is_multipart_check=true` 时分段检查命中 |
-| `ok_multipart_objects.txt` | 干净多段对象 key | `is_multipart_check=true` 且 `is_success_log=true` |
+| `mp.txt` | 多段对象 key（仅 key） | `is_multipart_check=false` 时所有多段对象 |
+| `corrupted_mp.txt` | 损坏多段对象 key | `is_multipart_check=true` 时分段检查命中 |
+| `ok_mp.txt` | 干净多段对象 key | `is_multipart_check=true` 且 `is_multipart_success_log=true` |
 | `ok_objects.txt` | 正常普通对象 key | `is_success_log=true` |
 
 ### 处理文件（全局，根目录 `<output_dir>/<filename>`）
@@ -123,7 +123,7 @@
 | `multipart_check_failed.log` | 多段分段检查失败结构化错误（slog text） | 同上 |
 | `stats.txt` | 计时与计数（全局一份） | 程序结束 |
 
-`is_check=false` 时只写 `list_failed.*` + `stats.txt`，不创建 owner 目录。`is_check=true && is_multipart_check=false` 时 `corrupted_multipart_objects.txt` / `ok_multipart_objects.txt` / `multipart_check_failed.*` 不创建。
+`is_check=false` 时只写 `list_failed.*` + `stats.txt`，不创建 owner 目录。`is_check=true && is_multipart_check=false` 时 `corrupted_mp.txt` / `ok_mp.txt` / `multipart_check_failed.*` 不创建。
 
 ## 7. 编译与测试
 

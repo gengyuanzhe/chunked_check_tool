@@ -39,16 +39,16 @@ func TestProgressPrintsQueueLengths(t *testing.T) {
 	// Seed some calls so list_calls/get_calls show non-zero values.
 	s.AddListCall(1_000_000) // 1ms
 	s.AddGetCall(2_000_000)  // 2ms
-	s.IncrCorruptedMultipart()
+	s.IncrCorruptedMp()
 	s.IncrMultipartCheckFailed()
 	var buf bytes.Buffer
 	pp := NewProgressPrinter(&buf)
 	pp.SetQueueSnapshotProvider(func() QueueSnapshot {
 		return QueueSnapshot{
 			Prefix: 7, ObjCh: 42,
-			CorruptedObjects: 1, MultipartOk: 2,
-			CorruptedMultipart:   6,
-			ListFailed:           3, CheckFailed: 4, Success: 5,
+			CorruptedObjects: 1, OkMp: 2,
+			CorruptedMp: 6,
+			ListFailed:  3, CheckFailed: 4, OkObjects: 5,
 			MultipartCheckFailed: 8,
 		}
 	})
@@ -62,12 +62,12 @@ func TestProgressPrintsQueueLengths(t *testing.T) {
 		`q=pfx:7`,
 		`obj:42`,
 		`cor_obj:1`,
-		`mp_ok:2`,
-		`cmp:6`,
+		`ok_mp:2`,
+		`cor_mp:6`,
 		`mcf:8`,
 		`lf:3`,
 		`cf:4`,
-		`su:5`,
+		`ok_o:5`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("progress line missing %q\nfull line:\n%s", want, out)
