@@ -79,7 +79,7 @@ func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, start
 	fmt.Fprintf(w, "    output_dir: %s\n", cfg.OutputDir)
 	fmt.Fprintf(w, "    is_check: %t\n", cfg.IsCheck)
 	fmt.Fprintf(w, "    is_success_log: %t\n", cfg.IsSuccessLog)
-	fmt.Fprintf(w, "    is_multipart_check: %t\n", cfg.IsMultipartCheck)
+	fmt.Fprintf(w, "    is_multipart_segment_check: %t\n", cfg.IsMultipartSegmentCheck)
 	fmt.Fprintf(w, "    multipart_segment_size: %d\n", cfg.MultipartSegmentSize)
 	fmt.Fprintf(w, "    is_multipart_success_log: %t\n", cfg.IsMultipartSuccessLog)
 	fmt.Fprintf(w, "    progress_interval: %d\n", cfg.ProgressInterval)

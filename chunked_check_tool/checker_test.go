@@ -199,12 +199,12 @@ var chunkSigBody = []byte("1000;chunk-signature=00000000000000000000000000000000
 // the given segment size. Used by the TestCheckerMultipartSegmentCheck* tests.
 func multipartCfg(dir string, segSize int64) *Config {
 	return &Config{
-		OutputDir:             dir,
-		IsCheck:               true,
-		IsMultipartCheck:      true,
-		IsSuccessLog:          true,
-		IsMultipartSuccessLog: true,
-		MultipartSegmentSize:  segSize,
+		OutputDir:                 dir,
+		IsCheck:                   true,
+		IsMultipartSegmentCheck:   true,
+		IsSuccessLog:              true,
+		IsMultipartSuccessLog:     true,
+		MultipartSegmentSize:      segSize,
 	}
 }
 
@@ -304,7 +304,7 @@ func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 // <owner>/mp.txt (key only, no etag).
 func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: false, MultipartSegmentSize: 5 * 1024 * 1024}
+	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: false, MultipartSegmentSize: 5 * 1024 * 1024}
 	out, _ := NewOutput(cfg, "test-bkt")
 	s := NewStats()
 	worker := &FakeS3{Body: chunkSigBody} // would match if we checked — but we don't

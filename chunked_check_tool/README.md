@@ -32,14 +32,14 @@ endpoints:
 scheme: http            # http 或 https（后者忽略证书校验）
 ak: <access-key>
 sk: <secret-key>
-list_type: 1            # 1=子目录+平铺 nextmarker, 2=递归 BFS delimiter, 3=递归+信号量
-list_api_version: 2     # 1=ListObjects V1 (marker 分页), 2=ListObjectsV2 (continuation token, 默认)
+list_type: 2            # 1=子目录+平铺 nextmarker, 2=递归 BFS delimiter, 3=递归+信号量
+list_api_version: 1     # 1=ListObjects V1 (marker 分页, 默认), 2=ListObjectsV2 (continuation token)
 list_concurrency: 8
 check_concurrency: 16
 output_dir: ./out
 is_check: true          # true=列举+校验, false=仅列举
 is_success_log: false   # 是否记录正常普通对象到 <ownerID>/ok_objects.txt
-is_multipart_check: false   # 是否对多段对象做分段损坏检查
+is_multipart_segment_check: false   # 是否按固定 part size 对多段对象做分段损坏检查
 multipart_segment_size: 0    # 多段分段检查的段长度(字节)，需与上传 part size 一致
 is_multipart_success_log: false  # 是否记录干净的多段对象到 <ownerID>/ok_mp.txt
 progress_interval: 100000
@@ -53,14 +53,14 @@ result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>
 | `endpoints` | 必填 | S3 节点 ip:port 列表，至少 1 个 |
 | `scheme` | `http` | `https` 时跳过 TLS 证书校验 |
 | `ak` / `sk` | 必填 | 访问凭证（SigV4 静态凭证） |
-| `list_type` | `1` | 1=子目录+平铺 nextmarker, 2=递归 BFS delimiter, 3=递归+信号量 |
-| `list_api_version` | `2` | 1=ListObjects V1（marker 分页），2=ListObjectsV2（continuation token，默认） |
+| `list_type` | `2` | 1=子目录+平铺 nextmarker, 2=递归 BFS delimiter, 3=递归+信号量 |
+| `list_api_version` | `1` | 1=ListObjects V1（marker 分页），2=ListObjectsV2（continuation token） |
 | `list_concurrency` | `8` | 列举 worker 数（Mode 3 为信号量容量） |
 | `check_concurrency` | `16` | 校验 worker 数 |
 | `output_dir` | `.` | 输出目录（自动创建） |
 | `is_check` | `true` | `false` 时只列举不校验，仅写 `stats.txt` + `list_failed.*` |
 | `is_success_log` | `false` | `true` 时把正常普通对象 key 写入 `<ownerID>/ok_objects.txt` |
-| `is_multipart_check` | `false` | `true` 时对多段对象做分段损坏检查 |
+| `is_multipart_segment_check` | `false` | `true` 时按固定 part size（`multipart_segment_size`）对多段对象做分段损坏检查；`true` 时必须配 `multipart_segment_size > 0`，否则启动报错 |
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
 | `is_multipart_success_log` | `false` | `true` 时把干净的多段对象 key 写入 `<ownerID>/ok_mp.txt` |
 | `progress_interval` | `100000` | stdout 进度打印阈值（约） |
@@ -79,13 +79,13 @@ list_concurrency: 32      # 信号量容量，同时进行的 ListPage 调用数
 
 适用：对象树深或不规则、希望并发度严格受控于信号量而非固定 worker 数的场景。Mode 2 的固定 worker 池在树形不规则时可能饿死（树宽 < worker 数时部分 worker 空闲）或过载（子目录集中爆发时），Mode 3 用递归 + 信号量自动随树形调节并发，每棵子树按需抢占 slot。`-nextmarker` 在此模式被忽略。
 
-#### 切换到 V1 ListObjects API
+#### 切换到 V2 ListObjects API
 
 ```yaml
-list_api_version: 1
+list_api_version: 2
 ```
 
-适用：目标 S3 实现不支持 ListObjectsV2（某些旧版 MinIO 或自研存储），或 V2 行为异常时。V1 用 marker（最后一个返回的 key，delimited 时由 S3 返回 `NextMarker`）分页；V2 用 continuation token（服务器返回的不透明游标）。两条路径对 caller 透明，切换只需改这一个字段，Mode 1/2/3 均可搭配 V1 或 V2。
+适用：目标 S3 实现支持 ListObjectsV2（绝大多数现代 S3 / MinIO），或需要 continuation token（服务器返回的不透明游标，比 V1 marker 更稳健）时。V1 用 marker（最后一个返回的 key，delimited 时由 S3 返回 `NextMarker`）分页；V2 用 continuation token。两条路径对 caller 透明，切换只需改这一个字段，Mode 1/2/3 均可搭配 V1 或 V2。
 
 #### 组合：Mode 3 + V1
 
@@ -98,7 +98,7 @@ list_concurrency: 32
 #### 启用多段分段损坏检查
 
 ```yaml
-is_multipart_check: true
+is_multipart_segment_check: true
 multipart_segment_size: 5242880   # 5 MiB，需与上传 multipart part size 一致
 ```
 
@@ -164,9 +164,9 @@ multipart_segment_size: 5242880   # 5 MiB，需与上传 multipart part size 一
 | 文件 | 内容 | 何时写 |
 |---|---|---|
 | `corrupted_objects.txt` | 损坏的普通对象 key | Range GET 前 128 字节命中 chunk-signature 正则 |
-| `mp.txt` | 多段对象 key（仅 key） | `is_multipart_check=false` 时所有多段对象 |
-| `corrupted_mp.txt` | 损坏的多段对象 key | `is_multipart_check=true` 时分段检查命中 |
-| `ok_mp.txt` | 干净的多段对象 key | `is_multipart_check=true` 且 `is_multipart_success_log=true` |
+| `mp.txt` | 多段对象 key（仅 key） | `is_multipart_segment_check=false` 时所有多段对象 |
+| `corrupted_mp.txt` | 损坏的多段对象 key | `is_multipart_segment_check=true` 时分段检查命中 |
+| `ok_mp.txt` | 干净的多段对象 key | `is_multipart_segment_check=true` 且 `is_multipart_success_log=true` |
 | `ok_objects.txt` | 正常普通对象 key | `is_success_log=true` |
 
 ### 处理文件（全局，根目录 `<output_dir>/<filename>`）
@@ -177,7 +177,7 @@ multipart_segment_size: 5242880   # 5 MiB，需与上传 multipart part size 一
 | `list_failed.log` | 列举失败结构化错误信息（slog text，含 req_id/http_code/s3_code/err） | 同上 |
 | `check_failed.txt` | 校验失败的普通对象 key | checker 普通对象 RangeGet 失败 |
 | `check_failed.log` | 校验失败结构化错误信息（slog text） | 同上 |
-| `multipart_check_failed.txt` | 多段分段检查失败的对象 key | `is_multipart_check=true` 时分段 RangeGet 失败 |
+| `multipart_check_failed.txt` | 多段分段检查失败的对象 key | `is_multipart_segment_check=true` 时分段 RangeGet 失败 |
 | `multipart_check_failed.log` | 多段分段检查失败结构化错误信息（slog text） | 同上 |
 | `stats.txt` | 计时与计数（全局一份） | 程序结束 |
 

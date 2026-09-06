@@ -70,7 +70,7 @@ func TestOutputMultipartAllKeyOnly(t *testing.T) {
 // writes to <owner>/corrupted_mp.txt.
 func TestOutputCorruptedMultipartPerOwner(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, MultipartSegmentSize: 5 * 1024 * 1024}
+	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: true, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg, "test-bkt")
 	o.WriteCorruptedMultipart("owner-A", "mp/k1")
 	o.Close()
@@ -84,7 +84,7 @@ func TestOutputCorruptedMultipartPerOwner(t *testing.T) {
 // multipart writes to <owner>/ok_mp.txt.
 func TestOutputMultipartOkPerOwner(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, IsSuccessLog: true, IsMultipartSuccessLog: true, MultipartSegmentSize: 5 * 1024 * 1024}
+	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: true, IsSuccessLog: true, IsMultipartSuccessLog: true, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg, "test-bkt")
 	o.WriteMultipartOk("owner-A", "mp/clean")
 	o.Close()
@@ -98,7 +98,7 @@ func TestOutputMultipartOkPerOwner(t *testing.T) {
 // is_multipart_success_log off: ok_multipart file must not be created.
 func TestOutputMultipartOkSkippedWhenSuccessLogOff(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, IsSuccessLog: true, IsMultipartSuccessLog: false, MultipartSegmentSize: 5 * 1024 * 1024}
+	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: true, IsSuccessLog: true, IsMultipartSuccessLog: false, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg, "test-bkt")
 	o.WriteMultipartOk("owner-A", "mp/clean") // no-op
 	o.Close()
@@ -129,7 +129,7 @@ func TestOutputCheckFailedAtRoot(t *testing.T) {
 // at root (new process file for segment-check RangeGet errors).
 func TestOutputMultipartCheckFailedAtRoot(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: true, MultipartSegmentSize: 5 * 1024 * 1024}
+	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: true, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg, "test-bkt")
 	o.WriteMultipartCheckFailed("mp/k1")
 	o.Close()
@@ -143,7 +143,7 @@ func TestOutputMultipartCheckFailedAtRoot(t *testing.T) {
 // is never created (segment check doesn't run, no one writes here).
 func TestOutputMultipartCheckFailedSkippedWhenSwitchOff(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartCheck: false}
+	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: false}
 	o, _ := NewOutput(cfg, "test-bkt")
 	o.WriteMultipartCheckFailed("mp/k1") // no-op
 	o.Close()

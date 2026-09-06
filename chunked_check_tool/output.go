@@ -49,10 +49,10 @@ type Output struct {
 
 	// enable flags — each gates one writer goroutine + file
 	corruptedEnabled            bool // is_check
-	multipartAllEnabled         bool // is_check && !is_multipart_check
-	corruptedMultipartEnabled   bool // is_check && is_multipart_check
-	multipartOkEnabled          bool // is_check && is_multipart_check && is_success_log
-	multipartCheckFailedEnabled bool // is_check && is_multipart_check
+	multipartAllEnabled         bool // is_check && !is_multipart_segment_check
+	corruptedMultipartEnabled   bool // is_check && is_multipart_segment_check
+	multipartOkEnabled          bool // is_check && is_multipart_segment_check && is_success_log
+	multipartCheckFailedEnabled bool // is_check && is_multipart_segment_check
 	checkEnabled                bool // is_check
 	successEnabled              bool // is_check && is_success_log
 
@@ -69,7 +69,7 @@ func NewOutput(cfg *Config, bucket string) (*Output, error) {
 		chCap = 1024
 	}
 	isCheck := cfg.IsCheck
-	isMP := cfg.IsMultipartCheck
+	isMP := cfg.IsMultipartSegmentCheck
 	format := cfg.ResultLineFormat
 	if format == "" {
 		format = "<bucket>|<key>"

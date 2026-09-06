@@ -98,7 +98,7 @@ func (c *Checker) Handle(obj ObjectInfo) {
 		// Multipart object. If the multipart segment check is enabled,
 		// probe the first 128 bytes of each segment for the chunked-upload
 		// signature; any match means the multipart is corrupted.
-		if c.cfg.IsMultipartCheck && c.cfg.MultipartSegmentSize > 0 && obj.Size > 0 {
+		if c.cfg.IsMultipartSegmentCheck && c.cfg.MultipartSegmentSize > 0 && obj.Size > 0 {
 			c.checkMultipartSegments(obj)
 		} else {
 			c.out.WriteMultipartAll(obj.OwnerID, obj.Key)

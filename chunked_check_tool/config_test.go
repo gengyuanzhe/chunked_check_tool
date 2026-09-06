@@ -116,7 +116,7 @@ endpoints:
   - 10.0.0.1:9000
 ak: x
 sk: y
-is_multipart_check: true
+is_multipart_segment_check: true
 multipart_segment_size: 5242880
 `)
 	if err := os.WriteFile(path, content, 0644); err != nil {
@@ -126,10 +126,35 @@ multipart_segment_size: 5242880
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.IsMultipartCheck {
-		t.Errorf("is_multipart_check = false, want true")
+	if !cfg.IsMultipartSegmentCheck {
+		t.Errorf("is_multipart_segment_check = false, want true")
 	}
 	if cfg.MultipartSegmentSize != 5242880 {
 		t.Errorf("multipart_segment_size = %d, want 5242880", cfg.MultipartSegmentSize)
 	}
 }
+
+// TestLoadConfig_SegmentCheckWithoutSize — is_multipart_segment_check=true
+// with multipart_segment_size=0 is a contradictory config: the user asked for
+// segment check but provided no segment size. Fail fast at startup rather
+// than silently treating every multipart as clean (which would mask bugs).
+func TestLoadConfig_SegmentCheckWithoutSize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte(`
+endpoints:
+  - 10.0.0.1:9000
+ak: x
+sk: y
+is_multipart_segment_check: true
+multipart_segment_size: 0
+`)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error when is_multipart_segment_check=true but multipart_segment_size=0")
+	}
+}
+

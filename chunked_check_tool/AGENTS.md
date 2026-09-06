@@ -85,14 +85,14 @@
 | `endpoints` | 必填 | ip:port 列表，至少 1 个 |
 | `scheme` | `http` | `http` 或 `https`（后者跳过证书校验） |
 | `ak` / `sk` | 必填 | SigV4 静态凭证 |
-| `list_type` | `1` | 1=子目录+平铺 nextmarker；2=递归 BFS delimiter；3=递归+信号量 |
-| `list_api_version` | `2` | 1=ListObjects V1（marker 分页）；2=ListObjectsV2（continuation token，默认） |
+| `list_type` | `2` | 1=子目录+平铺 nextmarker；2=递归 BFS delimiter；3=递归+信号量 |
+| `list_api_version` | `1` | 1=ListObjects V1（marker 分页）；2=ListObjectsV2（continuation token） |
 | `list_concurrency` | `8` | 列举并发度 |
 | `check_concurrency` | `16` | 校验并发度 |
 | `output_dir` | `.` | 输出目录 |
 | `is_check` | `true` | true=列举+校验；false=仅列举（只写 stats.txt + list_failed.*） |
 | `is_success_log` | `false` | 是否记录正常普通对象到 `<ownerID>/ok_objects.txt` |
-| `is_multipart_check` | `false` | 是否对多段对象做分段损坏检查 |
+| `is_multipart_segment_check` | `false` | 是否按固定 part size（`multipart_segment_size`）对多段对象做分段损坏检查；`true` 时必须配 `multipart_segment_size > 0`，否则启动报错中止 |
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
 | `is_multipart_success_log` | `false` | 是否记录干净的多段对象到 `<ownerID>/ok_mp.txt` |
 | `progress_interval` | `100000` | 进度打印阈值（约） |
@@ -107,9 +107,9 @@
 | 文件 | 内容 | 何时写 |
 |---|---|---|
 | `corrupted_objects.txt` | 损坏普通对象 key | Range GET 命中 chunk-signature（`is_check=true`） |
-| `mp.txt` | 多段对象 key（仅 key） | `is_multipart_check=false` 时所有多段对象 |
-| `corrupted_mp.txt` | 损坏多段对象 key | `is_multipart_check=true` 时分段检查命中 |
-| `ok_mp.txt` | 干净多段对象 key | `is_multipart_check=true` 且 `is_multipart_success_log=true` |
+| `mp.txt` | 多段对象 key（仅 key） | `is_multipart_segment_check=false` 时所有多段对象 |
+| `corrupted_mp.txt` | 损坏多段对象 key | `is_multipart_segment_check=true` 时分段检查命中 |
+| `ok_mp.txt` | 干净多段对象 key | `is_multipart_segment_check=true` 且 `is_multipart_success_log=true` |
 | `ok_objects.txt` | 正常普通对象 key | `is_success_log=true` |
 
 ### 处理文件（全局，根目录 `<output_dir>/<filename>`）
@@ -120,11 +120,11 @@
 | `list_failed.log` | 列举失败结构化错误（slog text，req_id/prefix/http_code/s3_code/err） | 同上 |
 | `check_failed.txt` | 普通对象校验失败 key | checker 普通对象 RangeGet 失败 |
 | `check_failed.log` | 校验失败结构化错误（slog text，req_id/key/http_code/s3_code/err） | 同上 |
-| `multipart_check_failed.txt` | 多段分段检查失败 key | `is_multipart_check=true` 时分段 RangeGet 失败 |
+| `multipart_check_failed.txt` | 多段分段检查失败 key | `is_multipart_segment_check=true` 时分段 RangeGet 失败 |
 | `multipart_check_failed.log` | 多段分段检查失败结构化错误（slog text） | 同上 |
 | `stats.txt` | 计时与计数（全局一份） | 程序结束 |
 
-`is_check=false` 时只写 `list_failed.*` + `stats.txt`，不创建 owner 目录。`is_check=true && is_multipart_check=false` 时 `corrupted_mp.txt` / `ok_mp.txt` / `multipart_check_failed.*` 不创建。
+`is_check=false` 时只写 `list_failed.*` + `stats.txt`，不创建 owner 目录。`is_check=true && is_multipart_segment_check=false` 时 `corrupted_mp.txt` / `ok_mp.txt` / `multipart_check_failed.*` 不创建。
 
 ### 结果文件行格式
 
@@ -188,7 +188,7 @@ mkdir -p /tmp/chunked-e2e/mp-seed
 #    见 /tmp/chunked-e2e/mp-seed/main.go（仓库外 helper，用 minio-go v7）
 cd /tmp/chunked-e2e/mp-seed && go run .
 
-# 5. 写 cfg（is_check=true, is_multipart_check=true, segment_size=5242880）
+# 5. 写 cfg（is_check=true, is_multipart_segment_check=true, segment_size=5242880）
 cat > /tmp/chunked-e2e/cfg.yaml <<'EOF'
 endpoints:
   - 127.0.0.1:9100
@@ -201,7 +201,7 @@ check_concurrency: 4
 output_dir: /tmp/chunked-e2e/out
 is_check: true
 is_success_log: true
-is_multipart_check: true
+is_multipart_segment_check: true
 multipart_segment_size: 5242880
 is_multipart_success_log: true
 progress_interval: 2
