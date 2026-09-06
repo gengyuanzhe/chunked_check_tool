@@ -86,26 +86,27 @@ func NewChecker(worker S3API, out *Output, stats *Stats, cfg *Config) *Checker {
 	return &Checker{worker: worker, out: out, stats: stats, cfg: cfg}
 }
 
-// Handle classifies obj. Every object that reaches Handle counts as
-// "listed/processed" (listedTotal), regardless of outcome — in check mode
-// the lister does not IncrListed (it sends objects to objCh), so the
-// checker is responsible for bumping the counter for each object it
-// consumes. IncrListed is therefore the first thing we do.
+// Handle classifies obj. Every object that reaches Handle counts toward
+// the listed total: list_obj for normal ETags, list_mp for multipart.
+// In check mode the lister does not bump listed counters (it sends
+// objects to objCh), so the checker is responsible for classifying.
 func (c *Checker) Handle(obj ObjectInfo) {
-	c.stats.IncrListed()
-
 	if !isNormalETag(obj.ETag) {
+		c.stats.IncrListedMp()
 		// Multipart object. If the multipart segment check is enabled,
 		// probe the first 128 bytes of each segment for the chunked-upload
 		// signature; any match means the multipart is corrupted.
 		if c.cfg.IsMultipartSegmentCheck && c.cfg.MultipartSegmentSize > 0 && obj.Size > 0 {
 			c.checkMultipartSegments(obj)
 		} else {
+			// Segment check off → recorded as mp.txt, but NOT counted as
+			// ok_mp: we did not verify the segments, so "clean multipart"
+			// would be a false claim.
 			c.out.WriteMultipartAll(obj.OwnerID, obj.Key)
-			c.stats.IncrOkMp()
 		}
 		return
 	}
+	c.stats.IncrListedObject()
 
 	// Size=0 objects cannot be RangeGet'd (S3 returns 416 Range Not
 	// Satisfiable since the requested byte range doesn't overlap with

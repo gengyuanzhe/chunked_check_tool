@@ -220,12 +220,12 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string, st
 					}
 				} else {
 					// list-only: lister is the sole counter, so main counts
-					// and classifies root direct objects here too.
-					stats.IncrListed()
+					// and classifies root direct objects here. No check is
+					// performed, so we only bump listed counters (no ok_*).
 					if !isNormalETag(o.ETag) {
-						stats.IncrOkMp()
+						stats.IncrListedMp()
 					} else {
-						stats.IncrOkObjects()
+						stats.IncrListedObject()
 					}
 				}
 			}

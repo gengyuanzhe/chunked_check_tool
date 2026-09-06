@@ -95,8 +95,11 @@ func TestCheckerHandleMultipartSkipsRangeGet(t *testing.T) {
 	if called {
 		t.Error("RangeGet should not be called for multipart")
 	}
-	if s.Snapshot().OkMp != 1 {
-		t.Errorf("multipart=%d want 1", s.Snapshot().OkMp)
+	if got := s.Snapshot().ListedMp; got != 1 {
+		t.Errorf("list_mp=%d want 1", got)
+	}
+	if got := s.Snapshot().OkMp; got != 0 {
+		t.Errorf("ok_mp=%d want 0 (segment check off — not verified, must not claim clean)", got)
 	}
 }
 
@@ -225,7 +228,7 @@ func TestCheckerMultipartSegmentCheckCorrupted(t *testing.T) {
 		t.Errorf("corrupted_mp=%d want 1", got)
 	}
 	if got := s.Snapshot().OkMp; got != 0 {
-		t.Errorf("multipart=%d want 0 (corrupted multipart should not also count as plain multipart)", got)
+		t.Errorf("ok_mp=%d want 0 (corrupted multipart should not also count as clean)", got)
 	}
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
@@ -252,7 +255,7 @@ func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 		t.Errorf("corrupted_mp=%d want 0", got)
 	}
 	if got := s.Snapshot().OkMp; got != 1 {
-		t.Errorf("multipart=%d want 1 (clean multipart should still be recorded as multipart)", got)
+		t.Errorf("ok_mp=%d want 1 (clean multipart passed segment check)", got)
 	}
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
@@ -311,10 +314,13 @@ func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 	c := NewChecker(worker, out, s, cfg)
 	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, OwnerID: "owner-A"})
 	if got := s.Snapshot().CorruptedMp; got != 0 {
-		t.Errorf("corrupted_mp=%d want 0 (switch off)", got)
+		t.Errorf("corrupt_mp=%d want 0 (switch off)", got)
 	}
-	if got := s.Snapshot().OkMp; got != 1 {
-		t.Errorf("multipart=%d want 1 (switch off, plain multipart)", got)
+	if got := s.Snapshot().ListedMp; got != 1 {
+		t.Errorf("list_mp=%d want 1 (switch off, still listed as multipart)", got)
+	}
+	if got := s.Snapshot().OkMp; got != 0 {
+		t.Errorf("ok_mp=%d want 0 (switch off — segment check not performed, no clean claim)", got)
 	}
 	if err := out.Close(); err != nil {
 		t.Fatal(err)

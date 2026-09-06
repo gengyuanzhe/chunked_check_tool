@@ -92,7 +92,7 @@ result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>
 
 `.txt` 与对应 `.log` 通过对象名/prefix 关联：`.txt` 只存 key/prefix 作关联键，错误原因在 `.log` 里。`.log` 字段顺序：`time level msg req_id key/prefix http_code s3_code err`（slog text handler，key=value 形式）。
 
-**统计**需要包含：对象总数、程序执行总耗时（与对象总数同一行）、list 总次数、list 平均耗时、list 总耗时、get 总次数、get 平均耗时、get 总耗时、ok_objects 数（干净普通对象）、ok_mp 数（干净多段，switch off 时为全部多段、switch on 时为通过分段检查的）、corrupted_objects 数（损坏普通对象）、corrupted_mp 数（损坏多段）、list_failed 数、check_failed 数（普通对象 RangeGet 失败）、mp_check_failed 数。
+**统计**需要包含：`list_all`（对象总数=list_obj+list_mp，与程序执行总耗时同一行）、`list_obj`（列举的普通对象数）、`list_mp`（列举的多段对象数）、`ok_obj`（干净普通对象）、`corrupt_obj`（损坏普通对象）、`ok_mp`（干净多段，**仅** `is_multipart_segment_check=true` 时通过分段检查的才算，switch off 时为 0——未校验不能谎称干净）、`corrupt_mp`（损坏多段）、list 总次数、list 平均耗时、list 总耗时、get 总次数、get 平均耗时、get 总耗时、`list_failed` 数、`check_failed` 数（普通对象 RangeGet 失败）、`mp_check_failed` 数。
 
 ### 其他：
 

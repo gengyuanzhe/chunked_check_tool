@@ -55,7 +55,13 @@ func TestProgressPrintsQueueLengths(t *testing.T) {
 	pp.MaybePrint(s, "checked", 100)
 	out := buf.String()
 	for _, want := range []string{
-		`corrupted_mp=1`,
+		`list_all=0`,
+		`list_obj=0`,
+		`list_mp=0`,
+		`ok_obj=0`,
+		`corrupt_obj=0`,
+		`ok_mp=0`,
+		`corrupt_mp=1`,
 		`mp_check_failed=1`,
 		`list_calls=1`,
 		`get_calls=1`,

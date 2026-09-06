@@ -23,9 +23,9 @@ import (
 // objCh so check workers drain and terminate.
 //
 // Counting rule mirrors Lister.processPrefix: in check mode the walker
-// does NOT IncrListed — the checker bumps listedTotal once per consumed
+// does NOT bump listed counters — the checker does that once per consumed
 // object. In list-only mode the walker is the sole counter and bumps
-// IncrListed (and IncrOkMp for non-32-hex ETags, IncrOkObjects for normal) per object.
+// IncrListedMp (non-32-hex ETags) or IncrListedObject (normal ETags) per object.
 //
 // Failure handling: a ListPage error writes the prefix to list_failed,
 // bumps ListFailed, and returns — the subtree under that prefix is
@@ -62,11 +62,12 @@ func runRecursiveWalk(ctx context.Context, s3 S3API, prefix string, objCh chan<-
 						return
 					}
 				} else {
-					stats.IncrListed()
+					// list-only mode: no check performed, only listed
+					// counters move (no ok_* claims).
 					if !isNormalETag(o.ETag) {
-						stats.IncrOkMp()
+						stats.IncrListedMp()
 					} else {
-						stats.IncrOkObjects()
+						stats.IncrListedObject()
 					}
 				}
 				if onObject != nil {

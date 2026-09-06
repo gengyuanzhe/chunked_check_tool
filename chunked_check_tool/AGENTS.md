@@ -67,7 +67,7 @@
 
 14. **多段分段检查的失败分流**：分段 RangeGet 报错走 `mp_check_failed` 路径（`WriteMpCheckFailed` + `IncrMpCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）。
 
-15. **统计字段命名**：`ok_objects`（干净普通对象）/ `ok_mp`（干净多段；switch off=全部多段、switch on=通过分段检查的）/ `corrupted_objects`（损坏普通对象）/ `corrupted_mp`（损坏多段）/ `check_failed`（普通对象 RangeGet 失败）/ `mp_check_failed`（多段分段 RangeGet 失败）/ `list_failed`。文件名与字段名一致：`ok_objects.txt`↔`ok_objects`、`mp.txt`+`ok_mp.txt`↔`ok_mp`、`corrupted_mp.txt`↔`corrupted_mp`。
+15. **统计字段命名**（display name / Go 字段）：`list_obj` (`ListedObjects`) / `list_mp` (`ListedMp`) / `list_all` (`ListedAll=list_obj+list_mp`) / `ok_obj` (`OkObjects`) / `corrupt_obj` (`CorruptedObjects`) / `ok_mp` (`OkMp`) / `corrupt_mp` (`CorruptedMp`) / `list_failed` (`ListFailed`) / `check_failed` (`CheckFailed`) / `mp_check_failed` (`MpCheckFailed`)。**关键语义**：`ok_mp` 只在 `is_multipart_segment_check=true` 且通过分段检查时 +1；switch off 时多段对象只计 `list_mp`，**不**计 `ok_mp`——未校验不能谎称干净。`is_check=false`（list-only）时 `ok_obj`/`corrupt_obj`/`ok_mp`/`corrupt_mp`/`check_failed`/`mp_check_failed` 全部为 0，summary 不输出这些字段。
 
 ## 5. CLI 与配置
 
@@ -217,7 +217,7 @@ go build -o /tmp/chunked_check_tool .
 
 | 输出 | 内容 |
 |---|---|
-| `out/run.log`（=== summary === 段） | `total_objects=8 ok_objects=5 corrupted_objects=1 ok_mp=1 corrupted_mp=1 list_failed=0 check_failed=0 mp_check_failed=0` |
+| `out/run.log`（=== summary === 段） | `list_all: 8 (list_obj: 6 list_mp: 2)` `ok_obj: 5 corrupt_obj: 1 ok_mp: 1 corrupt_mp: 1 list_failed: 0 check_failed: 0 mp_check_failed: 0` |
 | `out/minio/corrupted_objects.txt` | `testbucket\|corrupted/corrupted.bin` |
 | `out/minio/ok_objects.txt` | 5 行 `testbucket\|data/2026/01/file_0N.bin` |
 | `out/minio/corrupted_mp.txt` | `testbucket\|mp/corrupt.bin` |

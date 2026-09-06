@@ -84,9 +84,9 @@ func (l *Lister) Run(ctx context.Context, wg *sync.WaitGroup, objCh chan<- Objec
 // for each so they are accounted for in the termination counter.
 //
 // Counting rule (fixes a double-count with checker.Handle): in check mode
-// the lister does NOT IncrListed — the checker bumps listedTotal once per
-// consumed object. In list-only mode the lister is the sole counter and
-// bumps IncrListed for every object it classifies.
+// the lister does NOT bump listed counters — the checker does that once
+// per consumed object. In list-only mode the lister is the sole counter
+// and bumps IncrListedMp / IncrListedObject per object it classifies.
 func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- ObjectInfo, s3 S3API, onObject func()) {
 	continuationToken := ""
 	for {
@@ -106,11 +106,11 @@ func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- 
 				}
 			} else {
 				// list-only mode: lister is the sole counter/classifier.
-				l.stats.IncrListed()
+				// No check is performed, so only listed counters move.
 				if !isNormalETag(o.ETag) {
-					l.stats.IncrOkMp()
+					l.stats.IncrListedMp()
 				} else {
-					l.stats.IncrOkObjects()
+					l.stats.IncrListedObject()
 				}
 			}
 			if onObject != nil {
