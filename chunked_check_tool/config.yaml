@@ -1,16 +1,5 @@
 # chunked_check_tool 配置模板
 # 用法: ./chunked_check_tool -c config.yaml -bkt <bucket> [-prefix <p>] [-nextmarker <key>]
-#
-# 运行日志 run.log（与下列配置项无关，进程总会写）:
-#   路径     <output_dir>/run.log，append 模式（断点续跑不覆盖）。
-#   内容     1) 启动配置快照（所有配置项 + CLI 参数，sk 屏蔽为 ***）；
-#           2) 进度行（约每 progress_interval 个对象一行）；
-#           3) 节点故障告警（连接拒绝/超时/5xx 时由 nodepool 打印）；
-#           4) 最终统计（=== summary === 段，含 total_objects/list_calls/get_calls/
-#              ok_objects/corrupted_objects/ok_mp/corrupted_mp/list_failed/
-#              check_failed/multipart_check_failed 等）。
-#   归属     stdout 与 stderr 都 tee 进 run.log，所以屏幕上看到的运行时输出都在
-#           这里留底，事后排查问题不用重跑。
 
 # S3 节点 ip:port 列表，至少 1 个；多个节点会做故障轮询隔离
 endpoints:
@@ -20,7 +9,7 @@ endpoints:
 # http 或 https；https 时忽略证书校验（InsecureSkipVerify=true）
 scheme: http
 
-# SigV4 静态凭证
+# AK/SK
 ak: <access-key>
 sk: <secret-key>
 
@@ -30,7 +19,7 @@ list_type: 2
 # ListObjects API 版本：1=V1（marker 分页，默认）, 2=V2（continuation token）
 list_api_version: 1
 
-# 列举并发度（Mode 3 为信号量容量）
+# 列举并发度
 list_concurrency: 8
 
 # 校验并发度
