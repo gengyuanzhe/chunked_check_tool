@@ -125,30 +125,30 @@ func TestOutputCheckFailedAtRoot(t *testing.T) {
 	}
 }
 
-// TestOutputMultipartCheckFailedAtRoot — multipart_check_failed.txt/.log stay
+// TestOutputMpCheckFailedAtRoot — mp_check_failed.txt/.log stay
 // at root (new process file for segment-check RangeGet errors).
-func TestOutputMultipartCheckFailedAtRoot(t *testing.T) {
+func TestOutputMpCheckFailedAtRoot(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: true, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg, "test-bkt")
-	o.WriteMultipartCheckFailed("mp/k1")
+	o.WriteMpCheckFailed("mp/k1")
 	o.Close()
-	data, _ := os.ReadFile(filepath.Join(dir, "multipart_check_failed.txt"))
+	data, _ := os.ReadFile(filepath.Join(dir, "mp_check_failed.txt"))
 	if line := strings.TrimSpace(string(data)); line != "mp/k1" {
-		t.Errorf("multipart_check_failed.txt = %q, want %q", line, "mp/k1")
+		t.Errorf("mp_check_failed.txt = %q, want %q", line, "mp/k1")
 	}
 }
 
-// TestOutputMultipartCheckFailedSkippedWhenSwitchOff — switch off: the file
+// TestOutputMpCheckFailedSkippedWhenSwitchOff — switch off: the file
 // is never created (segment check doesn't run, no one writes here).
-func TestOutputMultipartCheckFailedSkippedWhenSwitchOff(t *testing.T) {
+func TestOutputMpCheckFailedSkippedWhenSwitchOff(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: false}
 	o, _ := NewOutput(cfg, "test-bkt")
-	o.WriteMultipartCheckFailed("mp/k1") // no-op
+	o.WriteMpCheckFailed("mp/k1") // no-op
 	o.Close()
-	if _, err := os.Stat(filepath.Join(dir, "multipart_check_failed.txt")); !os.IsNotExist(err) {
-		t.Errorf("multipart_check_failed.txt should not exist when switch off, got %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "mp_check_failed.txt")); !os.IsNotExist(err) {
+		t.Errorf("mp_check_failed.txt should not exist when switch off, got %v", err)
 	}
 }
 
@@ -216,7 +216,7 @@ func TestOutputListOnlySkipsPerOwnerFiles(t *testing.T) {
 	o.WriteCheckFailed("k3")
 	o.WriteSuccess("owner-A", "k4")
 	o.WriteListFailed("prefix/")
-	o.WriteMultipartCheckFailed("k5")
+	o.WriteMpCheckFailed("k5")
 	if err := o.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestOutputListOnlySkipsPerOwnerFiles(t *testing.T) {
 		"corrupted_mp.txt",
 		"ok_mp.txt",
 		"check_failed.txt",
-		"multipart_check_failed.txt",
+		"mp_check_failed.txt",
 		"ok_objects.txt",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {

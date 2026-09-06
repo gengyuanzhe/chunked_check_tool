@@ -40,7 +40,7 @@ func TestProgressPrintsQueueLengths(t *testing.T) {
 	s.AddListCall(1_000_000) // 1ms
 	s.AddGetCall(2_000_000)  // 2ms
 	s.IncrCorruptedMp()
-	s.IncrMultipartCheckFailed()
+	s.IncrMpCheckFailed()
 	var buf bytes.Buffer
 	pp := NewProgressPrinter(&buf)
 	pp.SetQueueSnapshotProvider(func() QueueSnapshot {
@@ -49,14 +49,14 @@ func TestProgressPrintsQueueLengths(t *testing.T) {
 			CorruptedObjects: 1, OkMp: 2,
 			CorruptedMp: 6,
 			ListFailed:  3, CheckFailed: 4, OkObjects: 5,
-			MultipartCheckFailed: 8,
+			MpCheckFailed: 8,
 		}
 	})
 	pp.MaybePrint(s, "checked", 100)
 	out := buf.String()
 	for _, want := range []string{
 		`corrupted_mp=1`,
-		`multipart_check_failed=1`,
+		`mp_check_failed=1`,
 		`list_calls=1`,
 		`get_calls=1`,
 		`q=pfx:7`,

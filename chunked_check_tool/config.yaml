@@ -58,5 +58,5 @@ output_ch_capacity: 0
 
 # 结果文件每行格式，支持 <bucket>/<key>/<owner> 占位符，其他字符按字面输出。
 # 仅影响 per-owner 结果文件（corrupted_objects/mp/corrupted_mp/ok_mp/ok_objects.txt）；
-# 处理文件（list_failed/check_failed/multipart_check_failed 的 .txt）始终只存 key/prefix。
+# 处理文件（list_failed/check_failed/mp_check_failed 的 .txt）始终只存 key/prefix。
 result_line_format: <bucket>|<key>

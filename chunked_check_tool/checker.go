@@ -143,7 +143,7 @@ func (c *Checker) Handle(obj ObjectInfo) {
 // (segments of cfg.MultipartSegmentSize bytes starting at offset 0, segSize,
 // 2*segSize, ...). If ANY segment's body matches the chunked-upload signature
 // regex, the object is flagged as corrupted multipart. If a segment RangeGet
-// returns an error, the object is flagged as multipart_check_failed (distinct
+// returns an error, the object is flagged as mp_check_failed (distinct
 // from check_failed — segment GET errors are a separate failure mode and get
 // their own file + counter). Otherwise the object is recorded as a clean
 // multipart (→ ok_mp.txt when is_multipart_success_log, else dropped).
@@ -154,9 +154,9 @@ func (c *Checker) checkMultipartSegments(obj ObjectInfo) {
 		offset := i * segSize
 		body, err := c.worker.RangeGetAt(context.Background(), obj.Key, offset, 128)
 		if err != nil {
-			c.out.WriteMultipartCheckFailed(obj.Key)
-			c.out.WriteMultipartCheckFailedLog(obj.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
-			c.stats.IncrMultipartCheckFailed()
+			c.out.WriteMpCheckFailed(obj.Key)
+			c.out.WriteMpCheckFailedLog(obj.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
+			c.stats.IncrMpCheckFailed()
 			return
 		}
 		if chunkSigRe.Match(body) {

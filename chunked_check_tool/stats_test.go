@@ -15,7 +15,7 @@ func TestStatsIncrAndSnapshot(t *testing.T) {
 	s.IncrCorruptedMp()
 	s.IncrListFailed()
 	s.IncrCheckFailed()
-	s.IncrMultipartCheckFailed()
+	s.IncrMpCheckFailed()
 	s.AddListCall(2 * time.Millisecond)
 	s.AddListCall(4 * time.Millisecond)
 	s.AddGetCall(10 * time.Millisecond)
@@ -36,8 +36,8 @@ func TestStatsIncrAndSnapshot(t *testing.T) {
 	if snap.OkMp != 1 {
 		t.Errorf("ok_mp=%d want 1", snap.OkMp)
 	}
-	if snap.MultipartCheckFailed != 1 {
-		t.Errorf("multipart_check_failed=%d want 1", snap.MultipartCheckFailed)
+	if snap.MpCheckFailed != 1 {
+		t.Errorf("mp_check_failed=%d want 1", snap.MpCheckFailed)
 	}
 	if snap.ListCalls != 2 {
 		t.Errorf("listcalls=%d want 2", snap.ListCalls)

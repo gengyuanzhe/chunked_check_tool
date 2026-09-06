@@ -45,9 +45,9 @@
 
 3. **ETag 来源**：list 响应（统一），**不从 Range GET response header 取**。OwnerID 同样来自 list 响应（minio-go v7.3.0 默认 `fetchOwner=true`，无额外请求开销）。
 
-4. **结果文件按 OwnerID 分目录，处理文件全局**：`corrupted_objects`/`mp`/`corrupted_mp`/`ok_mp`/`ok_objects` 这五类结果文件按 `<ownerID>/<filename>` 路由（OwnerID 为空 → `_unknown/`）；`list_failed`/`check_failed`/`multipart_check_failed`/`stats` 留根目录全局。理由：结果文件数量大且天然按 owner 分桶有意义；处理文件全局方便运维统一排查；stats 全局一份避免 owner 分桶后还要汇总。ownerDirName 折叠空/`.`/`..`/含路径分隔符的 OwnerID 到 `_unknown`，防止路径穿越。
+4. **结果文件按 OwnerID 分目录，处理文件全局**：`corrupted_objects`/`mp`/`corrupted_mp`/`ok_mp`/`ok_objects` 这五类结果文件按 `<ownerID>/<filename>` 路由（OwnerID 为空 → `_unknown/`）；`list_failed`/`check_failed`/`mp_check_failed`/`stats` 留根目录全局。理由：结果文件数量大且天然按 owner 分桶有意义；处理文件全局方便运维统一排查；stats 全局一份避免 owner 分桶后还要汇总。ownerDirName 折叠空/`.`/`..`/含路径分隔符的 OwnerID 到 `_unknown`，防止路径穿越。
 
-5. **checker goroutine 绝不退出**：任何错误写 `check_failed`（普通对象）/ `multipart_check_failed`（多段分段）后继续。若 checker 退出，`objCh` 无人消费，list worker 永久阻塞。
+5. **checker goroutine 绝不退出**：任何错误写 `check_failed`（普通对象）/ `mp_check_failed`（多段分段）后继续。若 checker 退出，`objCh` 无人消费，list worker 永久阻塞。
 
 6. **`objCh` 永远会被关闭**：list 阶段保证（`listWg.Wait` → `close(objCh)`；或 Mode 1 无 seed 时显式 `q.Close()`）。
 
@@ -57,7 +57,7 @@
 
 9. **`-nextmarker` 仅 Mode 1 生效**：作为根列举的 start-after 参数。Mode 2/3 忽略（文档化限制）。
 
-10. **节点故障重试一次**：`S3Client.ListPage`/`RangeGet`/`RangeGetAt` 在 `isNodeFaultErr`（连接拒绝、超时、5xx，**不含 4xx**）时 `pool.MarkFailed` → `pool.Assign` 找下一个存活节点 → 重建 client → 重试一次。再失败按业务错误处理（写 `list_failed`/`check_failed`/`multipart_check_failed`）。普通 S3 业务错误（404/403）不触发重绑。
+10. **节点故障重试一次**：`S3Client.ListPage`/`RangeGet`/`RangeGetAt` 在 `isNodeFaultErr`（连接拒绝、超时、5xx，**不含 4xx**）时 `pool.MarkFailed` → `pool.Assign` 找下一个存活节点 → 重建 client → 重试一次。再失败按业务错误处理（写 `list_failed`/`check_failed`/`mp_check_failed`）。普通 S3 业务错误（404/403）不触发重绑。
 
 11. **性能优先但可读**：HTTP keep-alive（minio-go 自带连接池，不要自建）、`bufio.Writer` 64KB、合理 channel 容量、避免 per-obj 分配。**但**任何"复杂难读"的优化（手写内存池、unsafe、lock-free 结构）需先向用户请求确认，不要直接写。见 `memory/performance-vs-readability.md`。
 
@@ -65,9 +65,9 @@
 
 13. **V1/V2 分页协议对 caller 透明**：`S3Client.listPageOnce` 按 `cfg.ListAPIVersion` 分派 `Core.ListObjects`（V1，marker 游标）或 `Core.ListObjectsV2`（V2，continuation token）。两条路径都归一化进 `listResult{contents, commonPrefixes, next}`，`next` 作为下一次 `ListPage` 的 `continuationToken` 参数回传。V1 无 delimiter 且 `IsTruncated=true` 但 `NextMarker` 为空时，回退到最后一个 Contents key 作 marker；有 delimiter 时 S3 返回 `NextMarker`。caller（lister/walker/main 根分页）只需把 `next` 喂回 `continuationToken`，不感知 V1/V2 差异。`S3Client.core` 是 `minioListAPI` 接口（非 `*minio.Core`）以支持测试注入。
 
-14. **多段分段检查的失败分流**：分段 RangeGet 报错走 `multipart_check_failed` 路径（`WriteMultipartCheckFailed` + `IncrMultipartCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）。
+14. **多段分段检查的失败分流**：分段 RangeGet 报错走 `mp_check_failed` 路径（`WriteMpCheckFailed` + `IncrMpCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）。
 
-15. **统计字段命名**：`ok_objects`（干净普通对象）/ `ok_mp`（干净多段；switch off=全部多段、switch on=通过分段检查的）/ `corrupted_objects`（损坏普通对象）/ `corrupted_mp`（损坏多段）/ `check_failed`（普通对象 RangeGet 失败）/ `multipart_check_failed`（多段分段 RangeGet 失败）/ `list_failed`。文件名与字段名一致：`ok_objects.txt`↔`ok_objects`、`mp.txt`+`ok_mp.txt`↔`ok_mp`、`corrupted_mp.txt`↔`corrupted_mp`。
+15. **统计字段命名**：`ok_objects`（干净普通对象）/ `ok_mp`（干净多段；switch off=全部多段、switch on=通过分段检查的）/ `corrupted_objects`（损坏普通对象）/ `corrupted_mp`（损坏多段）/ `check_failed`（普通对象 RangeGet 失败）/ `mp_check_failed`（多段分段 RangeGet 失败）/ `list_failed`。文件名与字段名一致：`ok_objects.txt`↔`ok_objects`、`mp.txt`+`ok_mp.txt`↔`ok_mp`、`corrupted_mp.txt`↔`corrupted_mp`。
 
 ## 5. CLI 与配置
 
@@ -120,14 +120,14 @@
 | `list_failed.log` | 列举失败结构化错误（slog text，req_id/prefix/http_code/s3_code/err） | 同上 |
 | `check_failed.txt` | 普通对象校验失败 key | checker 普通对象 RangeGet 失败 |
 | `check_failed.log` | 校验失败结构化错误（slog text，req_id/key/http_code/s3_code/err） | 同上 |
-| `multipart_check_failed.txt` | 多段分段检查失败 key | `is_multipart_segment_check=true` 时分段 RangeGet 失败 |
-| `multipart_check_failed.log` | 多段分段检查失败结构化错误（slog text） | 同上 |
+| `mp_check_failed.txt` | 多段分段检查失败 key | `is_multipart_segment_check=true` 时分段 RangeGet 失败 |
+| `mp_check_failed.log` | 多段分段检查失败结构化错误（slog text） | 同上 |
 
-`is_check=false` 时不校验普通对象，不写任何对象文件，不创建 owner 目录，仅写 `list_failed.*`。`is_check=true && is_multipart_segment_check=false` 时 `corrupted_mp.txt` / `ok_mp.txt` / `multipart_check_failed.*` 不创建。
+`is_check=false` 时不校验普通对象，不写任何对象文件，不创建 owner 目录，仅写 `list_failed.*`。`is_check=true && is_multipart_segment_check=false` 时 `corrupted_mp.txt` / `ok_mp.txt` / `mp_check_failed.*` 不创建。
 
 ### 结果文件行格式
 
-per-owner 结果文件每行按 `result_line_format` 配置渲染（默认 `<bucket>|<key>`），启动时在配置快照里打印实际生效值。解析在 `NewOutput` 完成（`parseLineFormat`），未知占位符 / 未闭合 `<` 报错并中止启动。处理文件（`list_failed`/`check_failed`/`multipart_check_failed` 的 .txt 与 .log）**不**套用此格式，始终只写 key/prefix（.log 已含 `bucket` 字段）。
+per-owner 结果文件每行按 `result_line_format` 配置渲染（默认 `<bucket>|<key>`），启动时在配置快照里打印实际生效值。解析在 `NewOutput` 完成（`parseLineFormat`），未知占位符 / 未闭合 `<` 报错并中止启动。处理文件（`list_failed`/`check_failed`/`mp_check_failed` 的 .txt 与 .log）**不**套用此格式，始终只写 key/prefix（.log 已含 `bucket` 字段）。
 
 ### 启动输出 / run.log
 
@@ -217,12 +217,12 @@ go build -o /tmp/chunked_check_tool .
 
 | 输出 | 内容 |
 |---|---|
-| `out/run.log`（=== summary === 段） | `total_objects=8 ok_objects=5 corrupted_objects=1 ok_mp=1 corrupted_mp=1 list_failed=0 check_failed=0 multipart_check_failed=0` |
+| `out/run.log`（=== summary === 段） | `total_objects=8 ok_objects=5 corrupted_objects=1 ok_mp=1 corrupted_mp=1 list_failed=0 check_failed=0 mp_check_failed=0` |
 | `out/minio/corrupted_objects.txt` | `testbucket\|corrupted/corrupted.bin` |
 | `out/minio/ok_objects.txt` | 5 行 `testbucket\|data/2026/01/file_0N.bin` |
 | `out/minio/corrupted_mp.txt` | `testbucket\|mp/corrupt.bin` |
 | `out/minio/ok_mp.txt` | `testbucket\|mp/clean.bin` |
-| `out/{list_failed,check_failed,multipart_check_failed}.txt` | 空 |
+| `out/{list_failed,check_failed,mp_check_failed}.txt` | 空 |
 | `out/run.log` | 含配置快照（ak/sk `***`）+ 进度行 + summary |
 
 `out/minio/` 路径名里的 `minio` 是 LIST 响应 Owner 字段（root 用户 → OwnerID=`minio`）；空 OwnerID 会落到 `_unknown/`。

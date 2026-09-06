@@ -22,15 +22,15 @@ type ProgressPrinter struct {
 // writer goroutines. Reported as a group on every progress line so
 // backpressure is visible at a glance.
 type QueueSnapshot struct {
-	Prefix               int // BFS queue length (Queue.Len)
-	ObjCh                int // lister→checker channel (len(objCh))
-	CorruptedObjects     int // → corrupted_objects.txt
-	OkMp                 int // → mp.txt OR ok_mp.txt
-	CorruptedMp          int // → corrupted_mp.txt
-	ListFailed           int // → list_failed.txt
-	CheckFailed          int // → check_failed.txt
-	MultipartCheckFailed int // → multipart_check_failed.txt
-	OkObjects            int // → ok_objects.txt
+	Prefix           int // BFS queue length (Queue.Len)
+	ObjCh            int // lister→checker channel (len(objCh))
+	CorruptedObjects int // → corrupted_objects.txt
+	OkMp             int // → mp.txt OR ok_mp.txt
+	CorruptedMp      int // → corrupted_mp.txt
+	ListFailed       int // → list_failed.txt
+	CheckFailed      int // → check_failed.txt
+	MpCheckFailed    int // → mp_check_failed.txt
+	OkObjects        int // → ok_objects.txt
 }
 
 func NewProgressPrinter(w io.Writer) *ProgressPrinter {
@@ -52,12 +52,12 @@ func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	fmt.Fprintf(p.w,
-		"[progress] listed=%d ok_objects=%d corrupted_objects=%d ok_mp=%d corrupted_mp=%d list_failed=%d check_failed=%d multipart_check_failed=%d list_calls=%d list_avg_ms=%.2f get_calls=%d get_avg_ms=%.2f (%s=%d)",
+		"[progress] listed=%d ok_objects=%d corrupted_objects=%d ok_mp=%d corrupted_mp=%d list_failed=%d check_failed=%d mp_check_failed=%d list_calls=%d list_avg_ms=%.2f get_calls=%d get_avg_ms=%.2f (%s=%d)",
 		snap.ListedTotal,
 		snap.OkObjects, snap.CorruptedObjects,
 		snap.OkMp, snap.CorruptedMp,
 		snap.ListFailed, snap.CheckFailed,
-		snap.MultipartCheckFailed,
+		snap.MpCheckFailed,
 		snap.ListCalls, snap.ListAvgLatencyMs,
 		snap.GetCalls, snap.GetAvgLatencyMs,
 		label, count,
@@ -65,7 +65,7 @@ func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
 	if p.queueSnapshot != nil {
 		q := p.queueSnapshot()
 		fmt.Fprintf(p.w, " q=pfx:%d obj:%d cor_obj:%d ok_o:%d ok_mp:%d cor_mp:%d lf:%d cf:%d mcf:%d",
-			q.Prefix, q.ObjCh, q.CorruptedObjects, q.OkObjects, q.OkMp, q.CorruptedMp, q.ListFailed, q.CheckFailed, q.MultipartCheckFailed)
+			q.Prefix, q.ObjCh, q.CorruptedObjects, q.OkObjects, q.OkMp, q.CorruptedMp, q.ListFailed, q.CheckFailed, q.MpCheckFailed)
 	}
 	fmt.Fprintln(p.w)
 }

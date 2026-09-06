@@ -157,4 +157,3 @@ multipart_segment_size: 0
 		t.Fatal("expected error when is_multipart_segment_check=true but multipart_segment_size=0")
 	}
 }
-

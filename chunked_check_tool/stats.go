@@ -8,53 +8,53 @@ import (
 )
 
 type Stats struct {
-	listedTotal               atomic.Int64
-	okObjectsCount            atomic.Int64
-	okMpCount                 atomic.Int64
-	corruptedObjectsCount     atomic.Int64
-	corruptedMpCount          atomic.Int64
-	listFailedCount           atomic.Int64
-	checkFailedCount          atomic.Int64
-	multipartCheckFailedCount atomic.Int64
-	listCalls                 atomic.Int64
-	listLatencySumNs          atomic.Int64
-	getCalls                  atomic.Int64
-	getLatencySumNs           atomic.Int64
+	listedTotal           atomic.Int64
+	okObjectsCount        atomic.Int64
+	okMpCount             atomic.Int64
+	corruptedObjectsCount atomic.Int64
+	corruptedMpCount      atomic.Int64
+	listFailedCount       atomic.Int64
+	checkFailedCount      atomic.Int64
+	mpCheckFailedCount    atomic.Int64
+	listCalls             atomic.Int64
+	listLatencySumNs      atomic.Int64
+	getCalls              atomic.Int64
+	getLatencySumNs       atomic.Int64
 
 	listTotalDuration time.Duration
 	totalDuration     time.Duration
 }
 
 type StatsSnapshot struct {
-	ListedTotal          int64
-	OkObjects            int64
-	OkMp                 int64
-	CorruptedObjects     int64
-	CorruptedMp          int64
-	ListFailed           int64
-	CheckFailed          int64
-	MultipartCheckFailed int64
-	ListCalls            int64
-	ListAvgLatencyMs     float64
-	ListTotalSec         float64
-	GetCalls             int64
-	GetAvgLatencyMs      float64
-	GetTotalSec          float64
-	TotalSec             float64
+	ListedTotal      int64
+	OkObjects        int64
+	OkMp             int64
+	CorruptedObjects int64
+	CorruptedMp      int64
+	ListFailed       int64
+	CheckFailed      int64
+	MpCheckFailed    int64
+	ListCalls        int64
+	ListAvgLatencyMs float64
+	ListTotalSec     float64
+	GetCalls         int64
+	GetAvgLatencyMs  float64
+	GetTotalSec      float64
+	TotalSec         float64
 }
 
 func NewStats() *Stats {
 	return &Stats{}
 }
 
-func (s *Stats) IncrListed()               { s.listedTotal.Add(1) }
-func (s *Stats) IncrOkObjects()            { s.okObjectsCount.Add(1) }
-func (s *Stats) IncrOkMp()                 { s.okMpCount.Add(1) }
-func (s *Stats) IncrCorruptedObjects()     { s.corruptedObjectsCount.Add(1) }
-func (s *Stats) IncrCorruptedMp()          { s.corruptedMpCount.Add(1) }
-func (s *Stats) IncrListFailed()           { s.listFailedCount.Add(1) }
-func (s *Stats) IncrCheckFailed()          { s.checkFailedCount.Add(1) }
-func (s *Stats) IncrMultipartCheckFailed() { s.multipartCheckFailedCount.Add(1) }
+func (s *Stats) IncrListed()           { s.listedTotal.Add(1) }
+func (s *Stats) IncrOkObjects()        { s.okObjectsCount.Add(1) }
+func (s *Stats) IncrOkMp()             { s.okMpCount.Add(1) }
+func (s *Stats) IncrCorruptedObjects() { s.corruptedObjectsCount.Add(1) }
+func (s *Stats) IncrCorruptedMp()      { s.corruptedMpCount.Add(1) }
+func (s *Stats) IncrListFailed()       { s.listFailedCount.Add(1) }
+func (s *Stats) IncrCheckFailed()      { s.checkFailedCount.Add(1) }
+func (s *Stats) IncrMpCheckFailed()    { s.mpCheckFailedCount.Add(1) }
 
 func (s *Stats) AddListCall(latency time.Duration) {
 	s.listCalls.Add(1)
@@ -87,21 +87,21 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		getTotalSec = float64(s.getLatencySumNs.Load()) / 1e9
 	}
 	return StatsSnapshot{
-		ListedTotal:          s.listedTotal.Load(),
-		OkObjects:            s.okObjectsCount.Load(),
-		OkMp:                 s.okMpCount.Load(),
-		CorruptedObjects:     s.corruptedObjectsCount.Load(),
-		CorruptedMp:          s.corruptedMpCount.Load(),
-		ListFailed:           s.listFailedCount.Load(),
-		CheckFailed:          s.checkFailedCount.Load(),
-		MultipartCheckFailed: s.multipartCheckFailedCount.Load(),
-		ListCalls:            calls,
-		ListAvgLatencyMs:     avgMs,
-		ListTotalSec:         s.listTotalDuration.Seconds(),
-		GetCalls:             getCalls,
-		GetAvgLatencyMs:      getAvgMs,
-		GetTotalSec:          getTotalSec,
-		TotalSec:             s.totalDuration.Seconds(),
+		ListedTotal:      s.listedTotal.Load(),
+		OkObjects:        s.okObjectsCount.Load(),
+		OkMp:             s.okMpCount.Load(),
+		CorruptedObjects: s.corruptedObjectsCount.Load(),
+		CorruptedMp:      s.corruptedMpCount.Load(),
+		ListFailed:       s.listFailedCount.Load(),
+		CheckFailed:      s.checkFailedCount.Load(),
+		MpCheckFailed:    s.mpCheckFailedCount.Load(),
+		ListCalls:        calls,
+		ListAvgLatencyMs: avgMs,
+		ListTotalSec:     s.listTotalDuration.Seconds(),
+		GetCalls:         getCalls,
+		GetAvgLatencyMs:  getAvgMs,
+		GetTotalSec:      getTotalSec,
+		TotalSec:         s.totalDuration.Seconds(),
 	}
 }
 
@@ -113,8 +113,8 @@ func (s *Stats) PrintSummary(w io.Writer, isCheck bool) {
 		snap.ListCalls, snap.ListAvgLatencyMs, snap.ListTotalSec)
 	if isCheck {
 		fmt.Fprintf(w, "get_calls: %d avg_latency_ms: %.2f get_total_sec: %.2f\n", snap.GetCalls, snap.GetAvgLatencyMs, snap.GetTotalSec)
-		fmt.Fprintf(w, "ok_objects: %d corrupted_objects: %d ok_mp: %d corrupted_mp: %d list_failed: %d check_failed: %d multipart_check_failed: %d\n",
-			snap.OkObjects, snap.CorruptedObjects, snap.OkMp, snap.CorruptedMp, snap.ListFailed, snap.CheckFailed, snap.MultipartCheckFailed)
+		fmt.Fprintf(w, "ok_objects: %d corrupted_objects: %d ok_mp: %d corrupted_mp: %d list_failed: %d check_failed: %d mp_check_failed: %d\n",
+			snap.OkObjects, snap.CorruptedObjects, snap.OkMp, snap.CorruptedMp, snap.ListFailed, snap.CheckFailed, snap.MpCheckFailed)
 	} else {
 		fmt.Fprintf(w, "list_failed: %d\n", snap.ListFailed)
 	}

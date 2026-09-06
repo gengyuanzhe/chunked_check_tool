@@ -8,24 +8,24 @@ import (
 )
 
 type Config struct {
-	Endpoints                 []string `yaml:"endpoints"`
-	Scheme                    string   `yaml:"scheme"`
-	AK                        string   `yaml:"ak"`
-	SK                        string   `yaml:"sk"`
-	ListType                  int      `yaml:"list_type"`
-	ListAPIVersion            int      `yaml:"list_api_version"`
-	ListConcurrency           int      `yaml:"list_concurrency"`
-	CheckConcurrency          int      `yaml:"check_concurrency"`
-	OutputDir                 string   `yaml:"output_dir"`
-	IsCheck                   bool     `yaml:"is_check"`
-	IsSuccessLog              bool     `yaml:"is_success_log"`
-	IsMultipartSegmentCheck   bool     `yaml:"is_multipart_segment_check"`
-	MultipartSegmentSize      int64    `yaml:"multipart_segment_size"`
-	IsMultipartSuccessLog    bool     `yaml:"is_multipart_success_log"`
-	ProgressInterval          int      `yaml:"progress_interval"`
-	ObjChCapacity             int      `yaml:"obj_ch_capacity"`
-	OutputChCapacity          int      `yaml:"output_ch_capacity"`
-	ResultLineFormat          string   `yaml:"result_line_format"`
+	Endpoints               []string `yaml:"endpoints"`
+	Scheme                  string   `yaml:"scheme"`
+	AK                      string   `yaml:"ak"`
+	SK                      string   `yaml:"sk"`
+	ListType                int      `yaml:"list_type"`
+	ListAPIVersion          int      `yaml:"list_api_version"`
+	ListConcurrency         int      `yaml:"list_concurrency"`
+	CheckConcurrency        int      `yaml:"check_concurrency"`
+	OutputDir               string   `yaml:"output_dir"`
+	IsCheck                 bool     `yaml:"is_check"`
+	IsSuccessLog            bool     `yaml:"is_success_log"`
+	IsMultipartSegmentCheck bool     `yaml:"is_multipart_segment_check"`
+	MultipartSegmentSize    int64    `yaml:"multipart_segment_size"`
+	IsMultipartSuccessLog   bool     `yaml:"is_multipart_success_log"`
+	ProgressInterval        int      `yaml:"progress_interval"`
+	ObjChCapacity           int      `yaml:"obj_ch_capacity"`
+	OutputChCapacity        int      `yaml:"output_ch_capacity"`
+	ResultLineFormat        string   `yaml:"result_line_format"`
 }
 
 func LoadConfig(path string) (*Config, error) {

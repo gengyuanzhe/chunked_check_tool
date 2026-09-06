@@ -199,12 +199,12 @@ var chunkSigBody = []byte("1000;chunk-signature=00000000000000000000000000000000
 // the given segment size. Used by the TestCheckerMultipartSegmentCheck* tests.
 func multipartCfg(dir string, segSize int64) *Config {
 	return &Config{
-		OutputDir:                 dir,
-		IsCheck:                   true,
-		IsMultipartSegmentCheck:   true,
-		IsSuccessLog:              true,
-		IsMultipartSuccessLog:     true,
-		MultipartSegmentSize:      segSize,
+		OutputDir:               dir,
+		IsCheck:                 true,
+		IsMultipartSegmentCheck: true,
+		IsSuccessLog:            true,
+		IsMultipartSuccessLog:   true,
+		MultipartSegmentSize:    segSize,
 	}
 }
 
@@ -268,8 +268,8 @@ func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 }
 
 // TestCheckerMultipartSegmentCheckRangeError: segment RangeGet error →
-// writes to multipart_check_failed.txt at the root (NOT check_failed), and
-// bumps MultipartCheckFailed (not CheckFailed).
+// writes to mp_check_failed.txt at the root (NOT check_failed), and
+// bumps MpCheckFailed (not CheckFailed).
 func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
@@ -278,11 +278,11 @@ func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 	worker := &FakeS3{Err: context.DeadlineExceeded}
 	c := NewChecker(worker, out, s, cfg)
 	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, OwnerID: "owner-A"})
-	if got := s.Snapshot().MultipartCheckFailed; got != 1 {
-		t.Errorf("multipart_check_failed=%d want 1 (segment RangeGet error should bump MultipartCheckFailed)", got)
+	if got := s.Snapshot().MpCheckFailed; got != 1 {
+		t.Errorf("mp_check_failed=%d want 1 (segment RangeGet error should bump MpCheckFailed)", got)
 	}
 	if got := s.Snapshot().CheckFailed; got != 0 {
-		t.Errorf("check_failed=%d want 0 (segment errors go to multipart_check_failed, not check_failed)", got)
+		t.Errorf("check_failed=%d want 0 (segment errors go to mp_check_failed, not check_failed)", got)
 	}
 	if got := s.Snapshot().CorruptedMp; got != 0 {
 		t.Errorf("corrupted_mp=%d want 0", got)
@@ -291,12 +291,12 @@ func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 		t.Fatal(err)
 	}
 	// File at root (not per-owner).
-	data, err := os.ReadFile(filepath.Join(dir, "multipart_check_failed.txt"))
+	data, err := os.ReadFile(filepath.Join(dir, "mp_check_failed.txt"))
 	if err != nil {
-		t.Fatalf("read multipart_check_failed: %v", err)
+		t.Fatalf("read mp_check_failed: %v", err)
 	}
 	if line := strings.TrimSpace(string(data)); line != "k" {
-		t.Errorf("multipart_check_failed.txt = %q, want %q", line, "k")
+		t.Errorf("mp_check_failed.txt = %q, want %q", line, "k")
 	}
 }
 

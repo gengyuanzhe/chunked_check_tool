@@ -15,7 +15,7 @@
 仅对普通对象进行强制校验；多段对象可选分段校验。ETag 来自 list 响应（统一来源，**不从 Range GET response header 取**），根据 ETag 判断是普通对象还是多段：
 
 - 如果是多段对象：
-  - 若 `is_multipart_segment_check=true` 且 `multipart_segment_size>0`：按 `ceil(Size/segment_size)` 分段，对每段开头 128 字节做 Range GET，任一段命中 `length;chunk-signature=xxx` 格式即视为损坏，写入 `<ownerID>/corrupted_mp.txt`。某段 Range GET 报错走 `multipart_check_failed.txt`（根目录）路径并停止后续段检查；全部段均不匹配则按普通多段记入 `<ownerID>/ok_mp.txt`（仅 `is_multipart_success_log=true` 时落盘，否则只计数不写文件）。
+  - 若 `is_multipart_segment_check=true` 且 `multipart_segment_size>0`：按 `ceil(Size/segment_size)` 分段，对每段开头 128 字节做 Range GET，任一段命中 `length;chunk-signature=xxx` 格式即视为损坏，写入 `<ownerID>/corrupted_mp.txt`。某段 Range GET 报错走 `mp_check_failed.txt`（根目录）路径并停止后续段检查；全部段均不匹配则按普通多段记入 `<ownerID>/ok_mp.txt`（仅 `is_multipart_success_log=true` 时落盘，否则只计数不写文件）。
   - 否则直接写入 `<ownerID>/mp.txt`（仅 key，不带 ETag），**不做 Range GET**。
 - 如果是普通对象，通过 Range GET 读前 128 字节，检查是否以 `length;chunk-signature=xxx\n` 格式开头；命中则视为损坏，写入 `<ownerID>/corrupted_objects.txt`。
 
@@ -30,7 +30,7 @@
 
 **多段输出格式**
 
-所有结果 .txt 文件（包括 `mp.txt`）每行按 `result_line_format` 配置渲染（默认 `<bucket>|<key>`），不带 ETag。处理文件（`list_failed.txt`/`check_failed.txt`/`multipart_check_failed.txt`）只存 key/prefix，不套用此格式（错误原因在对应 .log 里，.log 已含 bucket 字段）。
+所有结果 .txt 文件（包括 `mp.txt`）每行按 `result_line_format` 配置渲染（默认 `<bucket>|<key>`），不带 ETag。处理文件（`list_failed.txt`/`check_failed.txt`/`mp_check_failed.txt`）只存 key/prefix，不套用此格式（错误原因在对应 .log 里，.log 已含 bucket 字段）。
 
 **列举模式**
 
@@ -85,14 +85,14 @@ result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>
 | `list_failed.log` | 列举失败的结构化错误信息（slog text，含 req_id/http_code/s3_code/err） |
 | `check_failed.txt` | 校验失败的普通对象 key（仅 key） |
 | `check_failed.log` | 校验失败的结构化错误信息（slog text，含 req_id/http_code/s3_code/err） |
-| `multipart_check_failed.txt` | 多段分段检查失败的对象 key（仅 key） |
-| `multipart_check_failed.log` | 多段分段检查失败的结构化错误信息（slog text，含 req_id/http_code/s3_code/err） |
+| `mp_check_failed.txt` | 多段分段检查失败的对象 key（仅 key） |
+| `mp_check_failed.log` | 多段分段检查失败的结构化错误信息（slog text，含 req_id/http_code/s3_code/err） |
 
 计时与计数随进度行 + `=== summary ===` 写入 `run.log`。
 
 `.txt` 与对应 `.log` 通过对象名/prefix 关联：`.txt` 只存 key/prefix 作关联键，错误原因在 `.log` 里。`.log` 字段顺序：`time level msg req_id key/prefix http_code s3_code err`（slog text handler，key=value 形式）。
 
-**统计**需要包含：对象总数、程序执行总耗时（与对象总数同一行）、list 总次数、list 平均耗时、list 总耗时、get 总次数、get 平均耗时、get 总耗时、ok_objects 数（干净普通对象）、ok_mp 数（干净多段，switch off 时为全部多段、switch on 时为通过分段检查的）、corrupted_objects 数（损坏普通对象）、corrupted_mp 数（损坏多段）、list_failed 数、check_failed 数（普通对象 RangeGet 失败）、multipart_check_failed 数。
+**统计**需要包含：对象总数、程序执行总耗时（与对象总数同一行）、list 总次数、list 平均耗时、list 总耗时、get 总次数、get 平均耗时、get 总耗时、ok_objects 数（干净普通对象）、ok_mp 数（干净多段，switch off 时为全部多段、switch on 时为通过分段检查的）、corrupted_objects 数（损坏普通对象）、corrupted_mp 数（损坏多段）、list_failed 数、check_failed 数（普通对象 RangeGet 失败）、mp_check_failed 数。
 
 ### 其他：
 
@@ -103,4 +103,4 @@ result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>
 5. **S3 客户端**：用 `github.com/minio/minio-go/v7`（MinIO SDK v7，非 AWS SDK）。配置文件里指定 `scheme`（http/https，https 时 `InsecureSkipVerify=true` 忽略证书）。
 6. **性能优先但保持可读性**：关注长连接复用（minio-go 自带连接池，不要自建）、文件写入性能（`bufio.Writer` 包裹）、合理的 channel 容量、避免每对象分配。但**不要为了性能把代码变得过于复杂**——如果要写一段很复杂难读的代码（如手写内存池、unsafe、复杂 lock-free 结构），**需要提前向我请求确认**，不要直接写。可读性 > 微优化。
 7. **启动配置打印 + run.log**：进程启动后把所有配置项（ak/sk 屏蔽为 `***`）和 CLI 参数（bucket/prefix/nextmarker）打印到 stdout；同时 stdout 与 stderr 都 tee 到 `<output_dir>/run.log`（append 模式，支持断点续跑）。进度行、节点故障告警、最终 summary 都进 run.log，方便事后排查。
-8. **结果文件行格式可配置**：per-owner 结果文件（`corrupted_objects.txt`/`mp.txt`/`corrupted_mp.txt`/`ok_mp.txt`/`ok_objects.txt`）每行按 `result_line_format` 配置渲染，支持占位符 `<bucket>`、`<key>`、`<owner>`，其他字符按字面输出，默认 `<bucket>|<key>`。处理文件（`list_failed`/`check_failed`/`multipart_check_failed` 的 .txt）不套用此格式，始终只存 key/prefix；.log 已含 `bucket` 字段。
+8. **结果文件行格式可配置**：per-owner 结果文件（`corrupted_objects.txt`/`mp.txt`/`corrupted_mp.txt`/`ok_mp.txt`/`ok_objects.txt`）每行按 `result_line_format` 配置渲染，支持占位符 `<bucket>`、`<key>`、`<owner>`，其他字符按字面输出，默认 `<bucket>|<key>`。处理文件（`list_failed`/`check_failed`/`mp_check_failed` 的 .txt）不套用此格式，始终只存 key/prefix；.log 已含 `bucket` 字段。
