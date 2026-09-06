@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
 	"sync/atomic"
 	"time"
 )
@@ -104,30 +103,6 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		GetTotalSec:          getTotalSec,
 		TotalSec:             s.totalDuration.Seconds(),
 	}
-}
-
-func (s *Stats) WriteToFile(path string, isCheck bool) error {
-	snap := s.Snapshot()
-	var b []byte
-	b = append(b, fmt.Sprintf("total_objects: %d total_sec: %.2f\n", snap.ListedTotal, snap.TotalSec)...)
-	b = append(b, fmt.Sprintf("list_calls: %d\n", snap.ListCalls)...)
-	b = append(b, fmt.Sprintf("list_avg_latency_ms: %.2f\n", snap.ListAvgLatencyMs)...)
-	b = append(b, fmt.Sprintf("list_total_sec: %.2f\n", snap.ListTotalSec)...)
-	if isCheck {
-		b = append(b, fmt.Sprintf("get_calls: %d\n", snap.GetCalls)...)
-		b = append(b, fmt.Sprintf("get_avg_latency_ms: %.2f\n", snap.GetAvgLatencyMs)...)
-		b = append(b, fmt.Sprintf("get_total_sec: %.2f\n", snap.GetTotalSec)...)
-	}
-	b = append(b, fmt.Sprintf("list_failed: %d\n", snap.ListFailed)...)
-	if isCheck {
-		b = append(b, fmt.Sprintf("ok_objects: %d\n", snap.OkObjects)...)
-		b = append(b, fmt.Sprintf("corrupted_objects: %d\n", snap.CorruptedObjects)...)
-		b = append(b, fmt.Sprintf("ok_mp: %d\n", snap.OkMp)...)
-		b = append(b, fmt.Sprintf("corrupted_mp: %d\n", snap.CorruptedMp)...)
-		b = append(b, fmt.Sprintf("check_failed: %d\n", snap.CheckFailed)...)
-		b = append(b, fmt.Sprintf("multipart_check_failed: %d\n", snap.MultipartCheckFailed)...)
-	}
-	return os.WriteFile(path, b, 0644)
 }
 
 func (s *Stats) PrintSummary(w io.Writer, isCheck bool) {

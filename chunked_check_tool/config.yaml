@@ -1,5 +1,16 @@
 # chunked_check_tool 配置模板
 # 用法: ./chunked_check_tool -c config.yaml -bkt <bucket> [-prefix <p>] [-nextmarker <key>]
+#
+# 运行日志 run.log（与下列配置项无关，进程总会写）:
+#   路径     <output_dir>/run.log，append 模式（断点续跑不覆盖）。
+#   内容     1) 启动配置快照（所有配置项 + CLI 参数，sk 屏蔽为 ***）；
+#           2) 进度行（约每 progress_interval 个对象一行）；
+#           3) 节点故障告警（连接拒绝/超时/5xx 时由 nodepool 打印）；
+#           4) 最终统计（=== summary === 段，含 total_objects/list_calls/get_calls/
+#              ok_objects/corrupted_objects/ok_mp/corrupted_mp/list_failed/
+#              check_failed/multipart_check_failed 等）。
+#   归属     stdout 与 stderr 都 tee 进 run.log，所以屏幕上看到的运行时输出都在
+#           这里留底，事后排查问题不用重跑。
 
 # S3 节点 ip:port 列表，至少 1 个；多个节点会做故障轮询隔离
 endpoints:
@@ -28,7 +39,7 @@ check_concurrency: 16
 # 输出目录（自动创建，所有文件 append 模式，支持断点续跑）
 output_dir: ./out
 
-# true=列举+校验；false=仅列举（只写 stats.txt + list_failed.*）
+# true=列举+校验；false=仅列举（不校验普通对象，不写对象文件，不创建 owner 目录，仅写 list_failed.*）
 is_check: true
 
 # 是否记录正常普通对象到 <ownerID>/ok_objects.txt

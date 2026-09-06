@@ -287,10 +287,6 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string, st
 		log.Printf("output close: %v", err)
 	}
 	stats.SetTotalDuration(time.Since(start))
-	statsPath := filepath.Join(cfg.OutputDir, "stats.txt")
-	if err := stats.WriteToFile(statsPath, cfg.IsCheck); err != nil {
-		return fmt.Errorf("write stats: %w", err)
-	}
 	stats.PrintSummary(stdout, cfg.IsCheck)
 	// Return the seed-loop error (e.g. ctx.Err() on SIGINT) AFTER shutdown
 	// has flushed buffered output and written stats. main logs the interrupt

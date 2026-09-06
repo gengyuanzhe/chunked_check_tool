@@ -8,7 +8,7 @@
 现在我需要编写一个go语言的工具，能够并发地列举+检查对象，把结果分类输出到不同文件里。
 
 - 输入: 命令参数 `-c <config.yaml> -bkt <bucket> [-prefix <p>] [-nextmarker <key>]`（并发度从配置文件读，不再是命令行参数）
-- 输出: 把损坏的普通对象、多段对象、列举失败、校验失败分别写入到不同文件中；可选地记录正常对象；最后写一个统计文件
+- 输出: 把损坏的普通对象、多段对象、列举失败、校验失败分别写入到不同文件中；可选地记录正常对象；统计信息（计时+计数）随进度行 + `=== summary ===` 写入 `run.log` 末尾
 
 **校验逻辑：**
 
@@ -63,7 +63,7 @@ progress_interval: 100000  # 进度打印阈值（约，性能优先）
 result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>/<key>/<owner> 占位符；默认 <bucket>|<key>
 ```
 
-`is_check=false` 时只统计不校验，**不写任何对象文件**，仅写 `stats.txt` + `list_failed.txt` + `list_failed.log`。
+`is_check=false` 时只统计不校验，**不写任何对象文件**，仅写 `list_failed.txt` + `list_failed.log`。run.log 是进程运行日志，无条件写入，与 `is_check` 无关。
 
 **输出文件**（全部 append 模式，支持断点续跑）：
 
@@ -87,7 +87,8 @@ result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>
 | `check_failed.log` | 校验失败的结构化错误信息（slog text，含 req_id/http_code/s3_code/err） |
 | `multipart_check_failed.txt` | 多段分段检查失败的对象 key（仅 key） |
 | `multipart_check_failed.log` | 多段分段检查失败的结构化错误信息（slog text，含 req_id/http_code/s3_code/err） |
-| `stats.txt` | 计时与计数（全局一份） |
+
+计时与计数随进度行 + `=== summary ===` 写入 `run.log`。
 
 `.txt` 与对应 `.log` 通过对象名/prefix 关联：`.txt` 只存 key/prefix 作关联键，错误原因在 `.log` 里。`.log` 字段顺序：`time level msg req_id key/prefix http_code s3_code err`（slog text handler，key=value 形式）。
 

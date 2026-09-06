@@ -34,7 +34,7 @@
 | `checker.go` | `Checker`、`isNormalETag`（严格 32 位小写 hex）、`chunkSigRe` |
 | `output.go` | 8 channel + writer goroutine（5 个按 OwnerID 分目录 fan-out，3 个根目录全局），`bufio.Writer` 64KB，append 模式，per-owner 文件按 `<ownerID>/<filename>` 路由（OwnerID 为空 → `_unknown/`） |
 | `queue.go` | 无界队列（slice + mutex + cond），ctx-aware 阻塞 Pop |
-| `stats.go` | atomic.Int64 计数器 + `StatsSnapshot` + `WriteToFile` + `PrintSummary` |
+| `stats.go` | atomic.Int64 计数器 + `StatsSnapshot` + `PrintSummary`（写入 stdout，被 `mwOut` tee 进 run.log） |
 | `progress.go` | `ProgressPrinter` + `localCounter`（每 worker 本地 int，无 per-obj atomic） |
 
 ## 4. 关键不变量（改动前必须守住）
@@ -90,7 +90,7 @@
 | `list_concurrency` | `8` | 列举并发度 |
 | `check_concurrency` | `16` | 校验并发度 |
 | `output_dir` | `.` | 输出目录 |
-| `is_check` | `true` | true=列举+校验；false=仅列举（只写 stats.txt + list_failed.*） |
+| `is_check` | `true` | true=列举+校验；false=仅列举（不校验普通对象，不写对象文件，不创建 owner 目录，仅写 list_failed.*） |
 | `is_success_log` | `false` | 是否记录正常普通对象到 `<ownerID>/ok_objects.txt` |
 | `is_multipart_segment_check` | `false` | 是否按固定 part size（`multipart_segment_size`）对多段对象做分段损坏检查；`true` 时必须配 `multipart_segment_size > 0`，否则启动报错中止 |
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
@@ -122,9 +122,8 @@
 | `check_failed.log` | 校验失败结构化错误（slog text，req_id/key/http_code/s3_code/err） | 同上 |
 | `multipart_check_failed.txt` | 多段分段检查失败 key | `is_multipart_segment_check=true` 时分段 RangeGet 失败 |
 | `multipart_check_failed.log` | 多段分段检查失败结构化错误（slog text） | 同上 |
-| `stats.txt` | 计时与计数（全局一份） | 程序结束 |
 
-`is_check=false` 时只写 `list_failed.*` + `stats.txt`，不创建 owner 目录。`is_check=true && is_multipart_segment_check=false` 时 `corrupted_mp.txt` / `ok_mp.txt` / `multipart_check_failed.*` 不创建。
+`is_check=false` 时不校验普通对象，不写任何对象文件，不创建 owner 目录，仅写 `list_failed.*`。`is_check=true && is_multipart_segment_check=false` 时 `corrupted_mp.txt` / `ok_mp.txt` / `multipart_check_failed.*` 不创建。
 
 ### 结果文件行格式
 
@@ -132,7 +131,7 @@ per-owner 结果文件每行按 `result_line_format` 配置渲染（默认 `<buc
 
 ### 启动输出 / run.log
 
-`main` 启动时：先 `MkdirAll(output_dir)`，再 append 打开 `<output_dir>/run.log`，构造 `mwOut=MultiWriter(os.Stdout, runLog)` 与 `mwErr=MultiWriter(os.Stderr, runLog)`，`log.SetOutput(mwErr)`（nodepool 告警 / `log.Fatalf` 进 run.log），进度行与 summary 走 `mwOut`。随后打印完整配置快照（ak/sk 屏蔽为 `***`）到 `mwOut`。run.log 全程 append，断点续跑不覆盖。
+run.log 是进程运行日志，路径为`<output_dir>/run.log`。`main` 启动时：先 `MkdirAll(output_dir)`，再 append 打开 `<output_dir>/run.log`，构造 `mwOut=MultiWriter(os.Stdout, runLog)` 与 `mwErr=MultiWriter(os.Stderr, runLog)`，`log.SetOutput(mwErr)`（nodepool 告警 / `log.Fatalf` 进 run.log），进度行与 summary 走 `mwOut`。随后打印完整配置快照（ak/sk 屏蔽为 `***`）到 `mwOut`。run.log 全程 append，断点续跑不覆盖。
 
 ## 7. 编译与测试
 
@@ -218,7 +217,7 @@ go build -o /tmp/chunked_check_tool .
 
 | 输出 | 内容 |
 |---|---|
-| `out/stats.txt` | `total_objects=8 ok_objects=5 corrupted_objects=1 ok_mp=1 corrupted_mp=1 list_failed=0 check_failed=0 multipart_check_failed=0` |
+| `out/run.log`（=== summary === 段） | `total_objects=8 ok_objects=5 corrupted_objects=1 ok_mp=1 corrupted_mp=1 list_failed=0 check_failed=0 multipart_check_failed=0` |
 | `out/minio/corrupted_objects.txt` | `testbucket\|corrupted/corrupted.bin` |
 | `out/minio/ok_objects.txt` | 5 行 `testbucket\|data/2026/01/file_0N.bin` |
 | `out/minio/corrupted_mp.txt` | `testbucket\|mp/corrupt.bin` |

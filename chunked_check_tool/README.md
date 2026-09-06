@@ -58,7 +58,7 @@ result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>
 | `list_concurrency` | `8` | 列举 worker 数（Mode 3 为信号量容量） |
 | `check_concurrency` | `16` | 校验 worker 数 |
 | `output_dir` | `.` | 输出目录（自动创建） |
-| `is_check` | `true` | `false` 时只列举不校验，仅写 `stats.txt` + `list_failed.*` |
+| `is_check` | `true` | `false` 时只列举不校验，不写对象文件，仅写 `list_failed.*` |
 | `is_success_log` | `false` | `true` 时把正常普通对象 key 写入 `<ownerID>/ok_objects.txt` |
 | `is_multipart_segment_check` | `false` | `true` 时按固定 part size（`multipart_segment_size`）对多段对象做分段损坏检查；`true` 时必须配 `multipart_segment_size > 0`，否则启动报错 |
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
@@ -125,7 +125,7 @@ multipart_segment_size: 5242880   # 5 MiB，需与上传 multipart part size 一
 
 ### 启动输出与 run.log
 
-启动时程序会把所有配置项（ak/sk 屏蔽为 `***`）和 CLI 参数（bucket/prefix/nextmarker）打印到 stdout，同时 stdout 与 stderr 都 tee 到 `<output_dir>/run.log`（append 模式，支持断点续跑）。进度行、节点故障告警、最终 summary 都会进 run.log，方便事后排查。
+run.log 是进程运行日志，**无论任何配置如何，进程启动后总会写入** `<output_dir>/run.log`。启动时程序会把所有配置项（ak/sk 屏蔽为 `***`）和 CLI 参数（bucket/prefix/nextmarker）打印到 stdout，同时 stdout 与 stderr 都 tee 到 run.log（append 模式，支持断点续跑）。进度行、节点故障告警、最终 summary 都会进 run.log，方便事后排查。
 
 ## 列举模式
 
@@ -179,7 +179,8 @@ multipart_segment_size: 5242880   # 5 MiB，需与上传 multipart part size 一
 | `check_failed.log` | 校验失败结构化错误信息（slog text） | 同上 |
 | `multipart_check_failed.txt` | 多段分段检查失败的对象 key | `is_multipart_segment_check=true` 时分段 RangeGet 失败 |
 | `multipart_check_failed.log` | 多段分段检查失败结构化错误信息（slog text） | 同上 |
-| `stats.txt` | 计时与计数（全局一份） | 程序结束 |
+
+计时与计数（`total_objects` / `list_calls` / `get_calls` / `ok_objects` / `corrupted_objects` / `ok_mp` / `corrupted_mp` / `list_failed` / `check_failed` / `multipart_check_failed` 等）随进度行 + `=== summary ===` 写入 `run.log`。
 
 ### 结果文件行格式
 
@@ -188,7 +189,7 @@ multipart_segment_size: 5242880   # 5 MiB，需与上传 multipart part size 一
 mybucket|data/2026/01/file.bin
 ```
 
-`is_check=false` 时只写 `list_failed.*` + `stats.txt`，不写任何对象文件，不创建 owner 目录。
+`is_check=false` 时不校验普通对象，不写任何对象文件，不创建 owner 目录，仅写 `list_failed.*`。run.log 是进程运行日志，无条件写入，与 `is_check` 无关。
 
 ### mp.txt 格式
 
@@ -200,23 +201,13 @@ mybucket|data/2026/02/no-etag.bin
 
 多段判定**严格**：只有 `^[0-9a-f]{32}$`（32 位小写 MD5 hex）算普通对象，任何其他格式（`<hex>-N`、大写、长度不对、空值）一律按多段处理。原则：绝不把多段误判为普通对象。
 
-## 统计（stats.txt 示例）
+## 统计（run.log 末尾 `=== summary ===` 示例）
 
 ```
 total_objects: 12345678 total_sec: 780.45
-list_calls: 12350
-list_avg_latency_ms: 82.15
-list_total_sec: 642.31
-get_calls: 995000
-get_avg_latency_ms: 4.21
-get_total_sec: 4179.45
-list_failed: 3
-ok_objects: 12340000
-corrupted_objects: 42
-ok_mp: 5230
-corrupted_mp: 7
-check_failed: 7
-multipart_check_failed: 2
+list_calls: 12350 avg_latency_ms: 82.15 list_total_sec: 642.31
+get_calls: 995000 avg_latency_ms: 4.21 get_total_sec: 4179.45
+ok_objects: 12340000 corrupted_objects: 42 ok_mp: 5230 corrupted_mp: 7 list_failed: 3 check_failed: 7 multipart_check_failed: 2
 ```
 
 字段含义：
@@ -227,7 +218,7 @@ multipart_check_failed: 2
 - `check_failed`：普通对象 RangeGet 失败数
 - `multipart_check_failed`：多段分段 RangeGet 失败数（switch on 时）
 
-`is_check=false` 时只写 `total_objects`/`total_sec`/`list_calls`/`list_avg_latency_ms`/`list_total_sec`/`list_failed`。
+`is_check=false` 时 run.log 末尾的 summary 只含 `total_objects`/`total_sec`/`list_calls`/`list_avg_latency_ms`/`list_total_sec`/`list_failed`。
 
 ## 节点故障处理
 
