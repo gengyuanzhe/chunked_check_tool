@@ -59,7 +59,7 @@ is_success_log: false   # 是否记录正常普通对象
 is_multipart_segment_check: false   # 是否按固定 part size 对多段对象做分段损坏检查
 multipart_segment_size: 0    # 多段分段检查的段长度(字节)，需与上传 part size 一致
 is_multipart_success_log: false  # 是否记录干净的多段对象
-progress_interval: 100000  # 进度打印阈值（约，性能优先）
+progress_interval: 5000  # 进度打印阈值（约，性能优先）
 result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>/<key>/<owner> 占位符；默认 <bucket>|<key>
 ```
 

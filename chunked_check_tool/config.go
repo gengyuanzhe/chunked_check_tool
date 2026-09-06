@@ -53,7 +53,7 @@ func LoadConfig(path string) (*Config, error) {
 		cfg.CheckConcurrency = 16
 	}
 	if cfg.ProgressInterval <= 0 {
-		cfg.ProgressInterval = 100000
+		cfg.ProgressInterval = 5000
 	}
 	if cfg.ListType == 0 {
 		cfg.ListType = 2

@@ -48,7 +48,7 @@ multipart_segment_size: 0
 is_multipart_success_log: false
 
 # stdout 进度打印阈值（约，性能优先，不要求精确）
-progress_interval: 100000
+progress_interval: 5000
 
 # lister→checker channel 容量；0 走默认 max(check_concurrency*4, 2000)
 obj_ch_capacity: 0
