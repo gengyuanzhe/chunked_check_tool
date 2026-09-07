@@ -1,0 +1,101 @@
+# AGENTS.md — data_generator
+
+本文件面向在本仓库工作的 AI 代理（和人类工程师），说明项目意图、模块边界、关键不变量与已知遗留项。改动前请先读完本文件对应章节。
+
+## 1. 项目意图
+
+`chunked_check_tool` 用于检测自研 S3 存储把 `aws-chunked` PUT 请求的 `length;chunk-signature=…` 等格式化内容当作原始 body 写入存储的损坏。本工具 `data_generator` 是其上游数据源：按配置的目录树批量上传对象，本地计算每个对象的 MD5 写入 `md5.txt`，供后续校验/对比。
+
+**不在本工具范围**：损坏检测（由 `chunked_check_tool` 负责）、桶管理（必须预先创建桶）、断点续跑（重跑 truncate `md5.txt`）。
+
+## 2. 技术栈
+
+- Go 1.27（`go.mod` module `data_generator`）
+- `github.com/minio/minio-go/v7`（PutObject 自动 multipart；BucketLookupAuto）
+- `gopkg.in/yaml.v3`（配置）
+- TLS：`scheme=https` 时 `InsecureSkipVerify=true`（与 `chunked_check_tool` 一致）
+
+## 3. 模块布局
+
+| 文件 | 职责 |
+|---|---|
+| `main.go` | flag 解析、`signal.NotifyContext`、`runWorkers` 编排、`processOne` per-object 流程、配置快照打印、summary |
+| `config.go` | `Config` 结构体 + `LoadConfig`（YAML，强制显式配置，无默认值的字段空即报错） |
+| `nodepool.go` | `NodePool`：round-robin `Assign(i)` 返回 endpoint index（无故障转移） |
+| `s3client.go` | `minioPutAPI` 接口（minio.Client 子集）、`Uploader` 接口（高层）、`S3Uploader`（懒缓存 client per endpoint）、`NewMinioClient` 工厂 |
+| `treegen.go` | `WalkTree`：扇形链遍历，产 key channel；`ObjectKey{Key, Idx}` |
+| `md5writer.go` | 单 goroutine + `bufio.Writer` 64KB 写 `md5.txt`，行格式 `bucket\|key\|md5hex\n`，ctx-cancel 后 drain 残留记录再 flush |
+| `stats.go` | atomic.Int64 计数器（uploaded/failed/bytes/single_objs/multipart_objs）+ `Snapshot` + `PrintSummary` |
+| `progress.go` | `Progress.Mark` 每 progress_interval 个对象打印进度行（CAS-free，靠 Add 的唯一返回值天然去重） |
+
+## 4. 关键不变量（改动前必须守住）
+
+1. **MD5 本地计算**：`md5.Sum(content)` 在上传**前**对生成的 content 算，**不**用 S3 返回的 ETag（multipart ETag 是 part-MD5 的聚合，不是整对象 MD5）。`processOne` 中 `sum := md5.Sum(content)` 必须在上传前完成。
+
+2. **失败对象不写 md5**：`UploadObject` 报错走 `stats.IncFailed()` + `progress.Mark()`，**不**写 `md5.txt`。否则 checker 会去找不存在的对象。
+
+3. **round-robin 按对象序号**：`pool.Assign(key.Idx)` 用 treegen 分配的 0-based 全局序号做 round-robin，**不**用 worker 本地计数器——这样无论 worker 调度顺序如何，对象到节点的分布都是确定的均匀。
+
+4. **扇形链结构**：每层 width 兄弟中 (width-1) 个是叶子 + 1 个桥嵌套下一层；到达 depth 时所有 width 兄弟都是叶子。总叶子 = `(width-1)*(depth-1) + width`。改 `walkLayer` 时务必保留：a) 非 max depth 时叶子数 = width-1；b) max depth 时叶子数 = width；c) 桥名 `l<layer+1>` 嵌套在 `layerPath` 下。
+
+5. **multipart 判定**：`size > partSize` → multipart=true。minio-go 在 size > partSize 时自动拆段（最后一段可小于 5MiB）；size <= partSize 时单 PUT。**不**从 `UploadInfo.ETag` 反推 multipart 状态（脆弱，依赖 ETag 格式）。
+
+6. **chunk_size_min >= 5MiB**：S3 最小 part size 硬约束。`LoadConfig` 启动期校验失败即中止，避免运行到 multipart 调用时才报错。
+
+7. **object_size_max <= 100MB**：per-object 全内存 buffer 上限保护。生成 content 用 `make([]byte, size)` + `r.Read(content)`，简单但有内存上限；超过 100MB 启动期报错。
+
+8. **per-worker PRNG 独立种子**：每个 worker `rand.NewSource(baseSeed ^ int64(workerIdx))`，避免多 worker 共享全局 rand 的锁竞争。content 用 `math/rand`（非 `crypto/rand`）——快，对损坏检测场景足够（chunked_check_tool 看的是 body 头部的 chunk-signature 头，不关心 content 的随机性强度）。
+
+9. **md5writer 的 ctx-cancel drain**：`Close()` 取消内部 ctx，run goroutine 进入 drain 循环读取 channel 残留记录再 flush + close file。`defer` 顺序：先 `bw.Flush()` → `file.Close()` → `close(done)`——**不能**先 `close(done)`，否则 `Close()` 在 `<-w.done` 解阻塞时 bufio 还没落盘，读文件得到空/部分内容。
+
+10. **progress 不走 CAS 去重**：`p.counter.Add(1)` 返回唯一值，只有调用者恰好得到 `v % interval == 0` 的那个才打印，无需 CompareAndSwap。改 `Mark` 时不要改成"读 snapshot 后判断"——并发下会跳过间隔或多打。
+
+11. **`processOne` 不退出 worker**：任何错误（prng 读失败、upload 失败、md5 写失败）都返回 err 给 `runWorkers`，worker 写日志后继续消费下一个 key。worker 退出会减少并行度但不中止其他 worker；ctx cancel 时 worker 从 `keyCh` 收到 close 后退出。
+
+## 5. CLI 与配置
+
+### CLI flags
+```
+-c <path>      # 配置文件，必填
+-bkt <bucket>  # 可选，覆盖 config 里的 bucket
+```
+
+### config.yaml 字段
+
+见 `README.md` 的"配置"表。强制显式配置（endpoints/ak/sk/bucket/depth/width/files_per_dir/object_size_min/max/chunk_size_min/max 全部必填），可选项有默认（scheme/output_dir/concurrency/progress_interval/md5_file）。
+
+## 6. 输出文件
+
+| 文件 | 内容 | 何时写 | 模式 |
+|---|---|---|---|
+| `<output_dir>/md5.txt` | `bucket\|object\|md5hex` 每行 | 每个**成功**上传的对象 | truncate（重跑覆盖） |
+| `<output_dir>/run.log` | 配置快照 + 进度行 + summary + 失败日志 | 启动→结束全程 | append |
+
+stdout/stderr 经 `MultiWriter` tee 进 run.log。配置快照中 `ak` 用 `mask()` 显示首尾各 2 字符 + `***`，`sk` 全屏蔽。
+
+## 7. 编译与测试
+
+```bash
+go build -o data_generator .
+go test -race ./...
+```
+
+Go 1.27 二进制路径：`/Users/gengyuanzhe/sdk/go1.27.1/bin/go`。
+
+## 8. 已知遗留项（改动时留意，非阻塞）
+
+- **无断点续跑**：`md5.txt` truncate，重跑从头开始。需要 append + 索引去重再加。
+- **multipart 不实现"每段随机节点"**：minio-go 自动 multipart 用单一 client。原话"每次上传段随机发到某节点"未实现——退化为"每对象随机/round-robin 选节点"。如需 per-part 随机，要手动编排 InitiateMultipartUpload + 多 client PutObjectPart + CompleteMultipartUpload，且要求 S3 集群跨节点共享 multipart upload 状态。
+- **content 用 math/rand**：可复现，对损坏检测场景足够（chunked_check_tool 看的是 body 头部的 chunk-signature 头）；若需不可预测内容，换 crypto/rand（性能下降）。
+- **per-object 全内存 buffer**：100MB 上限保护；更大对象需切流式 PRNG reader（`io.TeeReader(prngReader, md5hasher)` + minio-go streaming PutObject）。
+- **NodePool 无故障转移**：节点宕时 upload 失败即失败，不重绑。生成场景下重试策略由用户决定（重跑或人工处理）。
+- **md5writer drain 的 `default` 退出**：ctx-cancel 后 drain 用 `select { case rec := <-ch; default: return }`。理论上若 producer 在 cancel 后还在发，drain 可能在 producer 还没发完时退出——但 `runWorkers` 在 ctx cancel 后 worker 从 `keyCh` 收到 close 才退出，`md5w.Write` 不会被调用。实际无 race。
+- **`processOne` 中 md5 写失败仍 IncUploaded**：stats 已 IncUploaded 在 md5 写之前；若 md5 写失败，对象已上传但 md5 没记录——`stats.IncFailed()` 在返回前补上，但 uploaded 计数仍 +1。理想是 md5 写失败时回滚 uploaded，但 S3 没有"删除已上传对象"的语义，回滚 stats 也不解决问题。当前行为：uploaded +1 + failed +1（双计），summary 时用户自行解读。
+
+## 9. 工作流约定
+
+- 实现性改动遵循 TDD：先写失败测试，再实现，再跑测试，再 commit。
+- 每个 commit 聚焦一个职责（feat/fix/refactor 前缀）。
+- `data_generator` 二进制已 `.gitignore`（父仓库），不要提交。
+- `.superpowers/` 目录是 SDD 工作区，已 gitignore，不要提交。
+- 改动涉及 `Uploader` 接口或 `WalkTree` 签名时，先记录决策再改。

@@ -1,0 +1,52 @@
+# data_generator 配置模板
+# 用法: ./data_generator -c config.yaml
+
+# S3 节点 ip:port 列表，至少 1 个；多个节点按对象序号 round-robin 分配
+endpoints:
+  - 10.0.0.1:9000
+  - 10.0.0.2:9000
+
+# http 或 https；https 时忽略证书校验（InsecureSkipVerify=true）
+scheme: http
+
+# AK/SK
+ak: <access-key>
+sk: <secret-key>
+
+# 桶名（必须预先存在，启动时 BucketExists 校验失败即中止）
+bucket: testbucket
+
+# 对象 key 前缀，所有对象都挂在 prefix/ 下；空字符串表示无前缀
+prefix: data/
+
+# 目录树深度/宽度/每目录文件数
+# 扇形链结构：每层 width 个兄弟目录中 (width-1) 个是叶子装文件 + 1 个桥
+# 嵌套下一层；到达 depth 时所有 width 兄弟都是叶子。
+# 总叶子目录数 = (width-1)*(depth-1) + width
+# 总对象数 = 叶子数 * files_per_dir
+# 例：depth=3 width=4 files_per_dir=10 → 10 叶子目录 → 100 个对象
+depth: 3
+width: 4
+files_per_dir: 10
+
+# 对象大小范围（字节），在 [min, max] 内随机；min==max 即固定
+# 上限 100MB（per-object 全内存 buffer）
+object_size_min: 1024
+object_size_max: 65536
+
+# multipart part size 范围（字节），在 [min, max] 内随机；min==max 即固定
+# min 必须 >= 5MiB（S3 最小 part size）；对象 size > partSize 时走 multipart
+chunk_size_min: 5242880
+chunk_size_max: 5242880
+
+# 输出目录（自动创建，run.log append 模式，md5.txt truncate 模式）
+output_dir: ./out
+
+# 并发上传数
+concurrency: 8
+
+# 进度打印阈值（每 progress_interval 个对象打印一行）
+progress_interval: 100
+
+# 本地 MD5 文件名（写到 <output_dir>/<md5_file>，每行 bucket|object|md5hex）
+md5_file: md5.txt
