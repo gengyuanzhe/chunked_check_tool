@@ -22,7 +22,7 @@
 | `main.go` | flag 解析、`signal.NotifyContext`、`runWorkers` 编排、`processOne` per-object 流程、配置快照打印、summary |
 | `config.go` | `Config` 结构体 + `LoadConfig`（YAML，强制显式配置，无默认值的字段空即报错） |
 | `nodepool.go` | `NodePool`：round-robin `Assign(i)` 返回 endpoint index（无故障转移） |
-| `s3client.go` | `minioPutAPI` 接口（minio.Client 子集）、`Uploader` 接口（高层）、`S3Uploader`（懒缓存 client per endpoint）、`NewMinioClient` 工厂 |
+| `s3client.go` | `minioPutAPI` 接口（minio.Client 子集）、`minioCoreAPI` 接口（minio.Core 子集）、`Uploader` 接口（高层）、`S3Uploader`（懒缓存 client/core per endpoint）、`NewMinioClient`/`NewMinioCore` 工厂 |
 | `treegen.go` | `WalkTree`：扇形链遍历，产 key channel；`ObjectKey{Key, Idx}` |
 | `md5writer.go` | 单 goroutine + `bufio.Writer` 64KB 写 `md5.txt`，行格式 `bucket\|key\|md5hex\n`，ctx-cancel 后 drain 残留记录再 flush |
 | `stats.go` | atomic.Int64 计数器（uploaded/failed/bytes/single_objs/multipart_objs）+ `Snapshot` + `PrintSummary` |
@@ -52,7 +52,9 @@
 
 11. **`processOne` 不退出 worker**：任何错误（prng 读失败、upload 失败、md5 写失败）都返回 err 给 `runWorkers`，worker 写日志后继续消费下一个 key。worker 退出会减少并行度但不中止其他 worker；ctx cancel 时 worker 从 `keyCh` 收到 close 后退出。
 
-12. **use_trailer 走 minio-go TrailingHeaders + Checksum**：`UseTrailer=true` 时 `NewMinioClient` 设 `Options.TrailingHeaders=true`，`S3Uploader.UploadObject` 设 `opts.Checksum=minio.ChecksumSHA256`。minio-go 自动转 aws-chunked + `x-amz-checksum-sha256` trailer（**仅 multipart 上传**——单 PUT 只在请求头加 checksum，不发 chunked 编码）。要求 v4 签名（本工具始终用 `credentials.NewStaticV4`，满足）。**改 `NewMinioClient`/`NewS3Uploader`/`UploadObject` 时务必保留这条联动**——三者必须同时打开/关闭，否则 minio-go 会报 `Checksum requires Client with TrailingHeaders enabled`。本地 `md5.txt` 不受影响（仍写 content 的 MD5，与 S3 侧的 sha256 checksum 是两个独立量）。
+12. **use_trailer 走 minio-go TrailingHeaders + Checksum**：`UseTrailer=true` 时 `NewMinioClient` 设 `Options.TrailingHeaders=true`，`S3Uploader.UploadObject` 设 `opts.Checksum=minio.ChecksumSHA256`。minio-go 自动转 aws-chunked + `x-amz-checksum-sha256` trailer（**仅 multipart 上传**——单 PUT 只在请求头加 checksum，不发 chunked 编码）。要求 v4 签名（本工具始终用 `credentials.NewStaticV4`，满足）。**改 `NewMinioClient`/`NewS3Uploader`/`UploadObject` 时务必保留这条联动**——三者必须同时打开/关闭，否则 minio-go 会报 `Checksum requires Client with TrailingHeaders enabled`。本地 `md5.txt` 不受影响（仍写 content 的 MD5，与 S3 侧的 sha256 checksum 是两个独立量）。**手动 multipart 模式下 `UploadObjectMultipart` 同样遵循此联动**：`NewMinioCore` 也带 `TrailingHeaders`，init 与 complete 的 PutObjectOptions 带 `ChecksumSHA256`。
+
+13. **手动 multipart pattern 路由**：`MultipartEndpointPattern` 非空且 `size > partSize` 时走 `UploadObjectMultipart`，否则走 `UploadObject`。pattern 长度必须 = `N+2`（`N = ceil(size/partSize)`）——运行时校验不匹配立即返回 err（不调 init）。任一步失败 → `AbortMultipartUpload` (best-effort, pattern[0])。**前置条件：S3 集群跨节点共享 multipart upload 状态**（uploadID 全集群可见）——本工具不验证，用户保证。改 `UploadObjectMultipart` 时保留：a) size<=partSize 拒绝；b) pattern 长度校验先于任何 S3 调用；c) 失败路径必走 abort。
 
 ## 5. CLI 与配置
 
@@ -87,7 +89,7 @@ Go 1.27 二进制路径：`/Users/gengyuanzhe/sdk/go1.27.1/bin/go`。
 ## 8. 已知遗留项（改动时留意，非阻塞）
 
 - **无断点续跑**：`md5.txt` truncate，重跑从头开始。需要 append + 索引去重再加。
-- **multipart 不实现"每段随机节点"**：minio-go 自动 multipart 用单一 client。原话"每次上传段随机发到某节点"未实现——退化为"每对象随机/round-robin 选节点"。如需 per-part 随机，要手动编排 InitiateMultipartUpload + 多 client PutObjectPart + CompleteMultipartUpload，且要求 S3 集群跨节点共享 multipart upload 状态。
+- **multipart 不实现"每段随机节点"（自动模式）**：minio-go 自动 multipart 用单一 client。手动模式（`multipart_endpoint_pattern` 非空）实现了 per-operation 显式路由，但要求集群跨节点共享 multipart upload 状态。
 - **content 用 math/rand**：可复现，对损坏检测场景足够（chunked_check_tool 看的是 body 头部的 chunk-signature 头）；若需不可预测内容，换 crypto/rand（性能下降）。
 - **per-object 全内存 buffer**：100MB 上限保护；更大对象需切流式 PRNG reader（`io.TeeReader(prngReader, md5hasher)` + minio-go streaming PutObject）。
 - **NodePool 无故障转移**：节点宕时 upload 失败即失败，不重绑。生成场景下重试策略由用户决定（重跑或人工处理）。

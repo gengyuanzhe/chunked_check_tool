@@ -58,3 +58,20 @@ md5_file: md5.txt
 # 单 PUT（size <= partSize）只在请求头加 x-amz-checksum-sha256，不发 chunked 编码。
 # 默认 false（旧行为）。
 use_trailer: false
+
+# 手动 multipart 上传：控制每个操作（init / 各 part / complete）发送的 endpoint index。
+# 空（默认）→ 走 minio-go 自动 multipart（每对象单节点 round-robin）。
+# 非空 → 手动编排 multipart，pattern 长度 = N+2（N = ceil(size/partSize)）：
+#   pattern[0]     = NewMultipartUpload (init) 的 endpoint
+#   pattern[1..N] = 各 PutObjectPart 的 endpoint
+#   pattern[N+1]  = CompleteMultipartUpload 的 endpoint
+# 例：2 个节点 [ep0, ep1]，size=15MiB partSize=5MiB → N=3，
+#   pattern [0, 0, 1, 0, 1] 表示 init→ep0, p1→ep0, p2→ep1, p3→ep0, complete→ep1。
+# 仅当 size > partSize 时才走手动 multipart；size <= partSize 走单 PUT，pattern 忽略。
+# 任一步失败 → AbortMultipartUpload (best-effort, pattern[0]) → 返回 err。
+# 前置条件：S3 集群必须跨节点共享 multipart upload 状态
+# （某节点 init 拿到的 uploadID 在另一节点 PutObjectPart 必须可见可用）。
+# use_trailer=true 时 init/complete 的 PutObjectOptions 带 ChecksumSHA256，
+# 每个 part 走 aws-chunked + trailer 编码。
+multipart_endpoint_pattern: []
+

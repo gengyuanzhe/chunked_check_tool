@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,10 +14,12 @@ import (
 )
 
 type recordingUploader struct {
-	mu        sync.Mutex
-	uploads   []recordedUpload
-	bucketOK  bool
-	putErr    error
+	mu          sync.Mutex
+	uploads     []recordedUpload
+	multipart   []recordedMultipart
+	bucketOK    bool
+	putErr      error
+	multipartErr error
 }
 
 type recordedUpload struct {
@@ -27,6 +30,14 @@ type recordedUpload struct {
 	partSize    int64
 	multipart   bool
 	contentMD5  string
+}
+
+type recordedMultipart struct {
+	bucket   string
+	key      string
+	size     int
+	partSize int64
+	pattern  []int
 }
 
 func (r *recordingUploader) UploadObject(ctx context.Context, endpointIdx int, bucket, key string, content []byte, partSize int64) (bool, error) {
@@ -47,11 +58,110 @@ func (r *recordingUploader) UploadObject(ctx context.Context, endpointIdx int, b
 	return multipart, nil
 }
 
+func (r *recordingUploader) UploadObjectMultipart(ctx context.Context, bucket, key string, content []byte, partSize int64, pattern []int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.multipartErr != nil {
+		return r.multipartErr
+	}
+	r.multipart = append(r.multipart, recordedMultipart{
+		bucket:   bucket,
+		key:      key,
+		size:     len(content),
+		partSize: partSize,
+		pattern:  append([]int(nil), pattern...),
+	})
+	return nil
+}
+
 func (r *recordingUploader) BucketExists(ctx context.Context, bucket string) (bool, error) {
 	return r.bucketOK, nil
 }
 
 var _ Uploader = (*recordingUploader)(nil)
+
+func TestProcessOne_BranchesToMultipartWhenPatternSet(t *testing.T) {
+	cfg := &Config{
+		Endpoints:                []string{"a:80", "b:80"},
+		Bucket:                   "bkt",
+		Depth:                    1,
+		Width:                    2,
+		FilesPerDir:              1,
+		ObjectSizeMin:            15 * 1024 * 1024,
+		ObjectSizeMax:            15 * 1024 * 1024,
+		ChunkSizeMin:             5 * 1024 * 1024,
+		ChunkSizeMax:             5 * 1024 * 1024,
+		Concurrency:              1,
+		MultipartEndpointPattern: []int{0, 0, 1, 0, 1},
+	}
+	pool := NewNodePool(cfg)
+	uploader := &recordingUploader{bucketOK: true}
+	stats := NewStats()
+	progress := NewProgress(stats, 0, io.Discard)
+	md5w, _ := NewMD5Writer(filepath.Join(t.TempDir(), "md5.txt"))
+	defer md5w.Close()
+
+	r := rand.New(rand.NewSource(0))
+	key := ObjectKey{Key: "data/k1", Idx: 0}
+	if err := processOne(context.Background(), cfg, pool, uploader, stats, progress, md5w, r, key); err != nil {
+		t.Fatalf("processOne: %v", err)
+	}
+	if len(uploader.uploads) != 0 {
+		t.Errorf("UploadObject called %d times, want 0 (pattern routes to manual)", len(uploader.uploads))
+	}
+	if len(uploader.multipart) != 1 {
+		t.Fatalf("UploadObjectMultipart called %d times, want 1", len(uploader.multipart))
+	}
+	m := uploader.multipart[0]
+	if m.bucket != "bkt" || m.key != "data/k1" {
+		t.Errorf("multipart bucket/key = %q/%q, want bkt/data/k1", m.bucket, m.key)
+	}
+	wantPattern := []int{0, 0, 1, 0, 1}
+	if len(m.pattern) != len(wantPattern) {
+		t.Fatalf("pattern len = %d, want %d", len(m.pattern), len(wantPattern))
+	}
+	for i, v := range m.pattern {
+		if v != wantPattern[i] {
+			t.Errorf("pattern[%d] = %d, want %d", i, v, wantPattern[i])
+		}
+	}
+	if snap := stats.Snapshot(); snap.MultipartObjs != 1 || snap.SingleObjs != 0 {
+		t.Errorf("stats = mp=%d single=%d, want mp=1 single=0", snap.MultipartObjs, snap.SingleObjs)
+	}
+}
+
+func TestProcessOne_FallsBackToUploadObjectWhenPatternEmpty(t *testing.T) {
+	cfg := &Config{
+		Endpoints:     []string{"a:80"},
+		Bucket:        "bkt",
+		Depth:         1,
+		Width:         2,
+		FilesPerDir:   1,
+		ObjectSizeMin: 1024,
+		ObjectSizeMax: 1024,
+		ChunkSizeMin:  5 * 1024 * 1024,
+		ChunkSizeMax:  5 * 1024 * 1024,
+		Concurrency:   1,
+	}
+	pool := NewNodePool(cfg)
+	uploader := &recordingUploader{bucketOK: true}
+	stats := NewStats()
+	progress := NewProgress(stats, 0, io.Discard)
+	md5w, _ := NewMD5Writer(filepath.Join(t.TempDir(), "md5.txt"))
+	defer md5w.Close()
+
+	r := rand.New(rand.NewSource(0))
+	key := ObjectKey{Key: "data/k1", Idx: 0}
+	if err := processOne(context.Background(), cfg, pool, uploader, stats, progress, md5w, r, key); err != nil {
+		t.Fatalf("processOne: %v", err)
+	}
+	if len(uploader.uploads) != 1 {
+		t.Errorf("UploadObject called %d times, want 1", len(uploader.uploads))
+	}
+	if len(uploader.multipart) != 0 {
+		t.Errorf("UploadObjectMultipart called %d times, want 0", len(uploader.multipart))
+	}
+}
 
 func TestRunWorkers_EndToEndSmall(t *testing.T) {
 	cfg := &Config{

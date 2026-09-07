@@ -64,15 +64,29 @@ SIGINT/SIGTERM 触发优雅退出。
 | `progress_interval` | | 100（默认） |
 | `md5_file` | | `md5.txt`（默认） |
 | `use_trailer` | | `false`（默认）；true 时开启 aws-chunked + `x-amz-checksum-sha256` trailer 上传（chunked_check_tool 检测的损坏路径） |
+| `multipart_endpoint_pattern` | | `[]`（默认）；非空时手动编排 multipart，控制每个操作（init / 各 part / complete）发到哪个 endpoint index。长度 = `N+2`，N = `ceil(size/partSize)`。前置条件：S3 集群跨节点共享 multipart upload 状态。仅当 `size > partSize` 时走此路径 |
 
 校验类参数（endpoints/ak/sk/bucket/depth/width/files_per_dir/sizes）无默认值，必须显式配置——避免静默误判。
 
 ## 多段上传与节点选择
 
-- multipart 触发：对象 size > partSize → multipart；否则单 PUT。partSize 在 `[chunk_size_min, chunk_size_max]` 内随机（min==max 即固定）。
-- multipart 执行模型：minio-go 自动拆段，每对象单节点（**不**实现"每段随机节点"——见 AGENTS.md trade-off）。
-- 节点选择：按对象序号 round-robin（`endpointIdx = objIdx % len(endpoints)`）。同一对象的所有 part 走同一节点。
+- **默认（自动）**：`multipart_endpoint_pattern` 为空时走 minio-go 自动 multipart。对象 size > partSize → multipart；否则单 PUT。partSize 在 `[chunk_size_min, chunk_size_max]` 内随机（min==max 即固定）。minio-go 自动拆段，每对象单节点 round-robin（`endpointIdx = objIdx % len(endpoints)`）。
+
+- **手动编排**：`multipart_endpoint_pattern` 非空时走手动 multipart。pattern 控制每个操作的 endpoint index：
+  ```
+  pattern[0]         = NewMultipartUpload (init)
+  pattern[1..N]     = 各 PutObjectPart（N = ceil(size/partSize)）
+  pattern[N+1]      = CompleteMultipartUpload
+  ```
+  例：2 节点 + size=15MiB + partSize=5MiB → N=3，pattern `[0, 0, 1, 0, 1]` 表示 init→ep0, p1→ep0, p2→ep1, p3→ep0, complete→ep1。任一步失败 → `AbortMultipartUpload` (best-effort, pattern[0]) → 返回 err。
+
+- **前置条件（手动模式）**：S3 集群必须跨节点共享 multipart upload 状态——某节点 init 拿到的 uploadID 在另一节点 PutObjectPart 必须可用。本工具不负责验证此特性，由用户保证集群支持。
+
+- 仅当 `size > partSize` 时走手动 multipart；`size <= partSize` 走单 PUT，pattern 忽略（不会触发 multipart）。
+
 - `chunk_size_min >= 5MiB` 是 S3 最小 part size 硬约束；minio-go 在 size > partSize 时按 partSize 拆段，最后一段可小于 5MiB。
+
+- `use_trailer=true` 在手动模式下：init 与 complete 的 PutObjectOptions 带 `ChecksumSHA256`，每个 part 走 aws-chunked + `x-amz-checksum-sha256` trailer 编码。
 
 ## 输出文件
 

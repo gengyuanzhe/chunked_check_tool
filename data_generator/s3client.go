@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -21,10 +22,20 @@ type minioPutAPI interface {
 	BucketExists(ctx context.Context, bucketName string) (bool, error)
 }
 
+// minioCoreAPI is the subset of *minio.Core for manual multipart orchestration.
+// Tests inject a fake to verify per-operation endpoint routing.
+type minioCoreAPI interface {
+	NewMultipartUpload(ctx context.Context, bucket, object string, opts minio.PutObjectOptions) (string, error)
+	PutObjectPart(ctx context.Context, bucket, object, uploadID string, partID int, data io.Reader, size int64, opts minio.PutObjectPartOptions) (minio.ObjectPart, error)
+	CompleteMultipartUpload(ctx context.Context, bucket, object, uploadID string, parts []minio.CompletePart, opts minio.PutObjectOptions) (minio.UploadInfo, error)
+	AbortMultipartUpload(ctx context.Context, bucket, object, uploadID string) error
+}
+
 // Uploader is the high-level surface workers depend on. S3Uploader
 // satisfies it; tests inject a recording fake.
 type Uploader interface {
 	UploadObject(ctx context.Context, endpointIdx int, bucket, key string, content []byte, partSize int64) (bool, error)
+	UploadObjectMultipart(ctx context.Context, bucket, key string, content []byte, partSize int64, pattern []int) error
 	BucketExists(ctx context.Context, bucket string) (bool, error)
 }
 
@@ -38,26 +49,32 @@ type Uploader interface {
 // x-amz-checksum-sha256 trailer (the body-corruption path chunked_check_tool
 // detects). Requires v4 signatures (always used here).
 type S3Uploader struct {
-	pool           *NodePool
-	ak, sk         string
-	secure         bool
-	useTrailer     bool
-	clientFactory  func(endpoint string) (minioPutAPI, error)
-	clients        map[int]minioPutAPI
-	mu             sync.Mutex
+	pool          *NodePool
+	ak, sk        string
+	secure        bool
+	useTrailer    bool
+	clientFactory func(endpoint string) (minioPutAPI, error)
+	clients       map[int]minioPutAPI
+	coreFactory   func(endpoint string) (minioCoreAPI, error)
+	cores         map[int]minioCoreAPI
+	mu            sync.Mutex
 }
 
 func NewS3Uploader(pool *NodePool, ak, sk string, secure, useTrailer bool) *S3Uploader {
 	u := &S3Uploader{
-		pool:           pool,
-		ak:             ak,
-		sk:             sk,
-		secure:         secure,
-		useTrailer:     useTrailer,
-		clients:        make(map[int]minioPutAPI),
+		pool:       pool,
+		ak:         ak,
+		sk:         sk,
+		secure:     secure,
+		useTrailer: useTrailer,
+		clients:    make(map[int]minioPutAPI),
+		cores:      make(map[int]minioCoreAPI),
 	}
 	u.clientFactory = func(endpoint string) (minioPutAPI, error) {
 		return NewMinioClient(endpoint, ak, sk, secure, useTrailer)
+	}
+	u.coreFactory = func(endpoint string) (minioCoreAPI, error) {
+		return NewMinioCore(endpoint, ak, sk, secure, useTrailer)
 	}
 	return u
 }
@@ -71,6 +88,7 @@ func newS3UploaderWithFactory(factory func(string) (minioPutAPI, error), useTrai
 		useTrailer:    useTrailer,
 		clientFactory: factory,
 		clients:       make(map[int]minioPutAPI),
+		cores:         make(map[int]minioCoreAPI),
 	}
 }
 
@@ -86,6 +104,24 @@ func (u *S3Uploader) getClient(idx int) (minioPutAPI, error) {
 		return nil, err
 	}
 	u.clients[idx] = c
+	return c, nil
+}
+
+func (u *S3Uploader) getCore(idx int) (minioCoreAPI, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if c, ok := u.cores[idx]; ok {
+		return c, nil
+	}
+	if u.coreFactory == nil {
+		return nil, fmt.Errorf("core factory not configured")
+	}
+	endpoint := u.pool.Endpoint(idx)
+	c, err := u.coreFactory(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	u.cores[idx] = c
 	return c, nil
 }
 
@@ -119,6 +155,103 @@ func (u *S3Uploader) BucketExists(ctx context.Context, bucket string) (bool, err
 	return c.BucketExists(ctx, bucket)
 }
 
+// UploadObjectMultipart manually orchestrates a multipart upload across
+// per-operation endpoints defined by pattern. pattern layout:
+//
+//	pattern[0]              → NewMultipartUpload endpoint (init)
+//	pattern[1..N]          → PutObjectPart endpoints (one per part)
+//	pattern[N+1]           → CompleteMultipartUpload endpoint
+//
+// where N = ceil(len(content)/partSize). Caller MUST ensure size > partSize
+// (otherwise single PUT applies and pattern is irrelevant). Requires the S3
+// cluster to share multipart upload state across endpoints (UploadID issued
+// by init on one node must be valid on every other node).
+//
+// On any per-step failure, AbortMultipartUpload is attempted on pattern[0]'s
+// endpoint (best-effort; abort errors are ignored) before returning the error.
+//
+// use_trailer linkage mirrors UploadObject: when useTrailer=true, the init and
+// complete PutObjectOptions carry Checksum=ChecksumSHA256, which (combined
+// with TrailingHeaders=true clients) makes minio-go emit aws-chunked +
+// x-amz-checksum-sha256 trailer for each part.
+// UploadObjectMultipart on S3Uploader is the real implementation; see below.
+func (u *S3Uploader) UploadObjectMultipart(ctx context.Context, bucket, key string, content []byte, partSize int64, pattern []int) error {
+	size := int64(len(content))
+	if size <= partSize {
+		return fmt.Errorf("UploadObjectMultipart called with size=%d <= partSize=%d (caller must use single PUT)", size, partSize)
+	}
+	nParts := (size + partSize - 1) / partSize
+	if want := int(nParts) + 2; len(pattern) != want {
+		return fmt.Errorf("pattern length %d does not match expected %d (init + %d parts + complete) for size=%d partSize=%d", len(pattern), want, nParts, size, partSize)
+	}
+
+	opts := minio.PutObjectOptions{PartSize: uint64(partSize)}
+	if u.useTrailer {
+		opts.Checksum = minio.ChecksumSHA256
+	}
+
+	initCore, err := u.getCore(pattern[0])
+	if err != nil {
+		return fmt.Errorf("init core: %w", err)
+	}
+	uploadID, err := initCore.NewMultipartUpload(ctx, bucket, key, opts)
+	if err != nil {
+		return fmt.Errorf("init multipart: %w", err)
+	}
+
+	parts := make([]minio.CompletePart, 0, nParts)
+	for i := 0; i < int(nParts); i++ {
+		start := int64(i) * partSize
+		end := start + partSize
+		if end > size {
+			end = size
+		}
+		partLen := end - start
+		partCore, err := u.getCore(pattern[1+i])
+		if err != nil {
+			u.abortMultipart(ctx, pattern[0], bucket, key, uploadID)
+			return fmt.Errorf("part %d core: %w", i+1, err)
+		}
+		op, err := partCore.PutObjectPart(ctx, bucket, key, uploadID, i+1, bytes.NewReader(content[start:end]), partLen, minio.PutObjectPartOptions{})
+		if err != nil {
+			u.abortMultipart(ctx, pattern[0], bucket, key, uploadID)
+			return fmt.Errorf("part %d: %w", i+1, err)
+		}
+		parts = append(parts, minio.CompletePart{PartNumber: op.PartNumber, ETag: op.ETag})
+	}
+
+	completeCore, err := u.getCore(pattern[int(nParts)+1])
+	if err != nil {
+		u.abortMultipart(ctx, pattern[0], bucket, key, uploadID)
+		return fmt.Errorf("complete core: %w", err)
+	}
+	if _, err := completeCore.CompleteMultipartUpload(ctx, bucket, key, uploadID, parts, opts); err != nil {
+		u.abortMultipart(ctx, pattern[0], bucket, key, uploadID)
+		return fmt.Errorf("complete multipart: %w", err)
+	}
+	return nil
+}
+
+func (u *S3Uploader) abortMultipart(ctx context.Context, endpointIdx int, bucket, key, uploadID string) {
+	c, err := u.getCore(endpointIdx)
+	if err != nil {
+		return
+	}
+	_ = c.AbortMultipartUpload(ctx, bucket, key, uploadID)
+}
+
+// NewMinioCore builds a *minio.Core bound to a single endpoint. Core embeds
+// *Client, so it serves both the multipart primitive API and (transitively)
+// the high-level PutObject API. TrailingHeaders mirrors NewMinioClient so the
+// use_trailer three-way linkage stays consistent across both call paths.
+func NewMinioCore(endpoint, ak, sk string, secure, trailingHeaders bool) (*minio.Core, error) {
+	client, err := NewMinioClient(endpoint, ak, sk, secure, trailingHeaders)
+	if err != nil {
+		return nil, err
+	}
+	return &minio.Core{Client: client}, nil
+}
+
 // NewMinioClient constructs a minio.Client bound to a single endpoint.
 // secure=true skips TLS verification (typical for internal nodes with
 // self-signed certs), matching chunked_check_tool's transport setup.
@@ -142,4 +275,5 @@ func NewMinioClient(endpoint, ak, sk string, secure, trailingHeaders bool) (*min
 }
 
 var _ minioPutAPI = (*minio.Client)(nil)
+var _ minioCoreAPI = (*minio.Core)(nil)
 var _ Uploader = (*S3Uploader)(nil)

@@ -127,11 +127,22 @@ func processOne(ctx context.Context, cfg *Config, pool *NodePool, uploader Uploa
 	partSize := cfg.ChunkSizeMin + r.Int63n(partRange)
 
 	endpointIdx := pool.Assign(key.Idx)
-	multipart, err := uploader.UploadObject(ctx, endpointIdx, cfg.Bucket, key.Key, content, partSize)
-	if err != nil {
-		stats.IncFailed()
-		progress.Mark()
-		return err
+	var multipart bool
+	if len(cfg.MultipartEndpointPattern) > 0 && size > partSize {
+		if err := uploader.UploadObjectMultipart(ctx, cfg.Bucket, key.Key, content, partSize, cfg.MultipartEndpointPattern); err != nil {
+			stats.IncFailed()
+			progress.Mark()
+			return err
+		}
+		multipart = true
+	} else {
+		var err error
+		multipart, err = uploader.UploadObject(ctx, endpointIdx, cfg.Bucket, key.Key, content, partSize)
+		if err != nil {
+			stats.IncFailed()
+			progress.Mark()
+			return err
+		}
 	}
 	stats.IncUploaded(size)
 	if multipart {
@@ -162,6 +173,9 @@ func printConfigSnapshot(w io.Writer, cfg *Config) {
 	fmt.Fprintf(w, "  output_dir: %s  md5_file: %s\n", cfg.OutputDir, cfg.MD5File)
 	fmt.Fprintf(w, "  concurrency: %d  progress_interval: %d\n", cfg.Concurrency, cfg.ProgressInterval)
 	fmt.Fprintf(w, "  use_trailer: %v\n", cfg.UseTrailer)
+	if len(cfg.MultipartEndpointPattern) > 0 {
+		fmt.Fprintf(w, "  multipart_endpoint_pattern: %v\n", cfg.MultipartEndpointPattern)
+	}
 }
 
 func mask(s string) string {

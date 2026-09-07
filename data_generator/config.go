@@ -29,8 +29,9 @@ type Config struct {
 	OutputDir        string   `yaml:"output_dir"`
 	Concurrency      int      `yaml:"concurrency"`
 	ProgressInterval int      `yaml:"progress_interval"`
-	MD5File          string   `yaml:"md5_file"`
-	UseTrailer       bool     `yaml:"use_trailer"`
+	MD5File                  string   `yaml:"md5_file"`
+	UseTrailer               bool     `yaml:"use_trailer"`
+	MultipartEndpointPattern []int    `yaml:"multipart_endpoint_pattern"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -89,6 +90,16 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.MD5File == "" {
 		cfg.MD5File = "md5.txt"
+	}
+	if len(cfg.MultipartEndpointPattern) > 0 {
+		if len(cfg.MultipartEndpointPattern) < 3 {
+			return nil, fmt.Errorf("multipart_endpoint_pattern must have at least 3 elements (init + 1 part + complete), got %d", len(cfg.MultipartEndpointPattern))
+		}
+		for i, v := range cfg.MultipartEndpointPattern {
+			if v < 0 || v >= len(cfg.Endpoints) {
+				return nil, fmt.Errorf("multipart_endpoint_pattern[%d]=%d out of range [0, %d)", i, v, len(cfg.Endpoints))
+			}
+		}
 	}
 	return &cfg, nil
 }

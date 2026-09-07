@@ -189,6 +189,73 @@ chunk_size_max: 5242880
 	}
 }
 
+func TestLoadConfig_MultipartEndpointPattern_TooShort(t *testing.T) {
+	path := writeCfg(t, `endpoints: ["1.1.1.1:80", "2.2.2.2:80"]
+ak: a
+sk: s
+bucket: b
+depth: 1
+width: 2
+files_per_dir: 1
+object_size_min: 10485760
+object_size_max: 10485760
+chunk_size_min: 5242880
+chunk_size_max: 5242880
+multipart_endpoint_pattern: [0, 0]
+`)
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("expected error for pattern len < 3, got nil")
+	}
+}
+
+func TestLoadConfig_MultipartEndpointPattern_EndpointOutOfRange(t *testing.T) {
+	path := writeCfg(t, `endpoints: ["1.1.1.1:80", "2.2.2.2:80"]
+ak: a
+sk: s
+bucket: b
+depth: 1
+width: 2
+files_per_dir: 1
+object_size_min: 10485760
+object_size_max: 10485760
+chunk_size_min: 5242880
+chunk_size_max: 5242880
+multipart_endpoint_pattern: [0, 0, 2, 0, 1]
+`)
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("expected error for pattern endpoint idx >= len(endpoints), got nil")
+	}
+}
+
+func TestLoadConfig_MultipartEndpointPattern_Valid(t *testing.T) {
+	path := writeCfg(t, `endpoints: ["1.1.1.1:80", "2.2.2.2:80"]
+ak: a
+sk: s
+bucket: b
+depth: 1
+width: 2
+files_per_dir: 1
+object_size_min: 10485760
+object_size_max: 10485760
+chunk_size_min: 5242880
+chunk_size_max: 5242880
+multipart_endpoint_pattern: [0, 0, 1, 0, 1]
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("expected ok, got err: %v", err)
+	}
+	want := []int{0, 0, 1, 0, 1}
+	if len(cfg.MultipartEndpointPattern) != len(want) {
+		t.Fatalf("pattern len = %d, want %d", len(cfg.MultipartEndpointPattern), len(want))
+	}
+	for i, v := range cfg.MultipartEndpointPattern {
+		if v != want[i] {
+			t.Errorf("pattern[%d] = %d, want %d", i, v, want[i])
+		}
+	}
+}
+
 func TestLoadConfig_InvalidTreeParams(t *testing.T) {
 	cases := []struct {
 		name string
