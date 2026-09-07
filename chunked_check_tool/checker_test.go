@@ -59,7 +59,7 @@ func TestCheckerHandleNormal(t *testing.T) {
 	s := NewStats()
 	worker := &FakeS3{Body: []byte("normal object content here")}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef", Size: 1})
+	c.Handle(VerifyTask{Key: "k", OwnerID: "", ETag: "0123456789abcdef0123456789abcdef", Size: 1, IsMultipart: false, Offsets: nil})
 	// success not enabled, no files written yet (deferred to Close)
 }
 
@@ -72,7 +72,7 @@ func TestCheckerHandleCorrupted(t *testing.T) {
 	body := []byte("1000;chunk-signature=0000000000000000000000000000000000000000000000000000000000000000\r\n")
 	worker := &FakeS3{Body: body}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef", Size: 1})
+	c.Handle(VerifyTask{Key: "k", Size: 1, IsMultipart: false, Offsets: nil})
 	if s.Snapshot().CorruptedObjects != 1 {
 		t.Errorf("corrupted=%d want 1", s.Snapshot().CorruptedObjects)
 	}
@@ -91,12 +91,9 @@ func TestCheckerHandleMultipartSkipsRangeGet(t *testing.T) {
 	}
 	// 用一个 wrap 检测是否调用 RangeGet
 	c := NewChecker(&callTrackingS3{FakeS3: worker, called: &called}, out, s, cfg)
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 1})
+	c.Handle(VerifyTask{Key: "k", IsMultipart: true, Offsets: nil})
 	if called {
 		t.Error("RangeGet should not be called for multipart")
-	}
-	if got := s.Snapshot().ListedMp; got != 1 {
-		t.Errorf("list_mp=%d want 1", got)
 	}
 	if got := s.Snapshot().OkMp; got != 0 {
 		t.Errorf("ok_mp=%d want 0 (segment check off — not verified, must not claim clean)", got)
@@ -111,7 +108,7 @@ func TestCheckerHandleRangeGetError(t *testing.T) {
 	s := NewStats()
 	worker := &FakeS3{Err: context.DeadlineExceeded}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef", Size: 1})
+	c.Handle(VerifyTask{Key: "k", Size: 1, IsMultipart: false, Offsets: nil})
 	if s.Snapshot().CheckFailed != 1 {
 		t.Errorf("checkfailed=%d want 1", s.Snapshot().CheckFailed)
 	}
@@ -126,7 +123,7 @@ func TestCheckerHandleEmptyObjectSkipsRangeGet(t *testing.T) {
 	called := false
 	worker := &FakeS3{Err: errFake416}
 	c := NewChecker(&callTrackingS3{FakeS3: worker, called: &called}, out, s, cfg)
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef", Size: 0})
+	c.Handle(VerifyTask{Key: "k", Size: 0, IsMultipart: false, Offsets: nil})
 	if called {
 		t.Error("RangeGet should not be called for size=0 object")
 	}
@@ -149,7 +146,7 @@ func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 		RequestID:  "REQ-1234-ABCD",
 	}}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(ObjectInfo{Key: "path/obj", ETag: "0123456789abcdef0123456789abcdef", Size: 1})
+	c.Handle(VerifyTask{Key: "path/obj", Size: 1, IsMultipart: false, Offsets: nil})
 	if err := out.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -223,7 +220,7 @@ func TestCheckerMultipartSegmentCheckCorrupted(t *testing.T) {
 	c := NewChecker(worker, out, s, cfg)
 	// multipart etag + Size=10MB → 2 segments at offset 0 and 5MB. Body
 	// matches at offset 0, so it's flagged immediately as corrupted.
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, OwnerID: "owner-A"})
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5 * 1024 * 1024}})
 	if got := s.Snapshot().CorruptedMp; got != 1 {
 		t.Errorf("corrupted_mp=%d want 1", got)
 	}
@@ -250,7 +247,7 @@ func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 	s := NewStats()
 	worker := &FakeS3{Body: []byte("normal object body, no chunk signature here")}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, OwnerID: "owner-A"})
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5 * 1024 * 1024}})
 	if got := s.Snapshot().CorruptedMp; got != 0 {
 		t.Errorf("corrupted_mp=%d want 0", got)
 	}
@@ -280,7 +277,7 @@ func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 	s := NewStats()
 	worker := &FakeS3{Err: context.DeadlineExceeded}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, OwnerID: "owner-A"})
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5 * 1024 * 1024}})
 	if got := s.Snapshot().MpCheckFailed; got != 1 {
 		t.Errorf("mp_check_failed=%d want 1 (segment RangeGet error should bump MpCheckFailed)", got)
 	}
@@ -312,12 +309,9 @@ func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 	s := NewStats()
 	worker := &FakeS3{Body: chunkSigBody} // would match if we checked — but we don't
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, OwnerID: "owner-A"})
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: nil})
 	if got := s.Snapshot().CorruptedMp; got != 0 {
 		t.Errorf("corrupt_mp=%d want 0 (switch off)", got)
-	}
-	if got := s.Snapshot().ListedMp; got != 1 {
-		t.Errorf("list_mp=%d want 1 (switch off, still listed as multipart)", got)
 	}
 	if got := s.Snapshot().OkMp; got != 0 {
 		t.Errorf("ok_mp=%d want 0 (switch off — segment check not performed, no clean claim)", got)
@@ -354,7 +348,7 @@ func TestCheckerMultipartSegmentCheckSecondSegmentMatches(t *testing.T) {
 		},
 	}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, OwnerID: "owner-A"})
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5 * 1024 * 1024}})
 	if got := s.Snapshot().CorruptedMp; got != 1 {
 		t.Errorf("corrupted_mp=%d want 1 (second segment should trigger)", got)
 	}
