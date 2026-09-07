@@ -51,7 +51,7 @@ func main() {
 	printConfigSnapshot(mwOut, cfg)
 
 	pool := NewNodePool(cfg)
-	uploader := NewS3Uploader(pool, cfg.AK, cfg.SK, cfg.Scheme == "https")
+	uploader := NewS3Uploader(pool, cfg.AK, cfg.SK, cfg.Scheme == "https", cfg.UseTrailer)
 
 	exists, err := uploader.BucketExists(ctx, cfg.Bucket)
 	if err != nil {
@@ -161,6 +161,7 @@ func printConfigSnapshot(w io.Writer, cfg *Config) {
 	fmt.Fprintf(w, "  chunk_size_min: %d  max: %d\n", cfg.ChunkSizeMin, cfg.ChunkSizeMax)
 	fmt.Fprintf(w, "  output_dir: %s  md5_file: %s\n", cfg.OutputDir, cfg.MD5File)
 	fmt.Fprintf(w, "  concurrency: %d  progress_interval: %d\n", cfg.Concurrency, cfg.ProgressInterval)
+	fmt.Fprintf(w, "  use_trailer: %v\n", cfg.UseTrailer)
 }
 
 func mask(s string) string {

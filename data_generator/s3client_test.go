@@ -21,10 +21,11 @@ type fakePutCall struct {
 	object   string
 	size     int64
 	partSize uint64
+	checksum minio.ChecksumType
 }
 
 func (f *fakeMinioClient) PutObject(ctx context.Context, bucket, object string, reader io.Reader, size int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
-	f.putCalls = append(f.putCalls, fakePutCall{bucket: bucket, object: object, size: size, partSize: opts.PartSize})
+	f.putCalls = append(f.putCalls, fakePutCall{bucket: bucket, object: object, size: size, partSize: opts.PartSize, checksum: opts.Checksum})
 	if f.putErr != nil {
 		return minio.UploadInfo{}, f.putErr
 	}
@@ -37,7 +38,7 @@ func (f *fakeMinioClient) BucketExists(ctx context.Context, bucket string) (bool
 
 func TestS3Uploader_UploadSmallObjectSinglePUT(t *testing.T) {
 	fake := &fakeMinioClient{}
-	u := newS3UploaderWithFactory(fakeFactory(fake))
+	u := newS3UploaderWithFactory(fakeFactory(fake), false)
 
 	content := make([]byte, 1000)
 	multipart, err := u.UploadObject(context.Background(), 0, "bkt", "k1", content, 5*1024*1024)
@@ -64,7 +65,7 @@ func TestS3Uploader_UploadSmallObjectSinglePUT(t *testing.T) {
 
 func TestS3Uploader_UploadLargeObjectMultipart(t *testing.T) {
 	fake := &fakeMinioClient{}
-	u := newS3UploaderWithFactory(fakeFactory(fake))
+	u := newS3UploaderWithFactory(fakeFactory(fake), false)
 
 	content := make([]byte, 10*1024*1024) // 10MiB > 5MiB partSize
 	multipart, err := u.UploadObject(context.Background(), 0, "bkt", "k1", content, 5*1024*1024)
@@ -79,7 +80,7 @@ func TestS3Uploader_UploadLargeObjectMultipart(t *testing.T) {
 func TestS3Uploader_PropagatesError(t *testing.T) {
 	putErr := errors.New("simulated put failure")
 	fake := &fakeMinioClient{putErr: putErr}
-	u := newS3UploaderWithFactory(fakeFactory(fake))
+	u := newS3UploaderWithFactory(fakeFactory(fake), false)
 
 	content := []byte{1, 2, 3}
 	_, err := u.UploadObject(context.Background(), 0, "bkt", "k1", content, 5*1024*1024)
@@ -95,7 +96,7 @@ func TestS3Uploader_LazyClientCaching(t *testing.T) {
 		creates++
 		return fake, nil
 	}
-	u := newS3UploaderWithFactory(factory)
+	u := newS3UploaderWithFactory(factory, false)
 
 	content := []byte{1, 2, 3}
 	for i := 0; i < 5; i++ {
@@ -138,7 +139,7 @@ func TestS3Uploader_DifferentEndpointsDifferentClients(t *testing.T) {
 
 func TestS3Uploader_BucketExists(t *testing.T) {
 	fake := &fakeMinioClient{bucketExists_: true}
-	u := newS3UploaderWithFactory(fakeFactory(fake))
+	u := newS3UploaderWithFactory(fakeFactory(fake), false)
 
 	exists, err := u.BucketExists(context.Background(), "bkt")
 	if err != nil {
@@ -146,6 +147,40 @@ func TestS3Uploader_BucketExists(t *testing.T) {
 	}
 	if !exists {
 		t.Errorf("exists = false, want true")
+	}
+}
+
+func TestS3Uploader_UseTrailerSetsSHA256Checksum(t *testing.T) {
+	fake := &fakeMinioClient{}
+	u := newS3UploaderWithFactory(fakeFactory(fake), true)
+
+	content := make([]byte, 100)
+	if _, err := u.UploadObject(context.Background(), 0, "bkt", "k1", content, 5*1024*1024); err != nil {
+		t.Fatalf("UploadObject: %v", err)
+	}
+	if len(fake.putCalls) != 1 {
+		t.Fatalf("expected 1 PutObject call, got %d", len(fake.putCalls))
+	}
+	call := fake.putCalls[0]
+	if call.checksum != minio.ChecksumSHA256 {
+		t.Errorf("call.checksum = %d, want ChecksumSHA256=%d", call.checksum, minio.ChecksumSHA256)
+	}
+}
+
+func TestS3Uploader_NoTrailerLeavesChecksumZero(t *testing.T) {
+	fake := &fakeMinioClient{}
+	u := newS3UploaderWithFactory(fakeFactory(fake), false)
+
+	content := make([]byte, 100)
+	if _, err := u.UploadObject(context.Background(), 0, "bkt", "k1", content, 5*1024*1024); err != nil {
+		t.Fatalf("UploadObject: %v", err)
+	}
+	if len(fake.putCalls) != 1 {
+		t.Fatalf("expected 1 PutObject call, got %d", len(fake.putCalls))
+	}
+	call := fake.putCalls[0]
+	if call.checksum != minio.ChecksumNone {
+		t.Errorf("call.checksum = %d, want ChecksumNone=0 (no trailer)", call.checksum)
 	}
 }
 

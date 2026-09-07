@@ -37,6 +37,7 @@ output_dir: ./out
 concurrency: 4
 progress_interval: 50
 md5_file: md5.txt
+use_trailer: true
 `)
 	cfg, err := LoadConfig(path)
 	if err != nil {
@@ -56,6 +57,9 @@ md5_file: md5.txt
 	}
 	if cfg.Prefix != "data/" {
 		t.Errorf("Prefix = %q, want data/", cfg.Prefix)
+	}
+	if !cfg.UseTrailer {
+		t.Errorf("UseTrailer = false, want true")
 	}
 }
 

@@ -52,6 +52,8 @@
 
 11. **`processOne` 不退出 worker**：任何错误（prng 读失败、upload 失败、md5 写失败）都返回 err 给 `runWorkers`，worker 写日志后继续消费下一个 key。worker 退出会减少并行度但不中止其他 worker；ctx cancel 时 worker 从 `keyCh` 收到 close 后退出。
 
+12. **use_trailer 走 minio-go TrailingHeaders + Checksum**：`UseTrailer=true` 时 `NewMinioClient` 设 `Options.TrailingHeaders=true`，`S3Uploader.UploadObject` 设 `opts.Checksum=minio.ChecksumSHA256`。minio-go 自动转 aws-chunked + `x-amz-checksum-sha256` trailer（**仅 multipart 上传**——单 PUT 只在请求头加 checksum，不发 chunked 编码）。要求 v4 签名（本工具始终用 `credentials.NewStaticV4`，满足）。**改 `NewMinioClient`/`NewS3Uploader`/`UploadObject` 时务必保留这条联动**——三者必须同时打开/关闭，否则 minio-go 会报 `Checksum requires Client with TrailingHeaders enabled`。本地 `md5.txt` 不受影响（仍写 content 的 MD5，与 S3 侧的 sha256 checksum 是两个独立量）。
+
 ## 5. CLI 与配置
 
 ### CLI flags
@@ -91,6 +93,7 @@ Go 1.27 二进制路径：`/Users/gengyuanzhe/sdk/go1.27.1/bin/go`。
 - **NodePool 无故障转移**：节点宕时 upload 失败即失败，不重绑。生成场景下重试策略由用户决定（重跑或人工处理）。
 - **md5writer drain 的 `default` 退出**：ctx-cancel 后 drain 用 `select { case rec := <-ch; default: return }`。理论上若 producer 在 cancel 后还在发，drain 可能在 producer 还没发完时退出——但 `runWorkers` 在 ctx cancel 后 worker 从 `keyCh` 收到 close 才退出，`md5w.Write` 不会被调用。实际无 race。
 - **`processOne` 中 md5 写失败仍 IncUploaded**：stats 已 IncUploaded 在 md5 写之前；若 md5 写失败，对象已上传但 md5 没记录——`stats.IncFailed()` 在返回前补上，但 uploaded 计数仍 +1。理想是 md5 写失败时回滚 uploaded，但 S3 没有"删除已上传对象"的语义，回滚 stats 也不解决问题。当前行为：uploaded +1 + failed +1（双计），summary 时用户自行解读。
+- **use_trailer 仅对 multipart 生效**：minio-go 在 size > partSize 走 multipart 时才发 aws-chunked + trailer；单 PUT（size <= partSize）只在请求头加 `x-amz-checksum-sha256`，不发 chunked 编码。若用户想覆盖单 PUT 路径，需把 `object_size_min` 设到 `chunk_size_min` 之上强制 multipart。
 
 ## 9. 工作流约定
 

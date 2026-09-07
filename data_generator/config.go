@@ -30,6 +30,7 @@ type Config struct {
 	Concurrency      int      `yaml:"concurrency"`
 	ProgressInterval int      `yaml:"progress_interval"`
 	MD5File          string   `yaml:"md5_file"`
+	UseTrailer       bool     `yaml:"use_trailer"`
 }
 
 func LoadConfig(path string) (*Config, error) {

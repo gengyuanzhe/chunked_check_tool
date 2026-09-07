@@ -50,3 +50,11 @@ progress_interval: 100
 
 # 本地 MD5 文件名（写到 <output_dir>/<md5_file>，每行 bucket|object|md5hex）
 md5_file: md5.txt
+
+# 是否使用 trailer（aws-chunked + x-amz-checksum-sha256 trailer）上传。
+# true 时 minio client 开启 TrailingHeaders，每个 PutObject 设 Checksum=SHA256；
+# multipart 上传会发 aws-chunked 编码 + chunk-signature + x-amz-checksum-sha256
+# trailer——正是 chunked_check_tool 检测的 body 损坏路径。
+# 单 PUT（size <= partSize）只在请求头加 x-amz-checksum-sha256，不发 chunked 编码。
+# 默认 false（旧行为）。
+use_trailer: false

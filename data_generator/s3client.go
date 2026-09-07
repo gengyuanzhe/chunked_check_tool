@@ -32,35 +32,43 @@ type Uploader interface {
 // call UploadObject with an endpointIdx (round-robin assigned by caller);
 // the uploader routes to the bound client and classifies multipart by
 // comparing object size to partSize (minio-go splits iff size > partSize).
+//
+// When useTrailer is true, clients are built with TrailingHeaders=true and
+// each PutObject sets Checksum=ChecksumSHA256 — triggers aws-chunked +
+// x-amz-checksum-sha256 trailer (the body-corruption path chunked_check_tool
+// detects). Requires v4 signatures (always used here).
 type S3Uploader struct {
 	pool           *NodePool
 	ak, sk         string
 	secure         bool
+	useTrailer     bool
 	clientFactory  func(endpoint string) (minioPutAPI, error)
 	clients        map[int]minioPutAPI
 	mu             sync.Mutex
 }
 
-func NewS3Uploader(pool *NodePool, ak, sk string, secure bool) *S3Uploader {
+func NewS3Uploader(pool *NodePool, ak, sk string, secure, useTrailer bool) *S3Uploader {
 	u := &S3Uploader{
 		pool:           pool,
 		ak:             ak,
 		sk:             sk,
 		secure:         secure,
+		useTrailer:     useTrailer,
 		clients:        make(map[int]minioPutAPI),
 	}
 	u.clientFactory = func(endpoint string) (minioPutAPI, error) {
-		return NewMinioClient(endpoint, ak, sk, secure)
+		return NewMinioClient(endpoint, ak, sk, secure, useTrailer)
 	}
 	return u
 }
 
 // newS3UploaderWithFactory builds an uploader with an injectable client
 // factory (for tests). The pool is a fake single-endpoint pool.
-func newS3UploaderWithFactory(factory func(string) (minioPutAPI, error)) *S3Uploader {
+func newS3UploaderWithFactory(factory func(string) (minioPutAPI, error), useTrailer bool) *S3Uploader {
 	pool := &NodePool{endpoints: []string{"fake:80"}, scheme: "http"}
 	return &S3Uploader{
 		pool:          pool,
+		useTrailer:    useTrailer,
 		clientFactory: factory,
 		clients:       make(map[int]minioPutAPI),
 	}
@@ -84,6 +92,9 @@ func (u *S3Uploader) getClient(idx int) (minioPutAPI, error) {
 // UploadObject uploads content to (bucket, key) via the client bound to
 // endpointIdx. partSize is the multipart part-size hint passed to minio-go.
 // Returns multipart=true iff size > partSize.
+// When useTrailer is set, opts.Checksum=ChecksumSHA256 is also set, which
+// (combined with the TrailingHeaders=true client) makes minio-go emit the
+// aws-chunked + x-amz-checksum-sha256 trailer for multipart uploads.
 func (u *S3Uploader) UploadObject(ctx context.Context, endpointIdx int, bucket, key string, content []byte, partSize int64) (bool, error) {
 	c, err := u.getClient(endpointIdx)
 	if err != nil {
@@ -91,6 +102,9 @@ func (u *S3Uploader) UploadObject(ctx context.Context, endpointIdx int, bucket, 
 	}
 	size := int64(len(content))
 	opts := minio.PutObjectOptions{PartSize: uint64(partSize)}
+	if u.useTrailer {
+		opts.Checksum = minio.ChecksumSHA256
+	}
 	if _, err := c.PutObject(ctx, bucket, key, bytes.NewReader(content), size, opts); err != nil {
 		return false, err
 	}
@@ -108,7 +122,9 @@ func (u *S3Uploader) BucketExists(ctx context.Context, bucket string) (bool, err
 // NewMinioClient constructs a minio.Client bound to a single endpoint.
 // secure=true skips TLS verification (typical for internal nodes with
 // self-signed certs), matching chunked_check_tool's transport setup.
-func NewMinioClient(endpoint, ak, sk string, secure bool) (*minio.Client, error) {
+// trailingHeaders=true enables aws-chunked trailer support (required for
+// opts.Checksum on PutObject; only effective with v4 signatures).
+func NewMinioClient(endpoint, ak, sk string, secure, trailingHeaders bool) (*minio.Client, error) {
 	tr := &http.Transport{
 		MaxIdleConnsPerHost: 32,
 		IdleConnTimeout:     90 * time.Second,
@@ -117,10 +133,11 @@ func NewMinioClient(endpoint, ak, sk string, secure bool) (*minio.Client, error)
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 	return minio.New(endpoint, &minio.Options{
-		Creds:        credentials.NewStaticV4(ak, sk, ""),
-		Secure:       secure,
-		Transport:    tr,
-		BucketLookup: minio.BucketLookupAuto,
+		Creds:           credentials.NewStaticV4(ak, sk, ""),
+		Secure:          secure,
+		Transport:       tr,
+		BucketLookup:    minio.BucketLookupAuto,
+		TrailingHeaders: trailingHeaders,
 	})
 }
 

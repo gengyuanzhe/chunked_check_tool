@@ -63,6 +63,7 @@ SIGINT/SIGTERM 触发优雅退出。
 | `concurrency` | | 8（默认） |
 | `progress_interval` | | 100（默认） |
 | `md5_file` | | `md5.txt`（默认） |
+| `use_trailer` | | `false`（默认）；true 时开启 aws-chunked + `x-amz-checksum-sha256` trailer 上传（chunked_check_tool 检测的损坏路径） |
 
 校验类参数（endpoints/ak/sk/bucket/depth/width/files_per_dir/sizes）无默认值，必须显式配置——避免静默误判。
 
