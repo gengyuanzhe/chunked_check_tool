@@ -2,8 +2,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -19,9 +22,9 @@ type InputSource interface {
 // MalformedLineError carries the original line and its 1-based line number
 // so the caller can write it to list_failed for resumable debugging.
 type MalformedLineError struct {
-	Line   string
+	Line    string
 	LineNum int
-	Reason string
+	Reason  string
 }
 
 func (e *MalformedLineError) Error() string {
@@ -88,4 +91,63 @@ func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyT
 		IsMultipart: true,
 		Offsets:     offs,
 	}, nil
+}
+
+// listFileSource reads a list file line-by-line and pushes VerifyTasks to
+// objCh. Malformed lines are written to list_failed (with line number) and
+// bump IncrListFailed; processing continues. The source does NOT bump
+// listed_obj/listed_mp counters (per spec §6 — list-file mode bypasses S3
+// LIST, so "listed" semantics don't apply; summary shows list_all: 0).
+type listFileSource struct {
+	path   string
+	bucket string
+	out    *Output
+	stats  *Stats
+}
+
+func newListFileSource(path, bucket string, out *Output, stats *Stats) *listFileSource {
+	return &listFileSource{path: path, bucket: bucket, out: out, stats: stats}
+}
+
+func (s *listFileSource) Run(ctx context.Context, objCh chan<- VerifyTask) error {
+	f, err := os.Open(s.path)
+	if err != nil {
+		return fmt.Errorf("open list file %q: %w", s.path, err)
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	// Allow long lines (default 64KB limit is too small for huge offset lists).
+	const maxLineLen = 1 << 20 // 1 MiB
+	scanner.Buffer(make([]byte, 0, 64*1024), maxLineLen)
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		line := scanner.Text()
+		task, err := parseListFileLine(line, s.bucket, lineNum)
+		if err != nil {
+			var mle *MalformedLineError
+			if errors.As(err, &mle) {
+				s.out.WriteListFailed(mle.Line)
+				s.out.WriteListFailedLog(mle.Line, 0, "", "", err)
+				s.stats.IncrListFailed()
+				continue
+			}
+			// Non-malformed error (shouldn't happen for parseListFileLine).
+			s.out.WriteListFailed(line)
+			s.out.WriteListFailedLog(line, 0, "", "", err)
+			s.stats.IncrListFailed()
+			continue
+		}
+		select {
+		case objCh <- task:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return scanner.Err()
 }

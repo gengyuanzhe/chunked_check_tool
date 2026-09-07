@@ -2,7 +2,10 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -127,5 +130,57 @@ func TestParseListFileLineSuccessFields(t *testing.T) {
 	// ETag/Size empty for list-file tasks (caller doesn't know them).
 	if task.ETag != "" || task.Size != 0 {
 		t.Errorf("ETag=%q Size=%d, want empty/0", task.ETag, task.Size)
+	}
+}
+
+func TestListFileSourceRunEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true}
+	out, err := NewOutput(cfg, "mybucket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	stats := NewStats()
+
+	// File: 2 valid lines + 1 malformed (offset0 != 0) + 1 valid.
+	content := "mybucket|k1|1|0\n" +
+		"mybucket|k2|3|0|5242880|10485760\n" +
+		"mybucket|bad|1|100\n" +
+		"mybucket|k3|2|0|9999\n"
+	filePath := filepath.Join(dir, "list.txt")
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	src := newListFileSource(filePath, "mybucket", out, stats)
+	objCh := make(chan VerifyTask, 16)
+	go func() {
+		if err := src.Run(context.Background(), objCh); err != nil {
+			t.Logf("Run returned err: %v", err)
+		}
+		close(objCh)
+	}()
+
+	got := []VerifyTask{}
+	for task := range objCh {
+		got = append(got, task)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d tasks, want 3 (malformed line skipped): %+v", len(got), got)
+	}
+	if got[0].Key != "k1" || got[1].Key != "k2" || got[2].Key != "k3" {
+		t.Errorf("keys in wrong order: %+v", got)
+	}
+	// list-file source must NOT bump listed counters (per spec §6).
+	if got := stats.Snapshot().ListedMp; got != 0 {
+		t.Errorf("ListedMp=%d want 0 (list-file source does not bump listed)", got)
+	}
+	if got := stats.Snapshot().ListedObjects; got != 0 {
+		t.Errorf("ListedObjects=%d want 0", got)
+	}
+	// Malformed line → list_failed + IncrListFailed.
+	if got := stats.Snapshot().ListFailed; got != 1 {
+		t.Errorf("ListFailed=%d want 1 (one malformed line)", got)
 	}
 }
