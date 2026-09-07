@@ -362,12 +362,15 @@ git commit -m "refactor: fold normal/multipart check paths into unified verify(V
 - Modify: `walker.go` (same)
 - Modify: `lister_test.go` (objCh type change, assertions adapt)
 - Modify: `walker_test.go` (same)
+- Modify: `main.go` (objCh type at construction site + Mode 1 check-mode push site; check-worker range loop auto-adapts)
 
 **Interfaces:**
 - Consumes: `VerifyTask`, `resolveOffsets` from Task 1; `Checker.Handle(VerifyTask)` from Task 2
-- Produces: `Lister.Run` and `runRecursiveWalk` now take `chan<- VerifyTask`; bump `IncrListedObject`/`IncrListedMp` in check mode before pushing (previously done by `Checker.Handle`)
+- Produces: `Lister.Run` and `runRecursiveWalk` now take `chan<- VerifyTask`; bump `IncrListedObject`/`IncrListedMp` in check mode before pushing (previously done by `Checker.Handle`); `main.go` constructs `chan VerifyTask` and the Mode 1 seed loop pushes `resolveOffsets(o, cfg)` instead of raw `ObjectInfo`
 
 **Behavior preservation:** S3 list path's listed counters (`list_obj`/`list_mp`) still bump exactly once per object — location moves from `Checker.Handle` to `Lister.processPrefix`/`runRecursiveWalk` (check mode branch). List-only mode bumps are unchanged (already in lister/walker).
+
+**Plan note — main.go absorbed into Task 3:** The original plan deferred the `objCh` type change in `main.go` to Task 6. But Task 2 already broke `main.go` (`c.Handle(obj)` where `obj` is `ObjectInfo`), so the package no longer builds. Any task that runs `go test ./...` before Task 6 would have to use the file-moving workaround Task 2 used. Moving the objCh type change here lets Tasks 3, 4, 5 run `go test ./...` cleanly. Task 6 keeps the `-list-file` flag, `run()` signature, dispatch branch, and `printConfig` — its objCh type-change step is removed.
 
 - [ ] **Step 1: Update lister_test.go objCh type**
 
@@ -486,21 +489,41 @@ for _, o := range objs {
 }
 ```
 
-- [ ] **Step 6: Run lister/walker tests to verify they pass**
+- [ ] **Step 6: Update main.go objCh construction and Mode 1 push site**
+
+Two changes in `main.go` so the package builds cleanly:
+
+1. At the objCh construction site (currently `objCh := make(chan ObjectInfo, objChCap)`), change the element type:
+
+```go
+objCh := make(chan VerifyTask, objChCap)  // was: chan ObjectInfo
+```
+
+2. In the Mode 1 seed loop's check-mode push (currently `case objCh <- o:`), wrap the object with `resolveOffsets` so what goes on the channel is a `VerifyTask`:
+
+```go
+case objCh <- resolveOffsets(o, cfg):
+```
+
+The check-worker range loop (`for obj := range objCh { c.Handle(obj); ... }`) needs no change — `obj` now has type `VerifyTask` and `c.Handle` already accepts `VerifyTask` from Task 2. The list-only branch of Mode 1 (which classifies via `isNormalETag` and bumps `IncrListedObject`/`IncrListedMp` directly) is also unchanged — it never pushes to objCh.
+
+Do NOT touch anything else in `main.go`. The `-list-file` flag, `run()` signature change, and list-file dispatch branch remain in Task 6.
+
+- [ ] **Step 7: Run lister/walker tests to verify they pass**
 
 Run: `go test -run 'TestLister|TestWalker' -v .`
 Expected: PASS — objCh type matches, listed counters bump in check mode.
 
-- [ ] **Step 7: Run full suite (main.go still broken — fixed in Task 6)**
+- [ ] **Step 8: Run full suite (expect PASS — main.go now builds)**
 
 Run: `go test ./...`
-Expected: FAIL in `main_test.go` or compile error in `main.go` (objCh type). Fixed in Task 6.
+Expected: PASS — `main.go` compiles (objCh is `chan VerifyTask`, Mode 1 pushes `resolveOffsets(o, cfg)`); `main_test.go` and `lister_test.go`/`walker_test.go` no longer mismatch. The only remaining TODO (`-list-file` flag, `run()` signature) is Task 6.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add lister.go walker.go lister_test.go walker_test.go
-git commit -m "refactor: lister/walker produce VerifyTask; move listed-counter bumps from checker to lister"
+git add lister.go walker.go lister_test.go walker_test.go main.go
+git commit -m "refactor: lister/walker produce VerifyTask; main.go objCh type + Mode 1 push site"
 ```
 
 ---
@@ -944,15 +967,17 @@ git commit -m "feat: listFileSource.Run reads list file, skips malformed lines, 
 
 ---
 
-### Task 6: main.go wire-up — -list-file flag + objCh type
+### Task 6: main.go wire-up — -list-file flag + dispatch
 
 **Files:**
-- Modify: `main.go` (add `-list-file` flag, objCh type, dispatch, printConfig)
-- Modify: `main_test.go` (objCh type in any helper; env-gated smoke test for -list-file)
+- Modify: `main.go` (add `-list-file` flag, `run()` signature + listFile param, dispatch branch, `printConfig`)
+- Modify: `main_test.go` (`run()` call sites pass new empty `listFile` arg; env-gated smoke test for -list-file)
 
 **Interfaces:**
-- Consumes: `listFileSource`/`newListFileSource` from Task 5; `VerifyTask` from Task 1; `Checker.Handle(VerifyTask)` from Task 2
+- Consumes: `listFileSource`/`newListFileSource` from Task 5; `VerifyTask` from Task 1; `Checker.Handle(VerifyTask)` from Task 2; `objCh chan VerifyTask` construction (Task 3)
 - Produces: `main.run` with new signature accepting `listFile string`; CLI flag `-list-file`
+
+**Scope note:** The `objCh` type change and Mode 1 push-site change were originally Task 6 Step 2 but have been moved to Task 3 so the package builds cleanly between tasks. Do NOT re-do them here.
 
 - [ ] **Step 1: Update main.go flag parsing and run() signature**
 
@@ -975,15 +1000,17 @@ if err := run(ctx, cfg, *bucket, *prefix, *startAfter, *listFile, mwOut); err !=
 }
 ```
 
-- [ ] **Step 2: Update run() signature and objCh type**
+- [ ] **Step 2: Update run() signature**
 
 ```go
 func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter, listFile string, stdout io.Writer) error {
     ...
-    objCh := make(chan VerifyTask, objChCap)  // was: chan ObjectInfo
+    // objCh is already `chan VerifyTask` — constructed by Task 3.
     ...
 }
 ```
+
+(No objCh type change here — Task 3 already did it.)
 
 - [ ] **Step 3: Add list-file dispatch in run()**
 
