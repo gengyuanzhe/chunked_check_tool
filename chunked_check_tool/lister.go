@@ -55,7 +55,7 @@ func (l *Lister) Seed(prefix string) {
 // onObject is invoked after each object is processed (sent to objCh in
 // check mode, classified locally in list-only mode). It is used by main to
 // drive per-worker progress printing. Pass nil to disable.
-func (l *Lister) Run(ctx context.Context, wg *sync.WaitGroup, objCh chan<- ObjectInfo, workerIdx int, s3 S3API, onObject func()) {
+func (l *Lister) Run(ctx context.Context, wg *sync.WaitGroup, objCh chan<- VerifyTask, workerIdx int, s3 S3API, onObject func()) {
 	defer wg.Done()
 	_ = workerIdx
 	for {
@@ -83,11 +83,12 @@ func (l *Lister) Run(ctx context.Context, wg *sync.WaitGroup, objCh chan<- Objec
 // (delim=true) it also enqueues discovered sub-prefixes, bumping inflight
 // for each so they are accounted for in the termination counter.
 //
-// Counting rule (fixes a double-count with checker.Handle): in check mode
-// the lister does NOT bump listed counters — the checker does that once
-// per consumed object. In list-only mode the lister is the sole counter
-// and bumps IncrListedMp / IncrListedObject per object it classifies.
-func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- ObjectInfo, s3 S3API, onObject func()) {
+// Counting rule: the lister bumps listed counters (IncrListedMp /
+// IncrListedObject) exactly once per S3-listed object in both modes —
+// in check mode the bump happens before pushing the VerifyTask to objCh
+// (moved from Checker.Handle in Task 2), in list-only mode the bump is
+// the only effect since no check is performed.
+func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- VerifyTask, s3 S3API, onObject func()) {
 	continuationToken := ""
 	for {
 		objs, prefixes, next, err := s3.ListPage(ctx, prefix, "", continuationToken, l.delim(), 1000)
@@ -98,16 +99,24 @@ func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- 
 			return
 		}
 		for _, o := range objs {
+			task := resolveOffsets(o, l.cfg)
 			if l.cfg.IsCheck {
+				// Check mode: lister bumps listed counters (moved from Checker.Handle).
+				// list-file source does not go through this path, so its summary
+				// shows list_all: 0 — see listFileSource.
+				if task.IsMultipart {
+					l.stats.IncrListedMp()
+				} else {
+					l.stats.IncrListedObject()
+				}
 				select {
-				case objCh <- o:
+				case objCh <- task:
 				case <-ctx.Done():
 					return
 				}
 			} else {
-				// list-only mode: lister is the sole counter/classifier.
-				// No check is performed, so only listed counters move.
-				if !isNormalETag(o.ETag) {
+				// list-only mode: same classification, no check performed.
+				if task.IsMultipart {
 					l.stats.IncrListedMp()
 				} else {
 					l.stats.IncrListedObject()

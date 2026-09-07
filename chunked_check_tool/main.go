@@ -133,7 +133,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string, st
 			objChCap = 2000
 		}
 	}
-	objCh := make(chan ObjectInfo, objChCap)
+	objCh := make(chan VerifyTask, objChCap)
 	q := NewQueue()
 	lister := NewLister(q, out, stats, cfg)
 	printer.SetQueueSnapshotProvider(func() QueueSnapshot {
@@ -210,7 +210,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string, st
 			for _, o := range objs {
 				if cfg.IsCheck {
 					select {
-					case objCh <- o:
+					case objCh <- resolveOffsets(o, cfg):
 					case <-ctx.Done():
 						seedErr = ctx.Err()
 						break

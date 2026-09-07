@@ -40,13 +40,13 @@ func TestWalkerHappyPath(t *testing.T) {
 	defer out.Close()
 	stats := NewStats()
 
-	objCh := make(chan ObjectInfo, 16)
+	objCh := make(chan VerifyTask, 16)
 	runRecursiveWalk(context.Background(), fake, "root/", objCh, out, stats, cfg, nil)
 	close(objCh)
 
 	got := []string{}
-	for o := range objCh {
-		got = append(got, o.Key)
+	for t := range objCh {
+		got = append(got, t.Key)
 	}
 	sort.Strings(got)
 	want := []string{"root/a/1", "root/a/2", "root/a/sub/1", "root/b/1", "root/file0"}
@@ -60,6 +60,9 @@ func TestWalkerHappyPath(t *testing.T) {
 	}
 	if stats.Snapshot().ListFailed != 0 {
 		t.Errorf("ListFailed=%d want 0", stats.Snapshot().ListFailed)
+	}
+	if got := stats.Snapshot().ListedObjects; got != int64(len(want)) {
+		t.Errorf("list_obj=%d want %d (walker bumps in check mode)", got, len(want))
 	}
 }
 
@@ -98,7 +101,7 @@ func TestWalkerConcurrencyCap(t *testing.T) {
 	}
 	defer out.Close()
 	stats := NewStats()
-	objCh := make(chan ObjectInfo, 16)
+	objCh := make(chan VerifyTask, 16)
 
 	done := make(chan struct{})
 	go func() {
@@ -142,13 +145,13 @@ func TestWalkerSubtreeFailureIsolation(t *testing.T) {
 	}
 	defer out.Close()
 	stats := NewStats()
-	objCh := make(chan ObjectInfo, 8)
+	objCh := make(chan VerifyTask, 8)
 	runRecursiveWalk(context.Background(), fake, "root/", objCh, out, stats, cfg, nil)
 	close(objCh)
 
 	got := []string{}
-	for o := range objCh {
-		got = append(got, o.Key)
+	for t := range objCh {
+		got = append(got, t.Key)
 	}
 	if len(got) != 1 || got[0] != "root/ok/1" {
 		t.Errorf("got %v, want [root/ok/1]", got)
