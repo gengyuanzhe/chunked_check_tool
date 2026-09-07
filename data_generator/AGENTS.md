@@ -23,7 +23,7 @@
 | `config.go` | `Config` 结构体 + `LoadConfig`（YAML，强制显式配置，无默认值的字段空即报错） |
 | `nodepool.go` | `NodePool`：round-robin `Assign(i)` 返回 endpoint index（无故障转移） |
 | `s3client.go` | `minioPutAPI` 接口（minio.Client 子集）、`minioCoreAPI` 接口（minio.Core 子集）、`Uploader` 接口（高层）、`S3Uploader`（懒缓存 client/core per endpoint）、`NewMinioClient`/`NewMinioCore` 工厂 |
-| `treegen.go` | `WalkTree`：扇形链遍历，产 key channel；`ObjectKey{Key, Idx}` |
+| `treegen.go` | `WalkTree`：扇形链遍历，每层 `l*` 桥同层 emit files_per_dir 个文件 + 叶子目录循环 + 桥嵌套；产 key channel；`ObjectKey{Key, Idx}` |
 | `md5writer.go` | 单 goroutine + `bufio.Writer` 64KB 写 `md5.txt`，行格式 `bucket\|key\|md5hex\n`，ctx-cancel 后 drain 残留记录再 flush |
 | `stats.go` | atomic.Int64 计数器（uploaded/failed/bytes/single_objs/multipart_objs）+ `Snapshot` + `PrintSummary` |
 | `progress.go` | `Progress.Mark` 每 progress_interval 个对象打印进度行（CAS-free，靠 Add 的唯一返回值天然去重） |
@@ -36,7 +36,7 @@
 
 3. **round-robin 按对象序号**：`pool.Assign(key.Idx)` 用 treegen 分配的 0-based 全局序号做 round-robin，**不**用 worker 本地计数器——这样无论 worker 调度顺序如何，对象到节点的分布都是确定的均匀。
 
-4. **扇形链结构**：每层 width 兄弟中 (width-1) 个是叶子 + 1 个桥嵌套下一层；到达 depth 时所有 width 兄弟都是叶子。总叶子 = `(width-1)*(depth-1) + width`。三个 segment 前缀（`lprefix`/`dprefix`/`fprefix`）默认 `l`/`d`/`file_`，由 `LoadConfig` 填默认值——`WalkTree` 直接用 `cfg.LPrefix`/`DPrefix`/`FPrefix`，**不**对空字符串兜底。改 `walkLayer` 时务必保留：a) 非 max depth 时叶子数 = width-1；b) max depth 时叶子数 = width；c) 桥名 `<lprefix><layer+1>` 嵌套在 `layerPath` 下。
+4. **扇形链结构**：每层 `l*` 桥目录下同层放 `files_per_dir` 个文件 + (width-1) 个叶子目录 `d*`（max depth 层 width 个）+ 桥嵌套下一层（非 max depth）。总文件数 = `(depth + (width-1)*(depth-1) + width) * files_per_dir`——其中 `depth * files_per_dir` 来自每层桥同层文件，`((width-1)*(depth-1) + width) * files_per_dir` 来自叶子目录。三个 segment 前缀（`lprefix`/`dprefix`/`fprefix`）默认 `l`/`d`/`file_`，由 `LoadConfig` 填默认值——`WalkTree` 直接用 `cfg.LPrefix`/`DPrefix`/`FPrefix`，**不**对空字符串兜底。改 `walkLayer` 时务必保留：a) 桥同层 emit 在叶子循环之前；b) 非 max depth 时叶子数 = width-1；c) max depth 时叶子数 = width；d) 桥名 `<lprefix><layer+1>` 嵌套在 `layerPath` 下。
 
 5. **multipart 判定**：`size > partSize` → multipart=true。minio-go 在 size > partSize 时自动拆段（最后一段可小于 5MiB）；size <= partSize 时单 PUT。**不**从 `UploadInfo.ETag` 反推 multipart 状态（脆弱，依赖 ETag 格式）。
 

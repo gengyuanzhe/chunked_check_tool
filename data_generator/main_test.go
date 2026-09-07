@@ -199,8 +199,8 @@ func TestRunWorkers_EndToEndSmall(t *testing.T) {
 		t.Fatalf("md5 Close: %v", err)
 	}
 
-	// Total = ((width-1)*(depth-1) + width) * files_per_dir = (2*1 + 3) * 2 = 10
-	wantTotal := 10
+	// Total = (depth + (width-1)*(depth-1) + width) * files_per_dir = (2 + 2*1 + 3) * 2 = 14
+	wantTotal := 14
 	if snap := stats.Snapshot(); snap.Uploaded != int64(wantTotal) {
 		t.Errorf("Uploaded = %d, want %d", snap.Uploaded, wantTotal)
 	} else if snap.Failed != 0 {
@@ -215,14 +215,14 @@ func TestRunWorkers_EndToEndSmall(t *testing.T) {
 		t.Errorf("uploader got %d calls, want %d", len(uploader.uploads), wantTotal)
 	}
 
-	// Verify round-robin: 10 objects / 2 endpoints → 5 each
+	// Verify round-robin: 14 objects / 2 endpoints → 7 each
 	counts := map[int]int{}
 	for _, u := range uploader.uploads {
 		counts[u.endpointIdx]++
 	}
 	for idx, c := range counts {
-		if c != 5 {
-			t.Errorf("endpoint %d got %d calls, want 5 (round-robin)", idx, c)
+		if c != 7 {
+			t.Errorf("endpoint %d got %d calls, want 7 (round-robin)", idx, c)
 		}
 	}
 
@@ -275,8 +275,9 @@ func TestRunWorkers_LargeObjectsMultipart(t *testing.T) {
 	}
 	md5w.Close()
 
-	if snap := stats.Snapshot(); snap.MultipartObjs != 6 {
-		t.Errorf("MultipartObjs = %d, want 6", snap.MultipartObjs)
+	// Total = (depth + (width-1)*(depth-1) + width) * files_per_dir = (1 + 0 + 2) * 3 = 9
+	if snap := stats.Snapshot(); snap.MultipartObjs != 9 {
+		t.Errorf("MultipartObjs = %d, want 9", snap.MultipartObjs)
 	}
 }
 
@@ -306,7 +307,8 @@ func TestRunWorkers_FailuresRecordedButFlowContinues(t *testing.T) {
 
 	_ = runWorkers(context.Background(), cfg, pool, uploader, stats, progress, md5w, io.Discard)
 
-	if snap := stats.Snapshot(); snap.Uploaded != 0 || snap.Failed != 10 {
-		t.Errorf("snapshot = %+v, want Uploaded=0 Failed=10", snap)
+	// Total = (1 + 0 + 2) * 5 = 15
+	if snap := stats.Snapshot(); snap.Uploaded != 0 || snap.Failed != 15 {
+		t.Errorf("snapshot = %+v, want Uploaded=0 Failed=15", snap)
 	}
 }

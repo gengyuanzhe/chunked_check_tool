@@ -26,22 +26,25 @@ SIGINT/SIGTERM 触发优雅退出。
 
 ## 目录树结构
 
-扇形链：每层 width 个兄弟目录，其中 (width-1) 个是叶子装文件 + 1 个桥嵌套下一层；到达 depth 时所有 width 兄弟都是叶子。
+扇形链：每层 `l*` 桥目录下同层放 `files_per_dir` 个文件 + (width-1) 个叶子目录 `d*`（最深层 width 个）+ 桥嵌套下一层（非最深层）。
 
 ```
+<prefix>/<lprefix>1/<fprefix>_*..N                                  ← l1 同层文件
 <prefix>/<lprefix>1/<dprefix>1/<fprefix>_*..N
 <prefix>/<lprefix>1/<dprefix>2/<fprefix>_*..N
 <prefix>/<lprefix>1/<dprefix>3/<fprefix>_*..N
-<prefix>/<lprefix>1/<lprefix>2/<dprefix>1/<fprefix>_*..N      ← 桥 l2 嵌套下一层
+<prefix>/<lprefix>1/<lprefix>2/<fprefix>_*..N                       ← l2 同层文件
+<prefix>/<lprefix>1/<lprefix>2/<dprefix>1/<fprefix>_*..N
 <prefix>/<lprefix>1/<lprefix>2/<dprefix>2/<fprefix>_*..N
 <prefix>/<lprefix>1/<lprefix>2/<dprefix>3/<fprefix>_*..N
-<prefix>/<lprefix>1/<lprefix>2/<lprefix>3/<dprefix>1/<fprefix>_*..N   ← 到达 depth=3，所有 width 兄弟是叶子
+<prefix>/<lprefix>1/<lprefix>2/<lprefix>3/<fprefix>_*..N           ← 到达 depth=3
+<prefix>/<lprefix>1/<lprefix>2/<lprefix>3/<dprefix>1/<fprefix>_*..N
 <prefix>/<lprefix>1/<lprefix>2/<lprefix>3/<dprefix>2/<fprefix>_*..N
 <prefix>/<lprefix>1/<lprefix>2/<lprefix>3/<dprefix>3/<fprefix>_*..N
 <prefix>/<lprefix>1/<lprefix>2/<lprefix>3/<dprefix>4/<fprefix>_*..N
 ```
 
-总叶子目录数 = `(width-1)*(depth-1) + width`，总对象数 = 叶子数 × `files_per_dir`。
+总文件数 = `(depth + (width-1)*(depth-1) + width) * files_per_dir`——其中 `depth * files_per_dir` 是每层 `l*` 桥同层文件，`((width-1)*(depth-1) + width) * files_per_dir` 是叶子目录文件。
 
 `lprefix`/`dprefix`/`fprefix` 默认为 `l`/`d`/`file_`，可自定义（例：`lprefix=layer, dprefix=dir, fprefix=obj_` → `layer1/dir1/obj_1`）。
 
