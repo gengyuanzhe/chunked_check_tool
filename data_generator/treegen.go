@@ -38,7 +38,7 @@ func WalkTree(ctx context.Context, cfg *Config) <-chan ObjectKey {
 
 func walkLayer(ctx context.Context, cfg *Config, ch chan<- ObjectKey, parentPath string, layer int, fileWidth int, idx *int) {
 	var layerPath string
-	layerSeg := fmt.Sprintf("l%d", layer)
+	layerSeg := fmt.Sprintf("%s%d", cfg.LPrefix, layer)
 	if parentPath == "" {
 		layerPath = layerSeg
 	} else {
@@ -52,9 +52,9 @@ func walkLayer(ctx context.Context, cfg *Config, ch chan<- ObjectKey, parentPath
 	}
 
 	for d := 1; d <= leafCount; d++ {
-		leafPath := layerPath + "/" + fmt.Sprintf("d%d", d)
+		leafPath := layerPath + "/" + fmt.Sprintf("%s%d", cfg.DPrefix, d)
 		for f := 1; f <= cfg.FilesPerDir; f++ {
-			key := leafPath + "/file_" + fmt.Sprintf("%0*d", fileWidth, f)
+			key := leafPath + "/" + cfg.FPrefix + fmt.Sprintf("%0*d", fileWidth, f)
 			select {
 			case <-ctx.Done():
 				return

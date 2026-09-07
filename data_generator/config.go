@@ -32,6 +32,9 @@ type Config struct {
 	MD5File                  string   `yaml:"md5_file"`
 	UseTrailer               bool     `yaml:"use_trailer"`
 	MultipartEndpointPattern []int    `yaml:"multipart_endpoint_pattern"`
+	LPrefix                  string   `yaml:"lprefix"`
+	DPrefix                  string   `yaml:"dprefix"`
+	FPrefix                  string   `yaml:"fprefix"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -90,6 +93,15 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.MD5File == "" {
 		cfg.MD5File = "md5.txt"
+	}
+	if cfg.LPrefix == "" {
+		cfg.LPrefix = "l"
+	}
+	if cfg.DPrefix == "" {
+		cfg.DPrefix = "d"
+	}
+	if cfg.FPrefix == "" {
+		cfg.FPrefix = "file_"
 	}
 	if len(cfg.MultipartEndpointPattern) > 0 {
 		if len(cfg.MultipartEndpointPattern) < 3 {

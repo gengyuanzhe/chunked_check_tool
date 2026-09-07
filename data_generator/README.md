@@ -29,19 +29,21 @@ SIGINT/SIGTERM 触发优雅退出。
 扇形链：每层 width 个兄弟目录，其中 (width-1) 个是叶子装文件 + 1 个桥嵌套下一层；到达 depth 时所有 width 兄弟都是叶子。
 
 ```
-<prefix>/l1/d1/file_*..N
-<prefix>/l1/d2/file_*..N
-<prefix>/l1/d3/file_*..N
-<prefix>/l1/l2/d1/file_*..N      ← 桥 l2 嵌套下一层
-<prefix>/l1/l2/d2/file_*..N
-<prefix>/l1/l2/d3/file_*..N
-<prefix>/l1/l2/l3/d1/file_*..N   ← 到达 depth=3，所有 width 兄弟是叶子
-<prefix>/l1/l2/l3/d2/file_*..N
-<prefix>/l1/l2/l3/d3/file_*..N
-<prefix>/l1/l2/l3/d4/file_*..N
+<prefix>/<lprefix>1/<dprefix>1/<fprefix>_*..N
+<prefix>/<lprefix>1/<dprefix>2/<fprefix>_*..N
+<prefix>/<lprefix>1/<dprefix>3/<fprefix>_*..N
+<prefix>/<lprefix>1/<lprefix>2/<dprefix>1/<fprefix>_*..N      ← 桥 l2 嵌套下一层
+<prefix>/<lprefix>1/<lprefix>2/<dprefix>2/<fprefix>_*..N
+<prefix>/<lprefix>1/<lprefix>2/<dprefix>3/<fprefix>_*..N
+<prefix>/<lprefix>1/<lprefix>2/<lprefix>3/<dprefix>1/<fprefix>_*..N   ← 到达 depth=3，所有 width 兄弟是叶子
+<prefix>/<lprefix>1/<lprefix>2/<lprefix>3/<dprefix>2/<fprefix>_*..N
+<prefix>/<lprefix>1/<lprefix>2/<lprefix>3/<dprefix>3/<fprefix>_*..N
+<prefix>/<lprefix>1/<lprefix>2/<lprefix>3/<dprefix>4/<fprefix>_*..N
 ```
 
 总叶子目录数 = `(width-1)*(depth-1) + width`，总对象数 = 叶子数 × `files_per_dir`。
+
+`lprefix`/`dprefix`/`fprefix` 默认为 `l`/`d`/`file_`，可自定义（例：`lprefix=layer, dprefix=dir, fprefix=obj_` → `layer1/dir1/obj_1`）。
 
 ## 配置
 
@@ -65,6 +67,7 @@ SIGINT/SIGTERM 触发优雅退出。
 | `md5_file` | | `md5.txt`（默认） |
 | `use_trailer` | | `false`（默认）；true 时开启 aws-chunked + `x-amz-checksum-sha256` trailer 上传（chunked_check_tool 检测的损坏路径） |
 | `multipart_endpoint_pattern` | | `[]`（默认）；非空时手动编排 multipart，控制每个操作（init / 各 part / complete）发到哪个 endpoint index。长度 = `N+2`，N = `ceil(size/partSize)`。前置条件：S3 集群跨节点共享 multipart upload 状态。仅当 `size > partSize` 时走此路径 |
+| `lprefix` / `dprefix` / `fprefix` | | 默认 `l` / `d` / `file_`；扇形链三个 segment 的前缀字符串（层级目录 / 叶子目录 / 文件名） |
 
 校验类参数（endpoints/ak/sk/bucket/depth/width/files_per_dir/sizes）无默认值，必须显式配置——避免静默误判。
 

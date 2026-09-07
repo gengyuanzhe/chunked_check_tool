@@ -36,7 +36,7 @@
 
 3. **round-robin 按对象序号**：`pool.Assign(key.Idx)` 用 treegen 分配的 0-based 全局序号做 round-robin，**不**用 worker 本地计数器——这样无论 worker 调度顺序如何，对象到节点的分布都是确定的均匀。
 
-4. **扇形链结构**：每层 width 兄弟中 (width-1) 个是叶子 + 1 个桥嵌套下一层；到达 depth 时所有 width 兄弟都是叶子。总叶子 = `(width-1)*(depth-1) + width`。改 `walkLayer` 时务必保留：a) 非 max depth 时叶子数 = width-1；b) max depth 时叶子数 = width；c) 桥名 `l<layer+1>` 嵌套在 `layerPath` 下。
+4. **扇形链结构**：每层 width 兄弟中 (width-1) 个是叶子 + 1 个桥嵌套下一层；到达 depth 时所有 width 兄弟都是叶子。总叶子 = `(width-1)*(depth-1) + width`。三个 segment 前缀（`lprefix`/`dprefix`/`fprefix`）默认 `l`/`d`/`file_`，由 `LoadConfig` 填默认值——`WalkTree` 直接用 `cfg.LPrefix`/`DPrefix`/`FPrefix`，**不**对空字符串兜底。改 `walkLayer` 时务必保留：a) 非 max depth 时叶子数 = width-1；b) max depth 时叶子数 = width；c) 桥名 `<lprefix><layer+1>` 嵌套在 `layerPath` 下。
 
 5. **multipart 判定**：`size > partSize` → multipart=true。minio-go 在 size > partSize 时自动拆段（最后一段可小于 5MiB）；size <= partSize 时单 PUT。**不**从 `UploadInfo.ETag` 反推 multipart 状态（脆弱，依赖 ETag 格式）。
 

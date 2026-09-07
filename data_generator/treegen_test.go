@@ -14,8 +14,22 @@ func collectKeys(ch <-chan ObjectKey) []ObjectKey {
 	return out
 }
 
+// newCfg builds a Config with the default segment prefixes that LoadConfig
+// would apply, so tests construct Config literals without going through YAML.
+func newCfg(prefix string, depth, width, files int) *Config {
+	return &Config{
+		Prefix:      prefix,
+		Depth:       depth,
+		Width:       width,
+		FilesPerDir: files,
+		LPrefix:     "l",
+		DPrefix:     "d",
+		FPrefix:     "file_",
+	}
+}
+
 func TestWalkTree_Depth1_AllWidthLeaves(t *testing.T) {
-	cfg := &Config{Prefix: "data/", Depth: 1, Width: 3, FilesPerDir: 2}
+	cfg := newCfg("data/", 1, 3, 2)
 	got := collectKeys(WalkTree(context.Background(), cfg))
 	wantKeys := []string{
 		"data/l1/d1/file_1", "data/l1/d1/file_2",
@@ -42,7 +56,7 @@ func TestWalkTree_Depth1_AllWidthLeaves(t *testing.T) {
 }
 
 func TestWalkTree_Depth2_BridgeAndLeaves(t *testing.T) {
-	cfg := &Config{Prefix: "pfx", Depth: 2, Width: 3, FilesPerDir: 1}
+	cfg := newCfg("pfx", 2, 3, 1)
 	got := collectKeys(WalkTree(context.Background(), cfg))
 	wantKeys := []string{
 		"pfx/l1/d1/file_1",
@@ -76,7 +90,7 @@ func TestWalkTree_TotalCount(t *testing.T) {
 		{4, 4, 1, 13},  // (4-1)*(4-1) + 4 = 9 + 4 = 13
 	}
 	for _, tc := range cases {
-		cfg := &Config{Prefix: "", Depth: tc.depth, Width: tc.width, FilesPerDir: tc.files}
+		cfg := newCfg("", tc.depth, tc.width, tc.files)
 		got := collectKeys(WalkTree(context.Background(), cfg))
 		want := tc.wantLeaves * tc.files
 		if len(got) != want {
@@ -87,7 +101,7 @@ func TestWalkTree_TotalCount(t *testing.T) {
 }
 
 func TestWalkTree_EmptyPrefix(t *testing.T) {
-	cfg := &Config{Prefix: "", Depth: 1, Width: 2, FilesPerDir: 1}
+	cfg := newCfg("", 1, 2, 1)
 	got := collectKeys(WalkTree(context.Background(), cfg))
 	wantKeys := []string{"l1/d1/file_1", "l1/d2/file_1"}
 	if len(got) != len(wantKeys) {
@@ -104,8 +118,48 @@ func TestWalkTree_EmptyPrefix(t *testing.T) {
 	}
 }
 
+func TestWalkTree_CustomSegmentPrefixes(t *testing.T) {
+	cfg := &Config{
+		Prefix:      "pfx",
+		Depth:       2,
+		Width:       3,
+		FilesPerDir: 1,
+		LPrefix:     "layer",
+		DPrefix:     "dir",
+		FPrefix:     "obj_",
+	}
+	got := collectKeys(WalkTree(context.Background(), cfg))
+	wantKeys := []string{
+		"pfx/layer1/dir1/obj_1",
+		"pfx/layer1/dir2/obj_1",
+		"pfx/layer1/layer2/dir1/obj_1",
+		"pfx/layer1/layer2/dir2/obj_1",
+		"pfx/layer1/layer2/dir3/obj_1",
+	}
+	if len(got) != len(wantKeys) {
+		t.Fatalf("got %d keys, want %d; got=%v", len(got), len(wantKeys), keysToStrings(got))
+	}
+	gotSet := make(map[string]bool)
+	for _, k := range got {
+		gotSet[k.Key] = true
+	}
+	for _, w := range wantKeys {
+		if !gotSet[w] {
+			t.Errorf("missing key %q; got=%v", w, gotSet)
+		}
+	}
+}
+
+func TestWalkTree_DefaultSegmentPrefixesUnchanged(t *testing.T) {
+	cfg := newCfg("p", 1, 2, 1)
+	got := collectKeys(WalkTree(context.Background(), cfg))
+	if got[0].Key != "p/l1/d1/file_1" {
+		t.Errorf("default prefixes: first key = %q, want %q", got[0].Key, "p/l1/d1/file_1")
+	}
+}
+
 func TestWalkTree_FileNumberWidth(t *testing.T) {
-	cfg := &Config{Prefix: "p", Depth: 1, Width: 2, FilesPerDir: 100}
+	cfg := newCfg("p", 1, 2, 100)
 	got := collectKeys(WalkTree(context.Background(), cfg))
 	wantFirst := "p/l1/d1/file_001"
 	if got[0].Key != wantFirst {
@@ -115,7 +169,7 @@ func TestWalkTree_FileNumberWidth(t *testing.T) {
 
 func TestWalkTree_ContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	cfg := &Config{Prefix: "p", Depth: 5, Width: 5, FilesPerDir: 1000}
+	cfg := newCfg("p", 5, 5, 1000)
 	ch := WalkTree(ctx, cfg)
 	// read one then cancel
 	<-ch
