@@ -20,14 +20,24 @@ bucket: testbucket
 prefix: data/
 
 # 目录树深度/宽度/每目录文件数
-# 扇形链结构：每层 width 个兄弟目录中 (width-1) 个是叶子装文件 + 1 个桥
-# 嵌套下一层；到达 depth 时所有 width 兄弟都是叶子。
-# 总叶子目录数 = (width-1)*(depth-1) + width
-# 总对象数 = 叶子数 * files_per_dir
-# 例：depth=3 width=4 files_per_dir=10 → 10 叶子目录 → 100 个对象
+# 扇形链结构：每层 l* 桥目录下同层放 files_per_dir 个文件 + (width-1) 个叶子目录 d*
+# （最深层 width 个）+ 桥嵌套下一层（非最深层）。
+# 总文件数 = (depth + (width-1)*(depth-1) + width) * files_per_dir
+#   = depth * files_per_dir（每层 l* 同层文件）
+#     + ((width-1)*(depth-1) + width) * files_per_dir（叶子目录文件）
+# 例：depth=3 width=4 files_per_dir=10 → (3 + 9 + 4) * 10 = 160 个对象
 depth: 3
 width: 4
 files_per_dir: 10
+
+# 扇形链三个 segment 前缀字符串（可选，默认 l / d / file_）
+#   lprefix → 桥目录 segment（默认 "l"，生成 l1/l2/.../lN）
+#   dprefix → 叶子目录 segment（默认 "d"，生成 d1/d2/.../dW）
+#   fprefix → 文件名前缀（默认 "file_"，生成 file_001/file_002/...）
+# 例：lprefix=layer, dprefix=dir, fprefix=obj_ → layer1/layer2/dir1/obj_1
+lprefix: l
+dprefix: d
+fprefix: file_
 
 # 对象大小范围（字节），在 [min, max] 内随机；min==max 即固定
 # 上限 100MB（per-object 全内存 buffer）
