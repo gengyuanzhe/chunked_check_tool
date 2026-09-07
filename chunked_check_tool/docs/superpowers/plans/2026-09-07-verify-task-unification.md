@@ -15,20 +15,20 @@
 - 不改 `S3API` 接口、`S3Client`、`NodePool`、`Output` 公共方法签名。
 - 不改 `config.go`/`config.yaml` 字段（`-list-file` 是 CLI flag，不进 yaml）。
 - `is_multipart_segment_check`/`multipart_segment_size` 配置语义不变，仅作用于 S3 列举源。
-- 性能：normal 路径 `Offsets` 共享包级 `[1]int64{0}`，零分配。
+- 性能：normal 路径 `Offsets=nil`，verify 对 `!IsMultipart` 单次 `probeAndRoute(task, 0)`——零分配、无切片。
 - 测试：每个 task 含 TDD 步骤（写失败测试 → 验证失败 → 实现 → 验证通过 → 提交）。
 - 提交粒度：每 task 至少一个提交，提交信息用 `feat:`/`refactor:`/`test:` 前缀。
 
 ---
 
-### Task 1: VerifyTask 类型 + resolveOffsets + 共享 normalOffsets
+### Task 1: VerifyTask 类型 + resolveOffsets
 
 **Files:**
 - Create: `verify_task.go`
 - Create: `verify_task_test.go`
 
 **Interfaces:**
-- Produces: `VerifyTask` struct（字段：`Key, OwnerID, ETag string; Size int64; IsMultipart bool; Offsets []int64`）；包级 `normalOffsets = [1]int64{0}`；`resolveOffsets(obj ObjectInfo, cfg *Config) VerifyTask`
+- Produces: `VerifyTask` struct（字段：`Key, OwnerID, ETag string; Size int64; IsMultipart bool; Offsets []int64`）；`resolveOffsets(obj ObjectInfo, cfg *Config) VerifyTask`
 - Consumes: `ObjectInfo`（来自 `s3client.go`，已存在）、`Config`（已存在）、`isNormalETag`（来自 `checker.go`，已存在）
 
 - [ ] **Step 1: Write the failing test**
@@ -51,10 +51,10 @@ func TestResolveOffsets(t *testing.T) {
 		want VerifyTask
 	}{
 		{
-			name: "normal etag single offset zero",
+			name: "normal etag nil offsets (verify probes offset 0 implicitly)",
 			obj:  ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef", Size: 100, OwnerID: "o"},
 			cfg:  &Config{},
-			want: VerifyTask{Key: "k", OwnerID: "o", ETag: "0123456789abcdef0123456789abcdef", Size: 100, IsMultipart: false, Offsets: []int64{0}},
+			want: VerifyTask{Key: "k", OwnerID: "o", ETag: "0123456789abcdef0123456789abcdef", Size: 100, IsMultipart: false, Offsets: nil},
 		},
 		{
 			name: "multipart segcheck on builds ceil size/seg offsets",
@@ -84,13 +84,6 @@ func TestResolveOffsets(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := resolveOffsets(c.obj, c.cfg)
-			// For the normal case, check that Offsets shares the package-level
-			// normalOffsets array (zero-allocation invariant).
-			if c.name == "normal etag single offset zero" {
-				if &got.Offsets[0] != &normalOffsets[0] {
-					t.Errorf("normal Offsets does not share normalOffsets (got cap=%d len=%d)", cap(got.Offsets), len(got.Offsets))
-				}
-			}
 			if !reflect.DeepEqual(got, c.want) {
 				t.Errorf("resolveOffsets mismatch\ngot:  %+v\nwant: %+v", got, c.want)
 			}
@@ -102,7 +95,7 @@ func TestResolveOffsets(t *testing.T) {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `go test -run TestResolveOffsets -v .`
-Expected: FAIL with "undefined: resolveOffsets" / "undefined: VerifyTask" / "undefined: normalOffsets".
+Expected: FAIL with "undefined: resolveOffsets" / "undefined: VerifyTask".
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -110,11 +103,15 @@ Expected: FAIL with "undefined: resolveOffsets" / "undefined: VerifyTask" / "und
 // verify_task.go
 package main
 
-// VerifyTask is the unit of verification work that flows through objCh. The
-// checker's verify() method probes 128 bytes at each offset in Offsets and
-// routes the result based on IsMultipart. Offsets==nil means "do not probe"
-// (multipart with segment check disabled → write to mp_all without claiming
-// ok_mp). ETag/Size may be empty/zero for list-file-sourced tasks.
+// VerifyTask is the unit of verification work that flows through objCh.
+// verify() interprets Offsets as follows:
+//   - IsMultipart=false, Offsets=nil → normal object: probe offset 0 once
+//     (no slice, no allocation — verify special-cases the single probe)
+//   - IsMultipart=true, Offsets=nil → multipart with segcheck off: do not
+//     probe, write to mp_all without claiming ok_mp
+//   - IsMultipart=true, Offsets=[...] → probe each offset (fixed-segment or
+//     list-file sources)
+// ETag/Size may be empty/zero for list-file-sourced tasks.
 type VerifyTask struct {
 	Key         string
 	OwnerID     string
@@ -124,13 +121,8 @@ type VerifyTask struct {
 	Offsets     []int64
 }
 
-// normalOffsets is the shared slice used by resolveOffsets for normal ETag
-// objects. verify() only reads Offsets, never writes — sharing is safe and
-// avoids a per-object allocation on the hot normal path.
-var normalOffsets = [1]int64{0}
-
 // resolveOffsets builds a VerifyTask from an S3-listed object. Three cases:
-//   - normal ETag → IsMultipart=false, Offsets shares normalOffsets (=[0])
+//   - normal ETag → IsMultipart=false, Offsets=nil (verify probes offset 0)
 //   - multipart ETag + segcheck on + Size>0 → IsMultipart=true, Offsets =
 //     [0, seg, 2*seg, ...] ceil(Size/seg) entries
 //   - multipart ETag + segcheck off (or Size==0) → IsMultipart=true, Offsets=nil
@@ -142,7 +134,8 @@ func resolveOffsets(obj ObjectInfo, cfg *Config) VerifyTask {
 			ETag:        obj.ETag,
 			Size:        obj.Size,
 			IsMultipart: false,
-			Offsets:     normalOffsets[:],
+			// Offsets stays nil — verify() probes offset 0 directly for
+			// !IsMultipart, avoiding any per-object slice allocation.
 		}
 	}
 	task := VerifyTask{
@@ -186,8 +179,8 @@ git commit -m "feat: add VerifyTask type and resolveOffsets for unified verify k
 - Modify: `checker_test.go` (update all `Handle(ObjectInfo{...})` → `Handle(VerifyTask{...})`)
 
 **Interfaces:**
-- Consumes: `VerifyTask`, `normalOffsets` from Task 1; existing `Output`/`Stats`/`S3API`/`chunkSigRe`/`extract*` helpers
-- Produces: `Checker.Handle(task VerifyTask)` (new signature), `Checker.verify(task VerifyTask)` (new private method). Listed-counter bumps (`IncrListedObject`/`IncrListedMp`) move OUT of Handle to Lister/walker (Task 3).
+- Consumes: `VerifyTask` from Task 1; existing `Output`/`Stats`/`S3API`/`chunkSigRe`/`extract*` helpers
+- Produces: `Checker.Handle(task VerifyTask)` (new signature), `Checker.verify(task VerifyTask)` and `Checker.probeAndRoute(task VerifyTask, off int64) bool` (new private methods). Listed-counter bumps (`IncrListedObject`/`IncrListedMp`) move OUT of Handle to Lister/walker (Task 3).
 
 **Behavior change:** listed-counter bumps move from `Handle` to the S3 lister (check mode). List-file source does NOT bump them → summary shows `list_all: 0` in list-file mode (per spec §6). The `size==0` normal-object shortcut stays in Handle (RangeGet on empty body returns 416 → would misclassify as check_failed).
 
@@ -198,24 +191,24 @@ Rewrite the test bodies that call `c.Handle(ObjectInfo{...})`. New pattern: cons
 Replace each `c.Handle(ObjectInfo{...})` call site in `checker_test.go`:
 
 ```go
-// TestCheckerHandleNormal
-c.Handle(VerifyTask{Key: "k", OwnerID: "", ETag: "0123456789abcdef0123456789abcdef", Size: 1, IsMultipart: false, Offsets: normalOffsets[:]})
+// TestCheckerHandleNormal — normal: nil Offsets, verify probes offset 0
+c.Handle(VerifyTask{Key: "k", OwnerID: "", ETag: "0123456789abcdef0123456789abcdef", Size: 1, IsMultipart: false, Offsets: nil})
 
 // TestCheckerHandleCorrupted
-c.Handle(VerifyTask{Key: "k", IsMultipart: false, Offsets: normalOffsets[:]})
+c.Handle(VerifyTask{Key: "k", IsMultipart: false, Offsets: nil})
 
 // TestCheckerHandleMultipartSkipsRangeGet — drop the list_mp assertion
 // (that counter now lives in the lister). Keep the RangeGet-not-called assertion.
 c.Handle(VerifyTask{Key: "k", IsMultipart: true, Offsets: nil})
 
 // TestCheckerHandleRangeGetError
-c.Handle(VerifyTask{Key: "k", IsMultipart: false, Offsets: normalOffsets[:]})
+c.Handle(VerifyTask{Key: "k", IsMultipart: false, Offsets: nil})
 
 // TestCheckerHandleEmptyObjectSkipsRangeGet — size=0 normal shortcut
-c.Handle(VerifyTask{Key: "k", Size: 0, IsMultipart: false, Offsets: normalOffsets[:]})
+c.Handle(VerifyTask{Key: "k", Size: 0, IsMultipart: false, Offsets: nil})
 
 // TestCheckerHandleCheckFailedLogsStructured
-c.Handle(VerifyTask{Key: "path/obj", IsMultipart: false, Offsets: normalOffsets[:]})
+c.Handle(VerifyTask{Key: "path/obj", IsMultipart: false, Offsets: nil})
 
 // TestCheckerMultipartSegmentCheckCorrupted
 c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5 * 1024 * 1024}})
@@ -274,41 +267,30 @@ func (c *Checker) Handle(task VerifyTask) {
 	c.verify(task)
 }
 
-// verify probes 128 bytes at each offset in task.Offsets. If any probe
-// matches chunkSigRe, the task is corrupted. If any probe's RangeGet errors,
-// the task is check_failed (or mp_check_failed when IsMultipart). If
-// task.Offsets is nil/empty, the task is recorded as multipart_all without
-// an ok_mp claim (the "segment check disabled" path). Otherwise all probes
-// clean → ok_object / ok_mp.
+// verify routes task to probe-and-route. Multipart + nil Offsets is the
+// "segcheck off" path → write to mp_all without claiming ok_mp. Normal
+// objects (IsMultipart=false, Offsets=nil) get a single probe at offset 0 —
+// no slice, no loop, no allocation. Multipart objects iterate Offsets.
+// If any probe settles (corrupted or failed) the task is done; otherwise
+// all probes clean → ok_object / ok_mp.
 func (c *Checker) verify(task VerifyTask) {
-	if len(task.Offsets) == 0 {
+	if task.IsMultipart && len(task.Offsets) == 0 {
 		c.out.WriteMultipartAll(task.OwnerID, task.Key)
 		return
 	}
-	for _, off := range task.Offsets {
-		body, err := c.worker.RangeGetAt(context.Background(), task.Key, off, 128)
-		if err != nil {
-			if task.IsMultipart {
-				c.out.WriteMpCheckFailed(task.Key)
-				c.out.WriteMpCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
-				c.stats.IncrMpCheckFailed()
-			} else {
-				c.out.WriteCheckFailed(task.Key)
-				c.out.WriteCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
-				c.stats.IncrCheckFailed()
+	settled := false
+	if !task.IsMultipart {
+		settled = c.probeAndRoute(task, 0)
+	} else {
+		for _, off := range task.Offsets {
+			if c.probeAndRoute(task, off) {
+				settled = true
+				break
 			}
-			return
 		}
-		if chunkSigRe.Match(body) {
-			if task.IsMultipart {
-				c.out.WriteCorruptedMultipart(task.OwnerID, task.Key)
-				c.stats.IncrCorruptedMp()
-			} else {
-				c.out.WriteCorrupted(task.OwnerID, task.Key)
-				c.stats.IncrCorruptedObjects()
-			}
-			return
-		}
+	}
+	if settled {
+		return
 	}
 	if task.IsMultipart {
 		if c.cfg.IsMultipartSuccessLog {
@@ -321,6 +303,36 @@ func (c *Checker) verify(task VerifyTask) {
 		}
 		c.stats.IncrOkObjects()
 	}
+}
+
+// probeAndRoute does one 128-byte RangeGet at off and routes the result by
+// IsMultipart. Returns true when the task is settled (corrupted or failed)
+// so the caller stops further probes. Normal and multipart share this path.
+func (c *Checker) probeAndRoute(task VerifyTask, off int64) bool {
+	body, err := c.worker.RangeGetAt(context.Background(), task.Key, off, 128)
+	if err != nil {
+		if task.IsMultipart {
+			c.out.WriteMpCheckFailed(task.Key)
+			c.out.WriteMpCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
+			c.stats.IncrMpCheckFailed()
+		} else {
+			c.out.WriteCheckFailed(task.Key)
+			c.out.WriteCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
+			c.stats.IncrCheckFailed()
+		}
+		return true
+	}
+	if chunkSigRe.Match(body) {
+		if task.IsMultipart {
+			c.out.WriteCorruptedMultipart(task.OwnerID, task.Key)
+			c.stats.IncrCorruptedMp()
+		} else {
+			c.out.WriteCorrupted(task.OwnerID, task.Key)
+			c.stats.IncrCorruptedObjects()
+		}
+		return true
+	}
+	return false
 }
 ```
 
@@ -1105,7 +1117,7 @@ git commit -m "docs: document -list-file mode and per-part offset format"
 
 - §2.1 VerifyTask struct — Task 1 ✓
 - §2.2 unified verify() — Task 2 ✓
-- §2.3 shared normalOffsets — Task 1 (test asserts `&got.Offsets[0] == &normalOffsets[0]`) ✓
+- §2.3 normal 路径无切片 — Task 1 (`resolveOffsets` 设 normal `Offsets=nil`) + Task 2 (`verify` 对 `!IsMultipart` 单次 `probeAndRoute(task, 0)`) ✓
 - §3.1 InputSource interface — Task 4 (declaration) ✓
 - §3.1 s3ListSource — **deviation**: S3 list path stays inline in main.go rather than extracting s3ListSource struct. The interface is still reserved; listFileSource is the sole impl today; future etag source adds a second. Rationale: YAGNI — extraction is a pure refactor with no behavior change, defer until a second non-list-file source actually lands.
 - §3.2 list-file line format + validation — Task 4 ✓
