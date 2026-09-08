@@ -47,6 +47,7 @@ func (c *BackupChecker) Handle(task BackupTask) {
 	}
 	if headIsMultipart := !isNormalETag(etag); headIsMultipart != task.IsMultipart {
 		c.out.WriteMismatch(task.RawLine)
+		c.out.WriteMismatchLog(task.Key, task.IsMultipart, etag, size)
 		c.stats.IncrBackupMismatch()
 		return
 	}

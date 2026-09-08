@@ -52,6 +52,8 @@ type Output struct {
 	mpCheckFailedLogFile *os.File
 	backupFailedLogger   *slog.Logger
 	backupFailedLogFile  *os.File
+	mismatchLogger       *slog.Logger
+	mismatchLogFile      *os.File
 
 	// enable flags — each gates one writer goroutine + file
 	corruptedEnabled          bool // is_check
@@ -214,6 +216,9 @@ func NewBackupOutput(cfg *Config, bucket string) (*Output, error) {
 	if err := o.openAndStartRoot("mismatch.txt", o.mismatchCh); err != nil {
 		return nil, err
 	}
+	if err := o.openMismatchLog(); err != nil {
+		return nil, err
+	}
 	if err := o.openAndStartRoot("backup_skipped_clean.txt", o.backupSkippedCleanCh); err != nil {
 		return nil, err
 	}
@@ -366,6 +371,22 @@ func (o *Output) openBackupFailedLog() error {
 	return nil
 }
 
+// openMismatchLog opens mismatch.log at the root and wires it to a
+// *slog.Logger. Each WriteMismatchLog call becomes one structured record
+// explaining WHY the input line disagreed with the HEAD:
+//
+//	time=... level=WARN msg="backup mismatch" bucket=... key=... line_is_multipart=false head_etag=... head_size=... reason=...
+func (o *Output) openMismatchLog() error {
+	f, err := os.OpenFile(filepath.Join(o.dir, "mismatch.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("open mismatch.log: %w", err)
+	}
+	o.mismatchLogFile = f
+	o.files = append(o.files, f)
+	o.mismatchLogger = slog.New(slog.NewTextHandler(f, nil))
+	return nil
+}
+
 func (o *Output) WriteCorrupted(ownerID, key string) {
 	if o.corruptedEnabled {
 		o.corruptedCh <- ownerLine{ownerID, key}
@@ -485,6 +506,33 @@ func (o *Output) WriteMismatch(rawLine string) {
 	if o.backupEnabled {
 		o.mismatchCh <- rawLine
 	}
+}
+
+// WriteMismatchLog records why an input line disagreed with the HEAD: the
+// line's declared type, the HEAD ETag/size, and an actionable reason.
+// mismatch.txt alone carries only the raw line, which made all-mismatch
+// runs undiagnosable.
+func (o *Output) WriteMismatchLog(key string, lineIsMultipart bool, headETag string, headSize int64) {
+	if !o.backupEnabled || o.mismatchLogger == nil {
+		return
+	}
+	headIsMultipart := !isNormalETag(headETag)
+	reason := "input line and HEAD ETag disagree on object type"
+	switch {
+	case !lineIsMultipart && headIsMultipart:
+		reason = "line is regular (bkt|key) but HEAD ETag is multipart-style: use bkt|key|partcnt|offset0|... lines for multipart objects"
+	case lineIsMultipart && !headIsMultipart:
+		reason = "line declares multipart (partcnt present) but HEAD ETag is a plain MD5: object type changed since the check run"
+	}
+	attrs := []any{
+		slog.String("bucket", orDash(o.bucket)),
+		slog.String("key", key),
+		slog.Bool("line_is_multipart", lineIsMultipart),
+		slog.String("head_etag", orDash(headETag)),
+		slog.Int64("head_size", headSize),
+		slog.String("reason", reason),
+	}
+	o.mismatchLogger.Warn("backup mismatch", attrs...)
 }
 func (o *Output) WriteBackupSkippedClean(key string) {
 	if o.backupEnabled {

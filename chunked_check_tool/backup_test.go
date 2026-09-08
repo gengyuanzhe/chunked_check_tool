@@ -267,6 +267,53 @@ func TestBackupCheckerMultipartETagMismatch(t *testing.T) {
 	}
 }
 
+// TestBackupCheckerMismatchLogsHeadETag — both mismatch directions land in
+// mismatch.txt (raw line) AND mismatch.log, which must carry the line's
+// declared type, the HEAD ETag/size, and an actionable reason. The log is
+// what makes an all-mismatch run diagnosable: without it the raw line
+// alone cannot tell whether the line shape or the server's ETag is at
+// fault.
+func TestBackupCheckerMismatchLogsHeadETag(t *testing.T) {
+	f := &FakeS3{Heads: map[string]HeadInfo{
+		// k1: line says regular, HEAD says multipart (the corrupted_mp.txt
+		// direct-feed case).
+		"k1": {ETag: "0123456789abcdef0123456789abcdef-2", Size: 10},
+		// k2: line says multipart, HEAD says regular.
+		"k2": {ETag: "0123456789abcdef0123456789abcdef", Size: 10},
+	}}
+	c, dir, flush := newBackupTestEnv(t, f)
+
+	c.Handle(BackupTask{Key: "k1", RawLine: "mybucket|k1"})
+	c.Handle(BackupTask{Key: "k2", RawLine: "mybucket|k2|1|0", IsMultipart: true, Offsets: []int64{0}})
+	flush()
+
+	if got := readBackupFile(t, dir, "mismatch.txt"); got != "mybucket|k1\nmybucket|k2|1|0\n" {
+		t.Errorf("mismatch.txt = %q, want both raw lines", got)
+	}
+	logContent := readBackupFile(t, dir, "mismatch.log")
+	for _, want := range []string{
+		"key=k1",
+		"line_is_multipart=false",
+		"head_etag=0123456789abcdef0123456789abcdef-2",
+		"head_size=10",
+		"line is regular (bkt|key) but HEAD ETag is multipart-style",
+		"key=k2",
+		"line_is_multipart=true",
+		"head_etag=0123456789abcdef0123456789abcdef",
+		"line declares multipart (partcnt present) but HEAD ETag is a plain MD5",
+	} {
+		if !strings.Contains(logContent, want) {
+			t.Errorf("mismatch.log missing %q:\n%s", want, logContent)
+		}
+	}
+	if got := c.stats.Snapshot().BackupMismatch; got != 2 {
+		t.Errorf("BackupMismatch = %d, want 2", got)
+	}
+	if len(f.Puts) != 0 {
+		t.Errorf("puts = %+v, want none (mismatch never relays)", f.Puts)
+	}
+}
+
 func TestBackupCheckerHeadErrorFails(t *testing.T) {
 	f := &FakeS3{HeadErr: minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}}
 	c, dir, flush := newBackupTestEnv(t, f)

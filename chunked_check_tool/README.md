@@ -120,7 +120,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 
 1. 启动时先把输入列表文件整体上传到 `backup_bucket` 的 `.backup_lists/<原名>_<YYYYMMDD_HHMMSS>.txt`（失败则中止，不处理任何对象）
 2. 逐对象 HEAD，以 ETag 判型（32 位小写 hex = 普通，其余 = 多段）
-3. HEAD 类型与行类型不一致 → 原始行写入 `mismatch.txt`，跳过
+3. HEAD 类型与行类型不一致 → 原始行写入 `mismatch.txt`，结构化诊断（行声明类型、HEAD ETag/size、原因）写入 `mismatch.log`，跳过
 4. 普通行：直接下载中转（输入列表即上一轮校验的损坏结果，不重新探测）
 5. 多段行：按行内 offset 逐段 Range GET 探测 chunk-signature，命中损坏才中转；全部干净 → 写入 `backup_skipped_clean.txt`，不中转
 6. 中转 = 客户端下载再上传（非服务端 copy）：
@@ -155,6 +155,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 ├── backup_failed.txt           # 备份失败 key（-backup-file 模式）
 ├── backup_failed.log           # 备份失败结构化错误（stage=head/verify/upload/etag）
 ├── mismatch.txt                # HEAD 类型与输入行类型不一致的原始行（-backup-file 模式）
+├── mismatch.log                # mismatch 结构化诊断：行声明类型、HEAD ETag/size、原因（-backup-file 模式）
 ├── backup_skipped_clean.txt    # 多段校验全部干净未备份的 key（-backup-file 模式）
 └── <ownerID>/                  # OwnerID 为空时落到 _unknown/
     ├── corrupted_objects.txt   # 损坏普通对象 key（Range GET 命中 chunk-signature）
