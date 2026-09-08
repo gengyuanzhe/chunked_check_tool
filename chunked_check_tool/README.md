@@ -116,11 +116,16 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
     bkt|key                          # 普通对象（即上一轮 <ownerID>/corrupted_objects.txt 的 err 列表）
     bkt|key|partcnt|offset0|offset1|...  # 多段对象（与 -list-file 同格式）
 
+注意：`<ownerID>/corrupted_mp.txt` 只含 `bkt|key`，多段对象喂给 `-backup-file` 前需自行补充
+partcnt/offsets（= 原上传 part 边界，即 check 时 `multipart_segment_size` 的整数倍序列
+`0, seg, 2*seg, ...`）。直接喂 `bkt|key` 行会因输入类型校验（行声明普通、HEAD 判型多段）全部
+mismatch，每条原因见 `mismatch.log`。
+
 流程：
 
 1. 启动时先把输入列表文件整体上传到 `backup_bucket` 的 `.backup_lists/<原名>_<YYYYMMDD_HHMMSS>.txt`（失败则中止，不处理任何对象）
 2. 逐对象 HEAD，以 ETag 判型（32 位小写 hex = 普通，其余 = 多段）
-3. HEAD 类型与行类型不一致 → 原始行写入 `mismatch.txt`，结构化诊断（行声明类型、HEAD ETag/size、原因）写入 `mismatch.log`，跳过
+3. 输入类型校验（mismatch）：输入行声明的对象类型（2 字段=普通，带 partcnt=多段）与 HEAD 判型不一致（如行是 `bkt|key` 但对象实际为多段）→ 原始行写入 `mismatch.txt`，结构化诊断（`line_is_multipart`/`head_etag`/`head_size`/`reason`）写入 `mismatch.log`，跳过该对象。这是对**输入列表**的校验，发生在备份之前；与第 7 步中转完成后的 ETag 终验失败（走 `backup_failed.txt`，stage=etag）是两回事
 4. 普通行：直接下载中转（输入列表即上一轮校验的损坏结果，不重新探测）
 5. 多段行：按行内 offset 逐段 Range GET 探测 chunk-signature，命中损坏才中转；全部干净 → 写入 `backup_skipped_clean.txt`，不中转
 6. 中转 = 客户端下载再上传（非服务端 copy）：
@@ -136,7 +141,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 - 坏行（格式错误/bkt 不匹配）与 `-list-file` 一致：写入 `list_failed.txt` 并跳过
 - 复用 `check_concurrency` 作为备份 worker 数；节点故障轮询仅覆盖请求发起阶段——流式中转一旦开始，中途故障不重试（流不可重放），整对象记为失败
 - S3 多段约束：非末段必须 ≥5MB。输入行语义是原始 part 边界（原上传本来合规）；若喂入"固定分段"格式（段 <5MB）会被 S3 拒绝（EntityTooSmall）→ `backup_failed`
-- 汇总行：`backup_ok: N backup_failed: N backup_mismatch: N backup_skipped_clean: N`（另含 `get_calls`，多段校验产生）
+- 汇总行：`backup_ok: N backup_failed: N backup_mismatch: N backup_skipped_clean: N`（另含 `get_calls`，多段校验产生；`backup_mismatch` = 输入类型校验失败数，见流程第 3 步）
 
 ## 输出
 
@@ -154,8 +159,8 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 ├── backup_ok.txt               # 备份成功 key（-backup-file 模式）
 ├── backup_failed.txt           # 备份失败 key（-backup-file 模式）
 ├── backup_failed.log           # 备份失败结构化错误（stage=head/verify/upload/etag）
-├── mismatch.txt                # HEAD 类型与输入行类型不一致的原始行（-backup-file 模式）
-├── mismatch.log                # mismatch 结构化诊断：行声明类型、HEAD ETag/size、原因（-backup-file 模式）
+├── mismatch.txt                # 输入类型校验失败：输入行声明的对象类型与 HEAD 判型不一致的原始行（-backup-file 模式；不是 ETag 终验失败，那个走 backup_failed stage=etag）
+├── mismatch.log                # 输入类型校验失败的结构化诊断：line_is_multipart/head_etag/head_size/reason（-backup-file 模式）
 ├── backup_skipped_clean.txt    # 多段校验全部干净未备份的 key（-backup-file 模式）
 └── <ownerID>/                  # OwnerID 为空时落到 _unknown/
     ├── corrupted_objects.txt   # 损坏普通对象 key（Range GET 命中 chunk-signature）

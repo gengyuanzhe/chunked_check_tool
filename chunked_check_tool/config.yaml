@@ -71,7 +71,8 @@ result_line_format: <bucket>|<key>
 
 # 备份目标桶（-backup-file 模式必填，其他模式忽略）。
 # 备份流程：先上传输入列表文件到 backup_bucket 的 .backup_lists/<原名>_<时间戳>.txt，
-# 然后逐对象 HEAD 判型（普通/多段），类型与输入行不一致 → mismatch.txt；
+# 然后逐对象 HEAD 判型（普通/多段），与输入行声明的类型不一致 → mismatch.txt
+# （这是备份前的输入类型校验；中转后的 ETag 终验失败走 backup_failed，别混淆）；
 # 普通对象直接下载中转上传；多段对象先按行内 offset 做 chunk-signature 校验，
 # 命中损坏才按 offsets 分段下载再分段上传（多段边界=原始 part 边界，非末段需 ≥5MB），
 # 最后比对目标/源 ETag，不一致记 backup_failed（坏副本保留）。全部干净 → backup_skipped_clean.txt。
