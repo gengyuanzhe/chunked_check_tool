@@ -103,6 +103,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 - 坏行（格式错误/bkt 不匹配）写入 `list_failed.txt` 并跳过
 - 必须 `is_check=true`（文件即列表，无需列举）
 - 此模式下 `list_all` 显示 0（不经过 S3 LIST），`list_failed` 仅统计坏行
+- 校验结果正常输出：损坏 → `<ownerID>/corrupted_mp.txt`，GET 失败 → `mp_check_failed.txt/.log`（无需配 `is_multipart_segment_check`）；全部干净 → `ok_mp.txt`（需配 `is_multipart_success_log: true`）。行内无 owner 信息，结果落在 `_unknown/` 子目录
 
 固定分段校验（`is_multipart_segment_check=true` + `multipart_segment_size`）是本模式的特殊情况：offsets 由 `[0, seg, 2*seg, ...]` 计算而来，本模式则显式给出。
 
