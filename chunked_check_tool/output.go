@@ -67,7 +67,13 @@ type Output struct {
 	files []*os.File // root files only — per-owner files are owned by their goroutines
 }
 
-func NewOutput(cfg *Config, bucket string) (*Output, error) {
+// NewOutput builds the Output for list/check modes. listFileMode enables
+// the multipart result routing (corrupted_mp/mp_check_failed/ok_mp) that is
+// otherwise keyed on is_multipart_segment_check: list-file tasks always
+// carry explicit offsets, so their verification results must land in those
+// files even when the segment-check flag is off (it only governs offset
+// synthesis in bucket mode and is meaningless for list files).
+func NewOutput(cfg *Config, bucket string, listFileMode bool) (*Output, error) {
 	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
 		return nil, fmt.Errorf("mkdir output: %w", err)
 	}
@@ -76,7 +82,7 @@ func NewOutput(cfg *Config, bucket string) (*Output, error) {
 		chCap = 1024
 	}
 	isCheck := cfg.IsCheck
-	isMP := cfg.IsMultipartSegmentCheck
+	mpOutputs := cfg.IsMultipartSegmentCheck || listFileMode
 	format := cfg.ResultLineFormat
 	if format == "" {
 		format = "<bucket>|<key>"
@@ -98,10 +104,10 @@ func NewOutput(cfg *Config, bucket string) (*Output, error) {
 		checkFailedCh:             make(chan string, chCap),
 		mpCheckFailedCh:           make(chan string, chCap),
 		corruptedEnabled:          isCheck,
-		multipartAllEnabled:       isCheck && !isMP,
-		corruptedMultipartEnabled: isCheck && isMP,
-		multipartOkEnabled:        isCheck && isMP && cfg.IsMultipartSuccessLog,
-		mpCheckFailedEnabled:      isCheck && isMP,
+		multipartAllEnabled:       isCheck && !mpOutputs,
+		corruptedMultipartEnabled: isCheck && mpOutputs,
+		multipartOkEnabled:        isCheck && mpOutputs && cfg.IsMultipartSuccessLog,
+		mpCheckFailedEnabled:      isCheck && mpOutputs,
 		checkEnabled:              isCheck,
 		successEnabled:            isCheck && cfg.IsSuccessLog,
 	}

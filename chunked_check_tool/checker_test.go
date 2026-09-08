@@ -54,7 +54,7 @@ func TestChunkSigRegex(t *testing.T) {
 func TestCheckerHandleNormal(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg, "test-bkt")
+	out, _ := NewOutput(cfg, "test-bkt", false)
 	defer out.Close()
 	s := NewStats()
 	worker := &FakeS3{Body: []byte("normal object content here")}
@@ -66,7 +66,7 @@ func TestCheckerHandleNormal(t *testing.T) {
 func TestCheckerHandleCorrupted(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg, "test-bkt")
+	out, _ := NewOutput(cfg, "test-bkt", false)
 	defer out.Close()
 	s := NewStats()
 	body := []byte("1000;chunk-signature=0000000000000000000000000000000000000000000000000000000000000000\r\n")
@@ -81,7 +81,7 @@ func TestCheckerHandleCorrupted(t *testing.T) {
 func TestCheckerHandleMultipartSkipsRangeGet(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg, "test-bkt")
+	out, _ := NewOutput(cfg, "test-bkt", false)
 	defer out.Close()
 	s := NewStats()
 	called := false
@@ -103,7 +103,7 @@ func TestCheckerHandleMultipartSkipsRangeGet(t *testing.T) {
 func TestCheckerHandleRangeGetError(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg, "test-bkt")
+	out, _ := NewOutput(cfg, "test-bkt", false)
 	defer out.Close()
 	s := NewStats()
 	worker := &FakeS3{Err: context.DeadlineExceeded}
@@ -117,7 +117,7 @@ func TestCheckerHandleRangeGetError(t *testing.T) {
 func TestCheckerHandleEmptyObjectSkipsRangeGet(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg, "test-bkt")
+	out, _ := NewOutput(cfg, "test-bkt", false)
 	defer out.Close()
 	s := NewStats()
 	called := false
@@ -137,7 +137,7 @@ var errFake416 = errors.New("416 Range Not Satisfiable")
 func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
-	out, _ := NewOutput(cfg, "test-bkt")
+	out, _ := NewOutput(cfg, "test-bkt", false)
 	s := NewStats()
 	worker := &FakeS3{Err: minio.ErrorResponse{
 		Code:       "InvalidRange",
@@ -214,7 +214,7 @@ func multipartCfg(dir string, segSize int64) *Config {
 func TestCheckerMultipartSegmentCheckCorrupted(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg, "test-bkt")
+	out, _ := NewOutput(cfg, "test-bkt", false)
 	s := NewStats()
 	worker := &FakeS3{Body: chunkSigBody}
 	c := NewChecker(worker, out, s, cfg)
@@ -243,7 +243,7 @@ func TestCheckerMultipartSegmentCheckCorrupted(t *testing.T) {
 func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg, "test-bkt")
+	out, _ := NewOutput(cfg, "test-bkt", false)
 	s := NewStats()
 	worker := &FakeS3{Body: []byte("normal object body, no chunk signature here")}
 	c := NewChecker(worker, out, s, cfg)
@@ -273,7 +273,7 @@ func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg, "test-bkt")
+	out, _ := NewOutput(cfg, "test-bkt", false)
 	s := NewStats()
 	worker := &FakeS3{Err: context.DeadlineExceeded}
 	c := NewChecker(worker, out, s, cfg)
@@ -305,7 +305,7 @@ func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: false, MultipartSegmentSize: 5 * 1024 * 1024}
-	out, _ := NewOutput(cfg, "test-bkt")
+	out, _ := NewOutput(cfg, "test-bkt", false)
 	s := NewStats()
 	worker := &FakeS3{Body: chunkSigBody} // would match if we checked — but we don't
 	c := NewChecker(worker, out, s, cfg)
@@ -335,7 +335,7 @@ func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 func TestCheckerMultipartSegmentCheckSecondSegmentMatches(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg, "test-bkt")
+	out, _ := NewOutput(cfg, "test-bkt", false)
 	defer out.Close()
 	s := NewStats()
 	cleanBody := []byte("clean segment, no signature")

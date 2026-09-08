@@ -144,7 +144,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter, listFile,
 	}
 
 	pool := NewNodePool(cfg)
-	out, err := NewOutput(cfg, bucket)
+	out, err := NewOutput(cfg, bucket, listFile != "")
 	if err != nil {
 		return fmt.Errorf("output: %w", err)
 	}

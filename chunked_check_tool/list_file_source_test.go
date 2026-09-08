@@ -136,7 +136,7 @@ func TestParseListFileLineSuccessFields(t *testing.T) {
 func TestListFileSourceRunEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
-	out, err := NewOutput(cfg, "mybucket")
+	out, err := NewOutput(cfg, "mybucket", false)
 	if err != nil {
 		t.Fatal(err)
 	}

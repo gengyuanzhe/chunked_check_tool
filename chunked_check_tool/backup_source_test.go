@@ -142,7 +142,7 @@ func TestParseBackupFileLine(t *testing.T) {
 func TestBackupSourceRunEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
-	out, err := NewOutput(cfg, "mybucket")
+	out, err := NewOutput(cfg, "mybucket", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestBackupSourceRunEndToEnd(t *testing.T) {
 func TestBackupSourceRunCancel(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, err := NewOutput(cfg, "mybucket")
+	out, err := NewOutput(cfg, "mybucket", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestBackupSourceRunCancel(t *testing.T) {
 func TestBackupSourceRunOpenError(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, err := NewOutput(cfg, "mybucket")
+	out, err := NewOutput(cfg, "mybucket", false)
 	if err != nil {
 		t.Fatal(err)
 	}

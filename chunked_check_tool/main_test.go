@@ -120,3 +120,47 @@ func TestRunListFileDispatch(t *testing.T) {
 		t.Errorf("list_failed.txt = %q, want substring %q", string(content), "wrongbucket|k|1|0")
 	}
 }
+
+// TestRunListFileMultipartResultsEndToEnd — list-file mode must land
+// verification results in the multipart result files even with
+// is_multipart_segment_check=false (offsets come from the list file).
+// OwnerID is empty for list-file tasks, so results route to _unknown/.
+func TestRunListFileMultipartResultsEndToEnd(t *testing.T) {
+	f := newFakeBackupS3Server(t)
+	f.corruptKeys["mp1"] = true
+	host := strings.TrimPrefix(f.srv.URL, "http://")
+	dir := t.TempDir()
+	cfg := &Config{
+		Endpoints:        []string{host},
+		Scheme:           "http",
+		AK:               "t",
+		SK:               "t",
+		OutputDir:        dir,
+		IsCheck:          true,
+		IsMultipartSuccessLog: true,
+		ProgressInterval: 1000,
+		CheckConcurrency: 2,
+		ListConcurrency:  2,
+		ListAPIVersion:   2,
+	}
+	listPath := filepath.Join(dir, "list.txt")
+	content := "srcbucket|mp1|1|0\n" +
+		"srcbucket|mpclean|1|0\n" +
+		"srcbucket|bad|1|100\n"
+	if err := os.WriteFile(listPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := run(context.Background(), cfg, "srcbucket", "", "", listPath, "", &buf); err != nil {
+		t.Fatalf("run returned err: %v", err)
+	}
+
+	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "srcbucket|mp1\n")
+	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "srcbucket|mpclean\n")
+	assertFileContent(t, dir, "list_failed.txt", "srcbucket|bad|1|100\n")
+
+	out := buf.String()
+	if !strings.Contains(out, "corrupt_mp: 1") || !strings.Contains(out, "ok_mp: 1") {
+		t.Errorf("summary missing mp counts\nfull:\n%s", out)
+	}
+}
