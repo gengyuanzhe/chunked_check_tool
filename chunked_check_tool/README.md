@@ -27,6 +27,7 @@ GOOS=linux GOARCH=arm64 go build -o chunked_check_tool-linux-arm64 .
 ./chunked_check_tool -c config.yaml -bkt mybucket
 ./chunked_check_tool -c config.yaml -bkt mybucket -prefix data/2026/
 ./chunked_check_tool -c config.yaml -bkt mybucket -prefix data/2026/ -nextmarker data/2026/file_005
+./chunked_check_tool -c config.yaml -bkt mybucket -list-file list.txt   # 跳过 S3 列举，按行校验
 ```
 
 
@@ -38,6 +39,7 @@ GOOS=linux GOARCH=arm64 go build -o chunked_check_tool-linux-arm64 .
 | `-bkt` | 是 | 桶名                                                               |
 | `-prefix` | 否 | 列举前缀，默认空（整个桶）                                         |
 | `-nextmarker` | 否 | start-after key，跳过该 key 之前的对象；**仅 list_type 为1时生效** |
+| `-list-file` | 否 | 列表文件路径；设置后跳过 S3 列举，直接读文件按行校验（见 `## list-file 模式`） |
 
 ## 配置
 
@@ -85,6 +87,20 @@ result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；0 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；0 走默认 |
 | `result_line_format` | `<bucket>\|<key>` | 结果文件每行格式，支持 `<bucket>`/`<key>`/`<owner>` 占位符；只影响 per-owner 结果文件，处理文件始终只存 key/prefix |
+
+## list-file 模式
+
+`-list-file <path>` 跳过 S3 列举，直接读文件按行校验。每行格式：
+
+    bkt|key|partcnt|offset0|offset1|...
+
+- `bkt` 必须等于 `-bkt`
+- `partcnt` 个 offset，`offset0=0`，严格递增
+- 坏行（格式错误/bkt 不匹配）写入 `list_failed.txt` 并跳过
+- 必须 `is_check=true`（文件即列表，无需列举）
+- 此模式下 `list_all` 显示 0（不经过 S3 LIST），`list_failed` 仅统计坏行
+
+固定分段校验（`is_multipart_segment_check=true` + `multipart_segment_size`）是本模式的特殊情况：offsets 由 `[0, seg, 2*seg, ...]` 计算而来，本模式则显式给出。
 
 ## 输出
 

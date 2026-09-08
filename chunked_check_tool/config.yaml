@@ -1,5 +1,7 @@
 # chunked_check_tool 配置模板
-# 用法: ./chunked_check_tool -c config.yaml -bkt <bucket> [-prefix <p>] [-nextmarker <key>]
+# 用法:
+#   ./chunked_check_tool -c config.yaml -bkt <bucket> [-prefix <p>] [-nextmarker <key>]
+#   ./chunked_check_tool -c config.yaml -bkt <bucket> -list-file <path>   # 跳过 S3 列举
 
 # S3 节点 ip:port 列表，至少 1 个；多个节点会做故障轮询隔离
 endpoints:
