@@ -98,6 +98,7 @@ func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, start
 	fmt.Fprintf(w, "    list_concurrency: %d\n", cfg.ListConcurrency)
 	fmt.Fprintf(w, "    check_concurrency: %d\n", cfg.CheckConcurrency)
 	fmt.Fprintf(w, "    output_dir: %s\n", cfg.OutputDir)
+	fmt.Fprintf(w, "    output_dir_timestamp: %t\n", cfg.OutputDirTimestamp)
 	fmt.Fprintf(w, "    is_check: %t\n", cfg.IsCheck)
 	fmt.Fprintf(w, "    is_success_log: %t\n", cfg.IsSuccessLog)
 	fmt.Fprintf(w, "    is_multipart_segment_check: %t\n", cfg.IsMultipartSegmentCheck)

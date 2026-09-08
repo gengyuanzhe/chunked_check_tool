@@ -31,6 +31,11 @@ check_concurrency: 16
 # 输出目录（自动创建，所有文件 append 模式，支持断点续跑）
 output_dir: ./out
 
+# 是否在 output_dir 名字后追加 _YYYYMMDD_HHMMSS 后缀（./out → ./out_20260908_175201），
+# 每次运行落到独立目录，结果互不混写。默认 true；false=固定使用 output_dir 原样路径。
+# 断点续跑场景请显式设为 false，否则每次重启都会进入新目录。
+output_dir_timestamp: true
+
 # true=列举+校验；false=仅列举（不校验普通对象，不写对象文件，不创建 owner 目录，仅写 list_failed.*）
 is_check: true
 

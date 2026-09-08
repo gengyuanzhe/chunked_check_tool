@@ -59,6 +59,7 @@ list_api_version: 1                 # 1=ListObjects V1 (marker 分页, 默认), 
 list_concurrency: 8                 # 列举并发度
 check_concurrency: 16               # 检查并发度
 output_dir: ./out                   # 输出目录
+output_dir_timestamp: true         # true=output_dir 追加 _YYYYMMDD_HHMMSS 后缀（./out → ./out_20260908_175201）隔离每次运行; false=固定用 output_dir
 is_check: true                      # true=列举+校验, false=仅列举
 is_success_log: false               # 是否记录正常普通对象到 <ownerID>/ok_objects.txt
 is_multipart_segment_check: false   # 是否按固定 part size 对多段对象做分段损坏检查
@@ -81,6 +82,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `list_concurrency` | `8` | 列举 worker 数（Mode 3 为信号量容量） |
 | `check_concurrency` | `16` | 校验 worker 数 |
 | `output_dir` | `.` | 输出目录（自动创建） |
+| `output_dir_timestamp` | `true` | `true` 时在目录名后追加 `<YYYYMMDD_HHMMSS>` 后缀（`./out` → `./out_20260908_175201`），每次运行互不混写；`false` 时固定使用 `output_dir` 原样路径（断点续跑请显式设 `false`，否则每次重启进入新目录） |
 | `is_check` | `true` | `false` 时只列举不校验，不写对象文件，仅写 `list_failed.*` |
 | `is_success_log` | `false` | `true` 时把正常普通对象 key 写入 `<ownerID>/ok_objects.txt` |
 | `is_multipart_segment_check` | `false` | `true` 时按固定 part size（`multipart_segment_size`）对多段对象做分段损坏检查；`true` 时必须配 `multipart_segment_size > 0`，否则启动报错 |
@@ -138,7 +140,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 
 ## 输出
 
-全部以 append 模式打开。目录结构：
+全部以 append 模式打开。目录结构（`output_dir_timestamp=true`（默认）时目录名为 `<output_dir>_<YYYYMMDD_HHMMSS>`，如 `./out` → `./out_20260908_175201`；`false` 时即 `output_dir` 本身）：
 
 ```
 <output_dir>/

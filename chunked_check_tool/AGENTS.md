@@ -90,6 +90,7 @@
 | `list_concurrency` | `8` | 列举并发度 |
 | `check_concurrency` | `16` | 校验并发度 |
 | `output_dir` | `.` | 输出目录 |
+| `output_dir_timestamp` | `true` | true=目录名追加 `<YYYYMMDD_HHMMSS>` 后缀（`./out` → `./out_20260908_175201`）隔离每次运行；false=固定使用 output_dir 原样路径（断点续跑需显式 false）。后缀在 `LoadConfig` 内追加（尾部 `/` 先裁剪），下游全部用改写后的 `cfg.OutputDir` |
 | `is_check` | `true` | true=列举+校验；false=仅列举（不校验普通对象，不写对象文件，不创建 owner 目录，仅写 list_failed.*） |
 | `is_success_log` | `false` | 是否记录正常普通对象到 `<ownerID>/ok_objects.txt` |
 | `is_multipart_segment_check` | `false` | 是否按固定 part size（`multipart_segment_size`）对多段对象做分段损坏检查；`true` 时必须配 `multipart_segment_size > 0`，否则启动报错中止 |
@@ -131,7 +132,7 @@ per-owner 结果文件每行按 `result_line_format` 配置渲染（默认 `<buc
 
 ### 启动输出 / run.log
 
-run.log 是进程运行日志，路径为`<output_dir>/run.log`。`main` 启动时：先 `MkdirAll(output_dir)`，再 append 打开 `<output_dir>/run.log`，构造 `mwOut=MultiWriter(os.Stdout, runLog)` 与 `mwErr=MultiWriter(os.Stderr, runLog)`，`log.SetOutput(mwErr)`（nodepool 告警 / `log.Fatalf` 进 run.log），进度行与 summary 走 `mwOut`。随后打印完整配置快照（ak/sk 屏蔽为 `***`）到 `mwOut`。run.log 全程 append，断点续跑不覆盖。
+run.log 是进程运行日志，路径为`<output_dir>/run.log`。`output_dir_timestamp=true`（默认）时 `LoadConfig` 已先把 `output_dir` 改写为 `<output_dir>_<YYYYMMDD_HHMMSS>`，下述路径均落在该带后缀目录内。`main` 启动时：先 `MkdirAll(output_dir)`，再 append 打开 `<output_dir>/run.log`，构造 `mwOut=MultiWriter(os.Stdout, runLog)` 与 `mwErr=MultiWriter(os.Stderr, runLog)`，`log.SetOutput(mwErr)`（nodepool 告警 / `log.Fatalf` 进 run.log），进度行与 summary 走 `mwOut`。随后打印完整配置快照（ak/sk 屏蔽为 `***`，含 `output_dir_timestamp`）到 `mwOut`。run.log 全程 append，断点续跑不覆盖。
 
 ## 7. 编译与测试
 

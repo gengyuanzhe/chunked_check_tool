@@ -110,8 +110,9 @@ func TestRunListFileDispatch(t *testing.T) {
 	}
 
 	// The malformed line must be persisted to list_failed.txt for resumable
-	// debugging.
-	listFailedPath := filepath.Join(dir, "list_failed.txt")
+	// debugging. cfg.OutputDir carries the timestamp suffix (default-on
+	// output_dir_timestamp), which run() created.
+	listFailedPath := filepath.Join(cfg.OutputDir, "list_failed.txt")
 	content, err := os.ReadFile(listFailedPath)
 	if err != nil {
 		t.Fatalf("read list_failed.txt: %v", err)

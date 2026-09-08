@@ -276,11 +276,12 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 		t.Errorf("stdout missing backup summary line\nfull:\n%s", out)
 	}
 
-	// Local result files.
-	assertFileContent(t, dir, "backup_ok.txt", "reg1\nmp1\n")
-	assertFileContent(t, dir, "backup_skipped_clean.txt", "mpclean\n")
-	assertFileContent(t, dir, "mismatch.txt", "srcbucket|mm1\n")
-	assertFileContent(t, dir, "list_failed.txt", "srcbucket|bad|1|100\n")
+	// Local result files. cfg.OutputDir carries the timestamp suffix
+	// (default-on output_dir_timestamp), which runBackup created.
+	assertFileContent(t, cfg.OutputDir, "backup_ok.txt", "reg1\nmp1\n")
+	assertFileContent(t, cfg.OutputDir, "backup_skipped_clean.txt", "mpclean\n")
+	assertFileContent(t, cfg.OutputDir, "mismatch.txt", "srcbucket|mm1\n")
+	assertFileContent(t, cfg.OutputDir, "list_failed.txt", "srcbucket|bad|1|100\n")
 
 	// Remote side: the list archive landed under .backup_lists/ with a
 	// timestamp suffix.

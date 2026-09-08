@@ -3,7 +3,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadConfig_DefaultsAndParse(t *testing.T) {
@@ -173,6 +175,116 @@ func TestLoadConfig_BackupBucketDefaultEmpty(t *testing.T) {
 	if cfg.BackupBucket != "" {
 		t.Errorf("backup_bucket default = %q, want empty (unset)", cfg.BackupBucket)
 	}
+}
+
+// assertStampedOutputDir checks that cfg.OutputDir is base + "_" + a
+// YYYYMMDD_HHMMSS stamp (8 digits, underscore, 6 digits).
+func assertStampedOutputDir(t *testing.T, cfg *Config, base string) {
+	t.Helper()
+	stampLen := len(time.Now().Format("20060102_150405"))
+	if !strings.HasPrefix(cfg.OutputDir, base+"_") {
+		t.Errorf("output_dir = %q, want prefix %q", cfg.OutputDir, base+"_")
+		return
+	}
+	stamp := strings.TrimPrefix(cfg.OutputDir, base+"_")
+	if len(stamp) != stampLen {
+		t.Errorf("output_dir = %q, stamp %q is not %d chars (YYYYMMDD_HHMMSS)", cfg.OutputDir, stamp, stampLen)
+	}
+}
+
+// TestLoadConfig_OutputDirTimestampDefaultOn — the key is absent, so the
+// default (true) applies: output_dir gets a sibling-suffix stamp
+// (./out → ./out_<YYYYMMDD_HHMMSS>) so repeated runs land in separate
+// directories instead of appending into the same result files.
+func TestLoadConfig_OutputDirTimestampDefaultOn(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\noutput_dir: ./out\n")
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OutputDirTimestamp {
+		t.Errorf("output_dir_timestamp default = false, want true")
+	}
+	assertStampedOutputDir(t, cfg, "./out")
+}
+
+// TestLoadConfig_OutputDirTimestampExplicitFalse — an explicit false uses
+// output_dir verbatim (fixed dir, resume-friendly append mode). The raw YAML
+// value passes through untouched — no path cleaning.
+func TestLoadConfig_OutputDirTimestampExplicitFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\noutput_dir: ./out\noutput_dir_timestamp: false\n")
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OutputDirTimestamp {
+		t.Errorf("output_dir_timestamp = true, want false")
+	}
+	if cfg.OutputDir != "./out" {
+		t.Errorf("output_dir = %q, want %q", cfg.OutputDir, "./out")
+	}
+}
+
+// TestLoadConfig_OutputDirTimestampTrailingSlash — ./out/ must stamp to
+// ./out_<stamp> (trailing separator trimmed), NOT become ./out/_<stamp>
+// which would be a subdir inside ./out.
+func TestLoadConfig_OutputDirTimestampTrailingSlash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\noutput_dir: ./out/\n")
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStampedOutputDir(t, cfg, "./out")
+}
+
+// TestLoadConfig_OutputDirTimestampEmptyDir — no output_dir configured: the
+// "." default is stamped too (._<stamp> in the CWD).
+func TestLoadConfig_OutputDirTimestampEmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\n")
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStampedOutputDir(t, cfg, ".")
+}
+
+// TestLoadConfig_OutputDirTimestampExplicitTrue — explicit true behaves the
+// same as the default (sibling-suffix stamp).
+func TestLoadConfig_OutputDirTimestampExplicitTrue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\noutput_dir: /tmp/e2e_out\noutput_dir_timestamp: true\n")
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OutputDirTimestamp {
+		t.Errorf("output_dir_timestamp = false, want true")
+	}
+	assertStampedOutputDir(t, cfg, "/tmp/e2e_out")
 }
 
 // TestLoadConfig_SegmentCheckWithoutSize — is_multipart_segment_check=true

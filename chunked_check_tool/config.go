@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -17,6 +19,7 @@ type Config struct {
 	ListConcurrency         int      `yaml:"list_concurrency"`
 	CheckConcurrency        int      `yaml:"check_concurrency"`
 	OutputDir               string   `yaml:"output_dir"`
+	OutputDirTimestamp      bool     `yaml:"output_dir_timestamp"`
 	IsCheck                 bool     `yaml:"is_check"`
 	IsSuccessLog            bool     `yaml:"is_success_log"`
 	IsMultipartSegmentCheck bool     `yaml:"is_multipart_segment_check"`
@@ -35,6 +38,11 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	var cfg Config
+	// Default ON: append a timestamp suffix to output_dir each run unless the
+	// user explicitly sets output_dir_timestamp: false. yaml.Unmarshal only
+	// overwrites fields present in the YAML doc, so pre-setting true here
+	// means an absent key yields true while an explicit false still wins.
+	cfg.OutputDirTimestamp = true
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
@@ -46,6 +54,13 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.OutputDir == "" {
 		cfg.OutputDir = "."
+	}
+	if cfg.OutputDirTimestamp {
+		// Sibling-suffix form: ./out → ./out_20260908_175201. Every run gets
+		// its own directory so repeated runs never append into the same files
+		// and mix results. Trailing separators are trimmed first — ./out/
+		// must not become a subdir named "_<stamp>" inside ./out.
+		cfg.OutputDir = strings.TrimRight(cfg.OutputDir, "/\\") + "_" + time.Now().Format("20060102_150405")
 	}
 	if cfg.ListConcurrency <= 0 {
 		cfg.ListConcurrency = 8
