@@ -127,21 +127,22 @@ func TestRunListFileDispatch(t *testing.T) {
 // OwnerID is empty for list-file tasks, so results route to _unknown/.
 func TestRunListFileMultipartResultsEndToEnd(t *testing.T) {
 	f := newFakeBackupS3Server(t)
-	f.corruptKeys["mp1"] = true
+	f.objects["mp1"] = fakeBackupObject{ETag: "0123456789abcdef0123456789abcdef-1", Content: []byte(corruptBody)}
+	f.objects["mpclean"] = fakeBackupObject{ETag: "0123456789abcdef0123456789abcdef-1", Content: []byte("clean multipart content")}
 	host := strings.TrimPrefix(f.srv.URL, "http://")
 	dir := t.TempDir()
 	cfg := &Config{
-		Endpoints:        []string{host},
-		Scheme:           "http",
-		AK:               "t",
-		SK:               "t",
-		OutputDir:        dir,
-		IsCheck:          true,
+		Endpoints:             []string{host},
+		Scheme:                "http",
+		AK:                    "t",
+		SK:                    "t",
+		OutputDir:             dir,
+		IsCheck:               true,
 		IsMultipartSuccessLog: true,
-		ProgressInterval: 1000,
-		CheckConcurrency: 2,
-		ListConcurrency:  2,
-		ListAPIVersion:   2,
+		ProgressInterval:      1000,
+		CheckConcurrency:      2,
+		ListConcurrency:       2,
+		ListAPIVersion:        2,
 	}
 	listPath := filepath.Join(dir, "list.txt")
 	content := "srcbucket|mp1|1|0\n" +

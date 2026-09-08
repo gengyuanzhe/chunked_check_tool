@@ -3,24 +3,31 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"strings"
 )
 
 // BackupChecker processes one BackupTask: HEAD the object, validate the
 // input line's type against the HEAD ETag, verify multipart corruption
-// (reusing the checker's chunk-signature probe), and copy the object into
-// the configured backup bucket.
+// (reusing the checker's chunk-signature probe), then relay the object
+// into the configured backup bucket (download → re-upload) and verify the
+// destination ETag against the source.
 //
 // Routing:
 //   - HEAD fails                         → backup_failed (stage=head)
-//   - line type != HEAD type             → mismatch (raw line), no copy
-//   - regular line                       → copy directly (input list is a
-//                                         prior corrupted_objects.txt —
-//                                         already known corrupt, no re-probe)
+//   - line type != HEAD type             → mismatch (raw line), no relay
+//   - regular line                       → relay directly (input list is a
+//     prior corrupted_objects.txt —
+//     already known corrupt, no re-probe)
 //   - multipart line, any offset matches
-//     the chunk signature                → copy
+//     the chunk signature                → relay
 //   - multipart line, GET error          → backup_failed (stage=verify)
-//   - multipart line, all offsets clean  → backup_skipped_clean, no copy
-//   - copy fails                         → backup_failed (stage=copy)
+//   - multipart line, all offsets clean  → backup_skipped_clean, no relay
+//   - relay error                        → backup_failed (stage=upload)
+//   - dst ETag != src ETag               → backup_failed (stage=etag);
+//     the bad copy stays in the backup
+//     bucket as evidence
 type BackupChecker struct {
 	worker S3API
 	out    *Output
@@ -33,7 +40,7 @@ func NewBackupChecker(worker S3API, out *Output, stats *Stats, cfg *Config) *Bac
 }
 
 func (c *BackupChecker) Handle(task BackupTask) {
-	etag, err := c.worker.HeadObject(context.Background(), task.Key)
+	etag, size, err := c.worker.HeadObject(context.Background(), task.Key)
 	if err != nil {
 		c.fail(task.Key, "head", err)
 		return
@@ -46,7 +53,7 @@ func (c *BackupChecker) Handle(task BackupTask) {
 	if task.IsMultipart && !c.verifyCorrupt(task) {
 		return
 	}
-	c.backup(task)
+	c.backup(task, etag, size)
 }
 
 // verifyCorrupt probes each offset with a 128-byte RangeGetAt; true means a
@@ -69,13 +76,88 @@ func (c *BackupChecker) verifyCorrupt(task BackupTask) bool {
 	return false
 }
 
-func (c *BackupChecker) backup(task BackupTask) {
-	if err := c.worker.CopyObject(context.Background(), task.Key, c.cfg.BackupBucket, task.Key); err != nil {
-		c.fail(task.Key, "copy", err)
+// backup relays the object and verifies the destination ETag. The ETag
+// comparison is meaningful because multipart relays re-upload parts split
+// exactly at the input line's original offsets: a byte-faithful relay
+// then reproduces the source's md5-of-part-md5s-N ETag (regular objects:
+// plain MD5).
+func (c *BackupChecker) backup(task BackupTask, srcETag string, size int64) {
+	var dstETag string
+	var err error
+	if task.IsMultipart {
+		dstETag, err = c.relayMultipart(task, size)
+	} else {
+		dstETag, err = c.relayRegular(task.Key, size)
+	}
+	if err != nil {
+		c.fail(task.Key, "upload", err)
+		return
+	}
+	if dstETag != srcETag {
+		c.fail(task.Key, "etag", fmt.Errorf("backup bucket etag %q != source etag %q", dstETag, srcETag))
 		return
 	}
 	c.out.WriteBackupOk(task.Key)
 	c.stats.IncrBackupOk()
+}
+
+// relayRegular streams the whole object through one PUT. size==0 skips the
+// download (empty body).
+func (c *BackupChecker) relayRegular(key string, size int64) (string, error) {
+	var r io.Reader = strings.NewReader("")
+	if size > 0 {
+		rc, err := c.worker.DownloadRange(context.Background(), key, 0, size)
+		if err != nil {
+			return "", err
+		}
+		defer rc.Close()
+		r = rc
+	}
+	return c.worker.PutObjectStream(context.Background(), c.cfg.BackupBucket, key, r, size)
+}
+
+// relayMultipart re-uploads the object as multipart parts split at the
+// input line's offsets: part i+1 covers [offset_i, offset_{i+1}), the last
+// part runs to the object end. Parts are streamed (download reader piped
+// straight into the part upload — no per-part buffering). Any failure
+// aborts the in-progress upload so no partial object lingers.
+func (c *BackupChecker) relayMultipart(task BackupTask, size int64) (string, error) {
+	ctx := context.Background()
+	dst := c.cfg.BackupBucket
+	uploadID, err := c.worker.CreateMultipart(ctx, dst, task.Key)
+	if err != nil {
+		return "", err
+	}
+	parts := make([]UploadedPart, 0, len(task.Offsets))
+	for i, off := range task.Offsets {
+		end := size
+		if i+1 < len(task.Offsets) {
+			end = task.Offsets[i+1]
+		}
+		length := end - off
+		if length <= 0 {
+			c.worker.AbortMultipart(ctx, dst, task.Key, uploadID)
+			return "", fmt.Errorf("part %d at offset %d has non-positive length %d (object size %d)", i+1, off, length, size)
+		}
+		rc, err := c.worker.DownloadRange(ctx, task.Key, off, length)
+		if err != nil {
+			c.worker.AbortMultipart(ctx, dst, task.Key, uploadID)
+			return "", err
+		}
+		partETag, err := c.worker.UploadPart(ctx, dst, task.Key, uploadID, i+1, rc, length)
+		rc.Close()
+		if err != nil {
+			c.worker.AbortMultipart(ctx, dst, task.Key, uploadID)
+			return "", err
+		}
+		parts = append(parts, UploadedPart{PartNumber: i + 1, ETag: partETag})
+	}
+	dstETag, err := c.worker.CompleteMultipart(ctx, dst, task.Key, uploadID, parts)
+	if err != nil {
+		c.worker.AbortMultipart(ctx, dst, task.Key, uploadID)
+		return "", err
+	}
+	return dstETag, nil
 }
 
 func (c *BackupChecker) fail(key, stage string, err error) {

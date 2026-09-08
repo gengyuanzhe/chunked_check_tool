@@ -438,7 +438,7 @@ func uploadBackupList(ctx context.Context, pool *NodePool, cfg *Config, bucket, 
 	w := newWorker(pool, cfg.CheckConcurrency, cfg, bucket, NewStats())
 	base := strings.TrimSuffix(filepath.Base(backupFile), ".txt")
 	listKey := fmt.Sprintf(".backup_lists/%s_%s.txt", base, time.Now().Format("20060102_150405"))
-	if err := w.PutObject(ctx, cfg.BackupBucket, listKey, bytes.NewReader(data), int64(len(data))); err != nil {
+	if _, err := w.PutObject(ctx, cfg.BackupBucket, listKey, bytes.NewReader(data), int64(len(data))); err != nil {
 		return fmt.Errorf("upload backup list to %s/%s: %w", cfg.BackupBucket, listKey, err)
 	}
 	return nil
