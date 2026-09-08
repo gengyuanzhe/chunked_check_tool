@@ -29,7 +29,7 @@ func TestListerMode2BFSPrefixes(t *testing.T) {
 	q := NewQueue()
 	lister := NewLister(q, out, stats, cfg)
 
-	objCh := make(chan ObjectInfo, 8)
+	objCh := make(chan VerifyTask, 8)
 	// Seed bumps inflight before pushing so the first worker's Add(-1) does
 	// not race ahead to zero before the prefix is processed.
 	lister.Seed("root/")
@@ -45,11 +45,15 @@ func TestListerMode2BFSPrefixes(t *testing.T) {
 	}()
 
 	got := []string{}
-	for o := range objCh {
-		got = append(got, o.Key)
+	for t := range objCh {
+		got = append(got, t.Key)
 	}
 	if len(got) != 2 {
 		t.Errorf("got %d objects: %v", len(got), got)
+	}
+	// Check mode → lister bumps listed_obj before pushing. 2 normal objects.
+	if got := stats.Snapshot().ListedObjects; got != 2 {
+		t.Errorf("list_obj=%d want 2 (lister bumps in check mode)", got)
 	}
 }
 
@@ -85,7 +89,7 @@ func TestListerMode2CommonPrefixesOnlyPage(t *testing.T) {
 	q := NewQueue()
 	lister := NewLister(q, out, stats, cfg)
 
-	objCh := make(chan ObjectInfo, 16)
+	objCh := make(chan VerifyTask, 16)
 	lister.Seed("root/")
 
 	var wg sync.WaitGroup
@@ -97,8 +101,8 @@ func TestListerMode2CommonPrefixesOnlyPage(t *testing.T) {
 	}()
 
 	got := map[string]bool{}
-	for o := range objCh {
-		got[o.Key] = true
+	for t := range objCh {
+		got[t.Key] = true
 	}
 	want := []string{"root/a/1", "root/b/2", "root/c/3"}
 	for _, k := range want {
@@ -112,6 +116,10 @@ func TestListerMode2CommonPrefixesOnlyPage(t *testing.T) {
 	// Two LIST calls were made on "root/" (page1 + page2 via continuation token).
 	if fake.calls < 2 {
 		t.Errorf("root LIST calls = %d want >= 2", fake.calls)
+	}
+	// Check mode → lister bumps listed_obj before pushing. 3 normal objects.
+	if got := stats.Snapshot().ListedObjects; got != 3 {
+		t.Errorf("list_obj=%d want 3 (lister bumps in check mode)", got)
 	}
 }
 

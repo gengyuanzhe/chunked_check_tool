@@ -43,51 +43,51 @@ type VerifyTask struct {
 
 ```go
 func (c *Checker) verify(task VerifyTask) {
-    if len(task.Offsets) == 0 {
+    // multipart + 未开启 segcheck → 不探测，写 mp_all，不计 ok_mp
+    if task.IsMultipart && len(task.Offsets) == 0 {
         c.out.WriteMultipartAll(task.OwnerID, task.Key)
         return
     }
-    // ctx 用 context.Background()，与今天 Handle 内 RangeGet 调用一致
-    // （S3Client.RangeGetAt 内部自带 30s 超时 + 节点故障转移）。
-    for _, off := range task.Offsets {
-        body, err := c.worker.RangeGetAt(context.Background(), task.Key, off, 128)
-        if err != nil {
-            // 按 IsMultipart 路由 mp_check_failed / check_failed
-            return
-        }
-        if chunkSigRe.Match(body) {
-            // 按 IsMultipart 路由 corrupted_mp / corrupted
-            return
+    // normal：单次探测 offset 0（Offsets==nil 的隐式语义），不进循环、不分配切片
+    // multipart：遍历 Offsets 逐个探测
+    settled := false
+    if !task.IsMultipart {
+        settled = c.probeAndRoute(task, 0)
+    } else {
+        for _, off := range task.Offsets {
+            if c.probeAndRoute(task, off) { settled = true; break }
         }
     }
+    if settled { return }
     // 全部干净 → 按 IsMultipart 路由 ok_mp / ok_object
+}
+
+// probeAndRoute 做一次 128B RangeGet，按 IsMultipart 路由失败/损坏。
+// 返回 true 表示 task 已定性，调用方停止后续探测。normal 和 multipart 共享此路由。
+func (c *Checker) probeAndRoute(task VerifyTask, off int64) bool {
+    body, err := c.worker.RangeGetAt(context.Background(), task.Key, off, 128)
+    if err != nil {
+        // 按 IsMultipart 路由 mp_check_failed / check_failed
+        return true
+    }
+    if chunkSigRe.Match(body) {
+        // 按 IsMultipart 路由 corrupted_mp / corrupted
+        return true
+    }
+    return false
 }
 ```
 
 等价性：
-- 原 normal 单段 = `VerifyTask{IsMultipart:false, Offsets:[]int64{0}}`
+- 原 normal 单段 = `VerifyTask{IsMultipart:false, Offsets:nil}`（verify 单次探测 offset 0）
 - 原固定分段 = `VerifyTask{IsMultipart:true, Offsets:[0,seg,2seg,...]}`
 - 新列表 offset = `VerifyTask{IsMultipart:true, Offsets:[来自文件]}`
 
-`Checker.Handle` 改签名为 `Handle(task VerifyTask)`，仅做参数透传与 localCounter 自增。
+`Checker.Handle` 改签名为 `Handle(task VerifyTask)`，仅做参数透传、size==0 normal 短路、与 localCounter 自增。
 
-### 2.3 共享 [1]int64{0} 优化
+### 2.3 normal 路径无切片
 
-normal 路径每对象分配 1 元素切片是热点。定义包级共享变量：
-
-```go
-var normalOffsets = [1]int64{0}
-
-func resolveOffsets(obj ObjectInfo, cfg *Config) VerifyTask {
-    if isNormalETag(obj.ETag) {
-        return VerifyTask{Key: obj.Key, OwnerID: obj.OwnerID, ETag: obj.ETag, Size: obj.Size,
-            IsMultipart: false, Offsets: normalOffsets[:]}
-    }
-    ...
-}
-```
-
-注意：`verify` 只读 `Offsets`，不写，共享切片安全。固定分段路径每对象仍分配（数量依赖 Size，无法共享），按需保留。
+normal 对象 `Offsets == nil`，`verify()` 对 `!IsMultipart` 分支直接调 `probeAndRoute(task, 0)`——不构造切片、不进循环、零分配。比"共享 `normalOffsets` 包级变量"更直白，且不需要任何共享状态。固定分段路径每对象仍分配 `ceil(Size/seg)` 长度切片——可接受（段数远小于对象数；后续若需优化可池化，不在本 spec 范围）。
 
 ## 3. 输入源抽象
 
@@ -143,7 +143,7 @@ type InputSource interface {
 
 | 文件 | 改动 |
 |---|---|
-| `verify_task.go`（新） | `VerifyTask` 类型；`resolveOffsets(obj, cfg)`；共享 `normalOffsets` |
+| `verify_task.go`（新） | `VerifyTask` 类型；`resolveOffsets(obj, cfg)` |
 | `input_source.go`（新） | `InputSource` 接口；`listFileSource`（行解析 + 校验 + Run）；`s3ListSource`（委托适配层） |
 | `checker.go` | `Handle` 签名 `ObjectInfo`→`VerifyTask`，调 `verify()`；删除 `checkMultipartSegments`（折叠进 `verify`）；`chunkSigRe`/`extract*` 不动 |
 | `lister.go` | objCh 元素类型 `ObjectInfo`→`VerifyTask`；收到 o 后调 `resolveOffsets` 转 task；list-only 模式计数逻辑保留 |
@@ -158,7 +158,7 @@ type InputSource interface {
 
 ## 5. 性能与兼容
 
-- 性能：normal 路径共享 `normalOffsets` 切片，零分配。固定分段路径每对象仍分配 ceil(Size/seg) 长度切片——可接受（段数远小于对象数；后续若需优化可池化，不在本 spec 范围）。`verify` 内核对 `Offsets` 只读，共享安全。
+- 性能：normal 路径 `Offsets=nil`，`verify()` 对 `!IsMultipart` 直接单次 `probeAndRoute(task, 0)`——零分配、无切片。固定分段路径每对象仍分配 ceil(Size/seg) 长度切片——可接受（段数远小于对象数；后续若需优化可池化，不在本 spec 范围）。
 - 兼容：`is_multipart_segment_check` / `multipart_segment_size` 配置语义不变，仅作用于 S3 列举源。`-list-file` 源忽略它们（offsets 来自文件）。
 - 断点续跑：list-file 源同样支持 append 模式输出。重跑需重新读整个文件（不记游标），与今天 S3 列举重跑语义一致。
 

@@ -22,16 +22,17 @@ import (
 // spawn. When all walks exit, Wait returns and the caller (main) closes
 // objCh so check workers drain and terminate.
 //
-// Counting rule mirrors Lister.processPrefix: in check mode the walker
-// does NOT bump listed counters — the checker does that once per consumed
-// object. In list-only mode the walker is the sole counter and bumps
-// IncrListedMp (non-32-hex ETags) or IncrListedObject (normal ETags) per object.
+// Counting rule mirrors Lister.processPrefix: the walker bumps listed
+// counters (IncrListedMp / IncrListedObject) exactly once per S3-listed
+// object in both modes — in check mode the bump happens before pushing
+// the VerifyTask to objCh (moved from Checker.Handle in Task 2), in
+// list-only mode the bump is the only effect since no check is performed.
 //
 // Failure handling: a ListPage error writes the prefix to list_failed,
 // bumps ListFailed, and returns — the subtree under that prefix is
 // abandoned, but sibling branches continue. Matches the per-prefix failure
 // semantics of Mode 2.
-func runRecursiveWalk(ctx context.Context, s3 S3API, prefix string, objCh chan<- ObjectInfo, out *Output, stats *Stats, cfg *Config, onObject func()) {
+func runRecursiveWalk(ctx context.Context, s3 S3API, prefix string, objCh chan<- VerifyTask, out *Output, stats *Stats, cfg *Config, onObject func()) {
 	sem := make(chan struct{}, cfg.ListConcurrency)
 	var wg sync.WaitGroup
 
@@ -56,14 +57,20 @@ func runRecursiveWalk(ctx context.Context, s3 S3API, prefix string, objCh chan<-
 			}
 			for _, o := range objs {
 				if cfg.IsCheck {
+					task := resolveOffsets(o, cfg)
+					if task.IsMultipart {
+						stats.IncrListedMp()
+					} else {
+						stats.IncrListedObject()
+					}
 					select {
-					case objCh <- o:
+					case objCh <- task:
 					case <-ctx.Done():
 						return
 					}
 				} else {
-					// list-only mode: no check performed, only listed
-					// counters move (no ok_* claims).
+					// list-only mode: classify via ETag directly so no
+					// per-object offset slice is allocated.
 					if !isNormalETag(o.ETag) {
 						stats.IncrListedMp()
 					} else {

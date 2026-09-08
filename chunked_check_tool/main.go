@@ -20,6 +20,7 @@ func main() {
 	bucket := flag.String("bkt", "", "bucket name")
 	prefix := flag.String("prefix", "", "list prefix")
 	startAfter := flag.String("nextmarker", "", "start-after key (Mode 1 root pagination only)")
+	listFile := flag.String("list-file", "", "list file path: lines of bkt|key|partcnt|offset0|offset1|... (bypasses S3 listing; requires is_check=true)")
 	flag.Parse()
 
 	if *cfgPath == "" || *bucket == "" {
@@ -30,6 +31,11 @@ func main() {
 	cfg, err := LoadConfig(*cfgPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
+	}
+
+	if *listFile != "" && !cfg.IsCheck {
+		fmt.Fprintln(os.Stderr, "usage: -list-file requires -c config with is_check=true")
+		os.Exit(2)
 	}
 
 	// Open run.log at output_dir root and tee stdout+stderr into it. We
@@ -48,12 +54,12 @@ func main() {
 	mwErr := io.MultiWriter(os.Stderr, runLog)
 	log.SetOutput(mwErr)
 
-	printConfig(mwOut, *cfgPath, cfg, *bucket, *prefix, *startAfter, runLogPath)
+	printConfig(mwOut, *cfgPath, cfg, *bucket, *prefix, *startAfter, *listFile, runLogPath)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := run(ctx, cfg, *bucket, *prefix, *startAfter, mwOut); err != nil {
+	if err := run(ctx, cfg, *bucket, *prefix, *startAfter, *listFile, mwOut); err != nil {
 		log.Fatalf("run: %v", err)
 	}
 }
@@ -62,12 +68,13 @@ func main() {
 // run.log (which persists) doesn't leak the secret; ak is shown in clear.
 // Each line is indented 4 spaces for readability against the progress/summary
 // lines that surround it in run.log.
-func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, startAfter, runLogPath string) {
+func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, startAfter, listFile, runLogPath string) {
 	fmt.Fprintf(w, "=== config ===\n")
 	fmt.Fprintf(w, "    config: %s\n", cfgPath)
 	fmt.Fprintf(w, "    bucket: %s\n", bucket)
 	fmt.Fprintf(w, "    prefix: %s\n", orEmpty(prefix))
 	fmt.Fprintf(w, "    nextmarker: %s\n", orEmpty(startAfter))
+	fmt.Fprintf(w, "    list_file: %s\n", orEmpty(listFile))
 	fmt.Fprintf(w, "    endpoints: %s\n", strings.Join(cfg.Endpoints, ", "))
 	fmt.Fprintf(w, "    scheme: %s\n", cfg.Scheme)
 	fmt.Fprintf(w, "    ak: %s\n", cfg.AK)
@@ -115,7 +122,7 @@ func orEmpty(s string) string {
 // which unblocks check workers. If nothing was seeded (e.g. Mode 1 root
 // pagination returned no sub-prefixes), the queue is closed explicitly so
 // list workers exit immediately.
-func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string, stdout io.Writer) error {
+func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter, listFile string, stdout io.Writer) error {
 	pool := NewNodePool(cfg)
 	out, err := NewOutput(cfg, bucket)
 	if err != nil {
@@ -133,7 +140,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string, st
 			objChCap = 2000
 		}
 	}
-	objCh := make(chan ObjectInfo, objChCap)
+	objCh := make(chan VerifyTask, objChCap)
 	q := NewQueue()
 	lister := NewLister(q, out, stats, cfg)
 	printer.SetQueueSnapshotProvider(func() QueueSnapshot {
@@ -168,6 +175,31 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string, st
 				}
 			}(workerS3, lc)
 		}
+	}
+
+	// List-file source: bypass S3 listing entirely. Read the file line-by-line,
+	// push VerifyTasks to objCh. No list workers, no queue, no Lister. is_check
+	// must be true (validated in main).
+	if listFile != "" {
+		listStart := time.Now()
+		src := newListFileSource(listFile, bucket, out, stats)
+		go func() {
+			if err := src.Run(ctx, objCh); err != nil {
+				log.Printf("list-file source: %v", err)
+			}
+			close(objCh)
+			stats.SetListDuration(time.Since(listStart))
+		}()
+		checkWg.Wait()
+		if err := out.Close(); err != nil {
+			log.Printf("output close: %v", err)
+		}
+		stats.SetTotalDuration(time.Since(start))
+		stats.PrintSummary(stdout, cfg.IsCheck)
+		// Return ctx.Err() (nil on happy path, context.Canceled on SIGINT)
+		// so main logs the interrupt and exits non-zero, matching the S3
+		// mode's seedErr path. Output and stats are flushed above first.
+		return ctx.Err()
 	}
 
 	// Spawn list workers. They block on the queue until seeds arrive.
@@ -210,7 +242,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter string, st
 			for _, o := range objs {
 				if cfg.IsCheck {
 					select {
-					case objCh <- o:
+					case objCh <- resolveOffsets(o, cfg):
 					case <-ctx.Done():
 						seedErr = ctx.Err()
 						break

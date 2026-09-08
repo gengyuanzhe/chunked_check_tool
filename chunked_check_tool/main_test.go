@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -44,7 +45,7 @@ func TestRunEndToEnd_smoke(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var buf bytes.Buffer
-	if err := run(ctx, cfg, os.Getenv("S3_BUCKET"), os.Getenv("S3_PREFIX"), "", &buf); err != nil {
+	if err := run(ctx, cfg, os.Getenv("S3_BUCKET"), os.Getenv("S3_PREFIX"), "", "", &buf); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -54,4 +55,68 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// TestRunListFileDispatch exercises the list-file dispatch branch in run()
+// (main.go: close→wait→summary→return). It uses a list file containing a
+// single malformed line (bucket mismatch), which parseListFileLine rejects
+// before any S3 GET is issued, so no real endpoint is contacted. The
+// endpoint 127.0.0.1:1 is a placeholder — minio client construction is lazy
+// (no dial), and check workers receive no tasks because objCh is closed
+// immediately after the list-file source rejects the only line.
+func TestRunListFileDispatch(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "cfg.yaml")
+	cfgContent := "endpoints:\n  - 127.0.0.1:1\n" +
+		"scheme: http\n" +
+		"ak: test\n" +
+		"sk: test\n" +
+		"list_type: 2\n" +
+		"list_api_version: 2\n" +
+		"list_concurrency: 2\n" +
+		"check_concurrency: 2\n" +
+		"output_dir: " + dir + "\n" +
+		"is_check: true\n" +
+		"is_success_log: false\n" +
+		"progress_interval: 1000\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// List file: one malformed line (bucket mismatch). parseListFileLine
+	// rejects this before pushing to objCh, so no GET is ever issued.
+	listPath := filepath.Join(dir, "list.txt")
+	listContent := "wrongbucket|k|1|0\n"
+	if err := os.WriteFile(listPath, []byte(listContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	err = run(context.Background(), cfg, "mybucket", "", "", listPath, &buf)
+	if err != nil {
+		t.Fatalf("run returned err: %v (want nil — list-file mode returns nil on completion)", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "list_failed: 1") {
+		t.Errorf("stdout = %q, want substring %q", out, "list_failed: 1")
+	}
+	if !strings.Contains(out, "list_all: 0") {
+		t.Errorf("stdout = %q, want substring %q (list-file source does not bump listed counters)", out, "list_all: 0")
+	}
+
+	// The malformed line must be persisted to list_failed.txt for resumable
+	// debugging.
+	listFailedPath := filepath.Join(dir, "list_failed.txt")
+	content, err := os.ReadFile(listFailedPath)
+	if err != nil {
+		t.Fatalf("read list_failed.txt: %v", err)
+	}
+	if !strings.Contains(string(content), "wrongbucket|k|1|0") {
+		t.Errorf("list_failed.txt = %q, want substring %q", string(content), "wrongbucket|k|1|0")
+	}
 }

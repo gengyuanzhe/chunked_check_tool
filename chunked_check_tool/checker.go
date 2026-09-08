@@ -71,8 +71,8 @@ func isNormalETag(etag string) bool {
 	return true
 }
 
-// Checker classifies a single listed object: multipart (skip Range GET),
-// normal (Range GET 128 bytes + regex), corrupted, or check-failed.
+// Checker classifies a single VerifyTask: routes to corrupted/ok/failed
+// outputs based on a 128-byte RangeGet at each offset in task.Offsets.
 type Checker struct {
 	worker S3API
 	out    *Output
@@ -80,95 +80,90 @@ type Checker struct {
 	cfg    *Config
 }
 
-// NewChecker builds a Checker. cfg carries success-log toggle plus the
-// multipart-segment-check config (switch + segment size).
 func NewChecker(worker S3API, out *Output, stats *Stats, cfg *Config) *Checker {
 	return &Checker{worker: worker, out: out, stats: stats, cfg: cfg}
 }
 
-// Handle classifies obj. Every object that reaches Handle counts toward
-// the listed total: list_obj for normal ETags, list_mp for multipart.
-// In check mode the lister does not bump listed counters (it sends
-// objects to objCh), so the checker is responsible for classifying.
-func (c *Checker) Handle(obj ObjectInfo) {
-	if !isNormalETag(obj.ETag) {
-		c.stats.IncrListedMp()
-		// Multipart object. If the multipart segment check is enabled,
-		// probe the first 128 bytes of each segment for the chunked-upload
-		// signature; any match means the multipart is corrupted.
-		if c.cfg.IsMultipartSegmentCheck && c.cfg.MultipartSegmentSize > 0 && obj.Size > 0 {
-			c.checkMultipartSegments(obj)
-		} else {
-			// Segment check off → recorded as mp.txt, but NOT counted as
-			// ok_mp: we did not verify the segments, so "clean multipart"
-			// would be a false claim.
-			c.out.WriteMultipartAll(obj.OwnerID, obj.Key)
-		}
-		return
-	}
-	c.stats.IncrListedObject()
-
-	// Size=0 objects cannot be RangeGet'd (S3 returns 416 Range Not
-	// Satisfiable since the requested byte range doesn't overlap with
-	// an empty body). An empty body also cannot contain a chunked-upload
-	// signature, so the corruption check is inconclusive — treat as
-	// normal.
-	if obj.Size == 0 {
+// Handle routes task to verify. The size==0 normal-object shortcut stays
+// here (RangeGet on an empty body returns 416 → would misclassify as
+// check_failed). Listed-counter bumps (list_obj/list_mp) are NOT done here —
+// the S3 lister bumps them in check mode before pushing the task. List-file
+// source does not bump them, so summary shows list_all: 0 in list-file mode.
+func (c *Checker) Handle(task VerifyTask) {
+	if !task.IsMultipart && task.Size == 0 {
 		c.stats.IncrOkObjects()
 		if c.cfg.IsSuccessLog {
-			c.out.WriteSuccess(obj.OwnerID, obj.Key)
+			c.out.WriteSuccess(task.OwnerID, task.Key)
 		}
 		return
 	}
+	c.verify(task)
+}
 
-	body, err := c.worker.RangeGet(context.Background(), obj.Key)
-	if err != nil {
-		c.out.WriteCheckFailed(obj.Key)
-		c.out.WriteCheckFailedLog(obj.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
-		c.stats.IncrCheckFailed()
+// verify routes task to probe-and-route. Multipart + nil Offsets is the
+// "segcheck off" path → write to mp_all without claiming ok_mp. Normal
+// objects (IsMultipart=false, Offsets=nil) get a single probe at offset 0 —
+// no slice, no loop, no allocation. Multipart objects iterate Offsets.
+// If any probe settles (corrupted or failed) the task is done; otherwise
+// all probes clean → ok_object / ok_mp.
+func (c *Checker) verify(task VerifyTask) {
+	if task.IsMultipart && len(task.Offsets) == 0 {
+		c.out.WriteMultipartAll(task.OwnerID, task.Key)
 		return
 	}
-
-	if chunkSigRe.Match(body) {
-		c.out.WriteCorrupted(obj.OwnerID, obj.Key)
-		c.stats.IncrCorruptedObjects()
+	settled := false
+	if !task.IsMultipart {
+		settled = c.probeAndRoute(task, 0)
 	} else {
-		c.stats.IncrOkObjects()
-		if c.cfg.IsSuccessLog {
-			c.out.WriteSuccess(obj.OwnerID, obj.Key)
+		for _, off := range task.Offsets {
+			if c.probeAndRoute(task, off) {
+				settled = true
+				break
+			}
 		}
+	}
+	if settled {
+		return
+	}
+	if task.IsMultipart {
+		if c.cfg.IsMultipartSuccessLog {
+			c.out.WriteMultipartOk(task.OwnerID, task.Key)
+		}
+		c.stats.IncrOkMp()
+	} else {
+		if c.cfg.IsSuccessLog {
+			c.out.WriteSuccess(task.OwnerID, task.Key)
+		}
+		c.stats.IncrOkObjects()
 	}
 }
 
-// checkMultipartSegments probes the first 128 bytes of each segment of obj
-// (segments of cfg.MultipartSegmentSize bytes starting at offset 0, segSize,
-// 2*segSize, ...). If ANY segment's body matches the chunked-upload signature
-// regex, the object is flagged as corrupted multipart. If a segment RangeGet
-// returns an error, the object is flagged as mp_check_failed (distinct
-// from check_failed — segment GET errors are a separate failure mode and get
-// their own file + counter). Otherwise the object is recorded as a clean
-// multipart (→ ok_mp.txt when is_multipart_success_log, else dropped).
-func (c *Checker) checkMultipartSegments(obj ObjectInfo) {
-	segSize := c.cfg.MultipartSegmentSize
-	numSegs := (obj.Size + segSize - 1) / segSize
-	for i := int64(0); i < numSegs; i++ {
-		offset := i * segSize
-		body, err := c.worker.RangeGetAt(context.Background(), obj.Key, offset, 128)
-		if err != nil {
-			c.out.WriteMpCheckFailed(obj.Key)
-			c.out.WriteMpCheckFailedLog(obj.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
+// probeAndRoute does one 128-byte RangeGet at off and routes the result by
+// IsMultipart. Returns true when the task is settled (corrupted or failed)
+// so the caller stops further probes. Normal and multipart share this path.
+func (c *Checker) probeAndRoute(task VerifyTask, off int64) bool {
+	body, err := c.worker.RangeGetAt(context.Background(), task.Key, off, 128)
+	if err != nil {
+		if task.IsMultipart {
+			c.out.WriteMpCheckFailed(task.Key)
+			c.out.WriteMpCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
 			c.stats.IncrMpCheckFailed()
-			return
+		} else {
+			c.out.WriteCheckFailed(task.Key)
+			c.out.WriteCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
+			c.stats.IncrCheckFailed()
 		}
-		if chunkSigRe.Match(body) {
-			c.out.WriteCorruptedMultipart(obj.OwnerID, obj.Key)
+		return true
+	}
+	if chunkSigRe.Match(body) {
+		if task.IsMultipart {
+			c.out.WriteCorruptedMultipart(task.OwnerID, task.Key)
 			c.stats.IncrCorruptedMp()
-			return
+		} else {
+			c.out.WriteCorrupted(task.OwnerID, task.Key)
+			c.stats.IncrCorruptedObjects()
 		}
+		return true
 	}
-	// No segment matched — record as a clean multipart.
-	if c.cfg.IsMultipartSuccessLog {
-		c.out.WriteMultipartOk(obj.OwnerID, obj.Key)
-	}
-	c.stats.IncrOkMp()
+	return false
 }
