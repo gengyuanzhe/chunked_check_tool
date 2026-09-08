@@ -80,7 +80,9 @@ func trimETagQuotes(s string) string {
 //
 // PutObjectStream is the relay variant for large bodies: it never buffers
 // r, so a node fault mid-upload is NOT retried (the stream cannot be
-// replayed) and surfaces as an error to the caller.
+// replayed) and surfaces as an error to the caller. DisableMultipart pins
+// it to a single PUT (multipart splitting would break the plain-MD5 ETag
+// verification).
 //
 // CreateMultipart/UploadPart/CompleteMultipart/AbortMultipart are the
 // multipart lifecycle used by the multipart relay: parts are re-uploaded
@@ -502,8 +504,20 @@ func (c *S3Client) putObjectOnce(ctx context.Context, bucket, key string, r io.R
 // Unlike PutObject there is no node-fault retry: the caller's reader is a
 // live download stream that cannot be replayed, so any failure (including
 // mid-upload node faults) is returned to the caller.
+//
+// DisableMultipart forces the single-PUT path: minio-go's PutObject
+// auto-splits into multipart when size exceeds the part size (16MiB by
+// default), and the resulting md5-of-part-md5s-N ETag could never match
+// the source regular object's plain MD5 — every >16MiB regular relay
+// would fail the ETag verification. Regular objects are single-PUT
+// uploads by definition, so >5GiB cannot legitimately occur; if one
+// somehow did, the server rejects the oversized single PUT at upload
+// time instead of succeeding as multipart and failing ETag verification
+// after the bytes were already transferred.
 func (c *S3Client) PutObjectStream(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error) {
-	info, err := c.client.PutObject(ctx, bucket, key, r, size, minio.PutObjectOptions{})
+	info, err := c.client.PutObject(ctx, bucket, key, r, size, minio.PutObjectOptions{
+		DisableMultipart: true,
+	})
 	if err != nil {
 		return "", err
 	}

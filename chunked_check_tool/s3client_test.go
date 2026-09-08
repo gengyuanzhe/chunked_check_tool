@@ -412,6 +412,38 @@ func TestS3ClientPutObjectError(t *testing.T) {
 	}
 }
 
+// TestS3ClientPutObjectStreamLargeBodySinglePUT — a body larger than
+// minio-go's default part size (16MiB) must still upload as a single PUT:
+// PutObjectStream sets DisableMultipart. With the default options
+// minio-go auto-splits into multipart, the destination ETag becomes
+// md5-of-part-md5s-N, and the regular-object relay's ETag verification
+// against the source's plain MD5 fails for every >16MiB object.
+func TestS3ClientPutObjectStreamLargeBodySinglePUT(t *testing.T) {
+	multipartRequests := 0
+	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Has("uploads") || q.Has("uploadId") || q.Has("partNumber") {
+			multipartRequests++
+		}
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("ETag", `"d41d8cd98f00b204e9800998ecf8427e"`)
+		w.WriteHeader(200)
+	})
+	// 17MiB: just over the 16MiB default part size that triggers
+	// minio-go's automatic multipart.
+	body := make([]byte, 17*1024*1024)
+	etag, err := c.PutObjectStream(context.Background(), "dstbucket", "k1", bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		t.Fatalf("PutObjectStream: %v", err)
+	}
+	if etag != "d41d8cd98f00b204e9800998ecf8427e" {
+		t.Errorf("etag = %q, want quotes stripped", etag)
+	}
+	if multipartRequests != 0 {
+		t.Errorf("multipart requests = %d, want 0 (single PUT expected for a 17MiB regular relay)", multipartRequests)
+	}
+}
+
 // TestS3ClientMultipartFlow — Create/UploadPart/Complete/Abort against a
 // scripted fake server, asserting the wire format of each call.
 func TestS3ClientMultipartFlow(t *testing.T) {
