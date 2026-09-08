@@ -140,7 +140,6 @@ func TestListFileSourceRunEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer out.Close()
 	stats := NewStats()
 
 	// File: 2 valid lines + 1 malformed (offset0 != 0) + 1 valid.
@@ -182,5 +181,36 @@ func TestListFileSourceRunEndToEnd(t *testing.T) {
 	// Malformed line → list_failed + IncrListFailed.
 	if got := stats.Snapshot().ListFailed; got != 1 {
 		t.Errorf("ListFailed=%d want 1 (one malformed line)", got)
+	}
+	// Malformed line written to list_failed.txt with original content.
+	// out.Close flushes the listFailed consumer goroutine.
+	if err := out.Close(); err != nil {
+		t.Fatalf("output close: %v", err)
+	}
+	listFailedPath := filepath.Join(dir, "list_failed.txt")
+	failedContent, err := os.ReadFile(listFailedPath)
+	if err != nil {
+		t.Fatalf("read list_failed.txt: %v", err)
+	}
+	if !strings.Contains(string(failedContent), "mybucket|bad|1|100") {
+		t.Errorf("list_failed.txt = %q, want substring %q", string(failedContent), "mybucket|bad|1|100")
+	}
+}
+
+// TestParseListFileLineErrorFields asserts MalformedLineError.Line and
+// .LineNum are populated so the caller can write the original line to
+// list_failed for resumable debugging. A future refactor that drops these
+// fields would otherwise break silently.
+func TestParseListFileLineErrorFields(t *testing.T) {
+	_, err := parseListFileLine("mybucket|bad|1|100", "mybucket", 42)
+	var mle *MalformedLineError
+	if !errors.As(err, &mle) {
+		t.Fatalf("expected *MalformedLineError, got %T: %v", err, err)
+	}
+	if mle.Line != "mybucket|bad|1|100" {
+		t.Errorf("Line = %q, want %q", mle.Line, "mybucket|bad|1|100")
+	}
+	if mle.LineNum != 42 {
+		t.Errorf("LineNum = %d, want 42", mle.LineNum)
 	}
 }

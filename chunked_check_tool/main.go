@@ -196,7 +196,10 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter, listFile 
 		}
 		stats.SetTotalDuration(time.Since(start))
 		stats.PrintSummary(stdout, cfg.IsCheck)
-		return nil
+		// Return ctx.Err() (nil on happy path, context.Canceled on SIGINT)
+		// so main logs the interrupt and exits non-zero, matching the S3
+		// mode's seedErr path. Output and stats are flushed above first.
+		return ctx.Err()
 	}
 
 	// Spawn list workers. They block on the queue until seeds arrive.

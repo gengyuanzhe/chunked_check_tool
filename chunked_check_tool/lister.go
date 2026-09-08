@@ -99,11 +99,11 @@ func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- 
 			return
 		}
 		for _, o := range objs {
-			task := resolveOffsets(o, l.cfg)
 			if l.cfg.IsCheck {
 				// Check mode: lister bumps listed counters (moved from Checker.Handle).
 				// list-file source does not go through this path, so its summary
 				// shows list_all: 0 — see listFileSource.
+				task := resolveOffsets(o, l.cfg)
 				if task.IsMultipart {
 					l.stats.IncrListedMp()
 				} else {
@@ -115,8 +115,11 @@ func (l *Lister) processPrefix(ctx context.Context, prefix string, objCh chan<- 
 					return
 				}
 			} else {
-				// list-only mode: same classification, no check performed.
-				if task.IsMultipart {
+				// list-only mode: classify via ETag directly so no per-object
+				// []int64 offset slice is allocated (resolveOffsets would
+				// allocate ceil(Size/seg) entries that are immediately discarded
+				// in list-only mode — only IsMultipart is read here).
+				if !isNormalETag(o.ETag) {
 					l.stats.IncrListedMp()
 				} else {
 					l.stats.IncrListedObject()

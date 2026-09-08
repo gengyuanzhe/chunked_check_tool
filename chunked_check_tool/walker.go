@@ -56,8 +56,8 @@ func runRecursiveWalk(ctx context.Context, s3 S3API, prefix string, objCh chan<-
 				return
 			}
 			for _, o := range objs {
-				task := resolveOffsets(o, cfg)
 				if cfg.IsCheck {
+					task := resolveOffsets(o, cfg)
 					if task.IsMultipart {
 						stats.IncrListedMp()
 					} else {
@@ -69,7 +69,9 @@ func runRecursiveWalk(ctx context.Context, s3 S3API, prefix string, objCh chan<-
 						return
 					}
 				} else {
-					if task.IsMultipart {
+					// list-only mode: classify via ETag directly so no
+					// per-object offset slice is allocated.
+					if !isNormalETag(o.ETag) {
 						stats.IncrListedMp()
 					} else {
 						stats.IncrListedObject()
