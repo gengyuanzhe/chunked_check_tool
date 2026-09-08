@@ -284,10 +284,13 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 		t.Errorf("stdout should not contain list_all (all-zero noise in backup mode)\nfull:\n%s", out)
 	}
 
-	// Local result files. cfg.OutputDir carries the timestamp suffix
-	// (default-on output_dir_timestamp), which runBackup created.
-	assertFileContent(t, cfg.OutputDir, "backup_ok.txt", "reg1\nmp1\n")
-	assertFileContent(t, cfg.OutputDir, "backup_skipped_clean.txt", "mpclean\n")
+	// Local result files: the backup .txt outputs carry the raw input lines
+	// (shape-compatible with -backup-file input). cfg.OutputDir carries the
+	// timestamp suffix (default-on output_dir_timestamp), which runBackup
+	// created.
+	assertFileContent(t, cfg.OutputDir, "backup_ok.txt",
+		"srcbucket|reg1\n"+fmt.Sprintf("srcbucket|mp1|2|0|%d\n", len(corruptBody)))
+	assertFileContent(t, cfg.OutputDir, "backup_skipped_clean.txt", "srcbucket|mpclean|1|0\n")
 	assertFileContent(t, cfg.OutputDir, "mismatch.txt", "srcbucket|mm1\n")
 	assertFileContent(t, cfg.OutputDir, "list_failed.txt", "srcbucket|bad|1|100\n")
 
@@ -349,7 +352,7 @@ func TestRunBackupFileETagMismatchEndToEnd(t *testing.T) {
 		t.Fatalf("run returned err: %v", err)
 	}
 
-	assertFileContent(t, dir, "backup_failed.txt", "mpbad\n")
+	assertFileContent(t, dir, "backup_failed.txt", fmt.Sprintf("srcbucket|mpbad|2|0|%d\n", len(corruptBody)))
 	logData, err := os.ReadFile(filepath.Join(dir, "backup_failed.log"))
 	if err != nil {
 		t.Fatal(err)

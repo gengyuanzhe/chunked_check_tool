@@ -137,7 +137,8 @@ mismatch，每条原因见 `mismatch.log`。
 约束与说明：
 
 - `-list-file` 与 `-backup-file` 互斥；配置必须含非空 `backup_bucket`
-- HEAD/探测/中转失败 → key 写入 `backup_failed.txt`，`backup_failed.log` 记录失败阶段（head/verify/upload/etag）与错误；多段中转失败会 AbortMultipartUpload 清理未完成分片
+- 四个备份结果文件（`backup_ok.txt`/`backup_failed.txt`/`backup_skipped_clean.txt`/`mismatch.txt`）均写入**原始输入行**（`bkt|key` 或 `bkt|key|partcnt|offset…`），与输入文件同构：`backup_failed.txt` 可直接作为 `-backup-file` 输入重试失败对象（行内自带 offsets）；`.log` 文件保持结构化（key + 错误详情）
+- HEAD/探测/中转失败 → 原始输入行写入 `backup_failed.txt`，`backup_failed.log` 记录失败阶段（head/verify/upload/etag）与错误；多段中转失败会 AbortMultipartUpload 清理未完成分片
 - 坏行（格式错误/bkt 不匹配）与 `-list-file` 一致：写入 `list_failed.txt` 并跳过
 - 复用 `check_concurrency` 作为备份 worker 数；节点故障轮询仅覆盖请求发起阶段——流式中转一旦开始，中途故障不重试（流不可重放），整对象记为失败
 - S3 多段约束：非末段必须 ≥5MB。输入行语义是原始 part 边界（原上传本来合规）；若喂入"固定分段"格式（段 <5MB）会被 S3 拒绝（EntityTooSmall）→ `backup_failed`
@@ -156,12 +157,12 @@ mismatch，每条原因见 `mismatch.log`。
 ├── check_failed.log            # 普通对象 RangeGet 失败结构化错误
 ├── mp_check_failed.txt         # 多段分段 RangeGet 失败 key（is_multipart_segment_check=true 时）
 ├── mp_check_failed.log         # 多段分段 RangeGet 失败结构化错误
-├── backup_ok.txt               # 备份成功 key（-backup-file 模式）
-├── backup_failed.txt           # 备份失败 key（-backup-file 模式）
+├── backup_ok.txt               # 备份成功的原始输入行（-backup-file 模式）
+├── backup_failed.txt           # 备份失败的原始输入行（-backup-file 模式）
 ├── backup_failed.log           # 备份失败结构化错误（stage=head/verify/upload/etag）
 ├── mismatch.txt                # 输入类型校验失败：输入行声明的对象类型与 HEAD 判型不一致的原始行（-backup-file 模式；不是 ETag 终验失败，那个走 backup_failed stage=etag）
 ├── mismatch.log                # 输入类型校验失败的结构化诊断：line_is_multipart/head_etag/head_size/reason（-backup-file 模式）
-├── backup_skipped_clean.txt    # 多段校验全部干净未备份的 key（-backup-file 模式）
+├── backup_skipped_clean.txt    # 多段校验全部干净未备份的原始输入行（-backup-file 模式）
 └── <ownerID>/                  # OwnerID 为空时落到 _unknown/
     ├── corrupted_objects.txt   # 损坏普通对象 key（Range GET 命中 chunk-signature）
     ├── ok_objects.txt          # 正常普通对象 key（is_success_log=true 时）

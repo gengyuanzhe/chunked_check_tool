@@ -83,8 +83,8 @@ func TestBackupCheckerRegularRelaysAndMatchesETag(t *testing.T) {
 	if f.Puts[0].Content != string(content) {
 		t.Errorf("relayed content = %q, want %q", f.Puts[0].Content, content)
 	}
-	if got := readBackupFile(t, dir, "backup_ok.txt"); got != "k1\n" {
-		t.Errorf("backup_ok.txt = %q, want %q", got, "k1\n")
+	if got := readBackupFile(t, dir, "backup_ok.txt"); got != "mybucket|k1\n" {
+		t.Errorf("backup_ok.txt = %q, want %q", got, "mybucket|k1\n")
 	}
 	if len(f.Aborted) != 0 {
 		t.Errorf("aborted = %v, want none for regular relay", f.Aborted)
@@ -105,7 +105,7 @@ func TestBackupCheckerRegularETagMismatch(t *testing.T) {
 	c.Handle(BackupTask{Key: "k1", RawLine: "mybucket|k1"})
 	flush()
 
-	if got := readBackupFile(t, dir, "backup_failed.txt"); got != "k1\n" {
+	if got := readBackupFile(t, dir, "backup_failed.txt"); got != "mybucket|k1\n" {
 		t.Errorf("backup_failed.txt = %q", got)
 	}
 	logContent := readBackupFile(t, dir, "backup_failed.log")
@@ -134,7 +134,7 @@ func TestBackupCheckerRegularZeroSize(t *testing.T) {
 	if len(f.Puts) != 1 || f.Puts[0].Content != "" {
 		t.Fatalf("puts = %+v, want one empty upload", f.Puts)
 	}
-	if got := readBackupFile(t, dir, "backup_ok.txt"); got != "empty\n" {
+	if got := readBackupFile(t, dir, "backup_ok.txt"); got != "mybucket|empty\n" {
 		t.Errorf("backup_ok.txt = %q", got)
 	}
 }
@@ -167,7 +167,7 @@ func TestBackupCheckerMultipartCorruptRelaysByOffsets(t *testing.T) {
 	if string(got.Parts[1]) != "AAAAA" || string(got.Parts[2]) != "BBBBB" {
 		t.Errorf("parts = %v, want split at offsets [0,5)", got.Parts)
 	}
-	if got := readBackupFile(t, dir, "backup_ok.txt"); got != "mp1\n" {
+	if got := readBackupFile(t, dir, "backup_ok.txt"); got != "mybucket|mp1|2|0|5\n" {
 		t.Errorf("backup_ok.txt = %q", got)
 	}
 	if len(f.Aborted) != 0 {
@@ -202,7 +202,7 @@ func TestBackupCheckerMultipartCorruptAtSecondOffset(t *testing.T) {
 	if len(f.Completed) != 1 {
 		t.Fatalf("completed = %+v, want one (corrupt at second offset still backs up)", f.Completed)
 	}
-	if got := readBackupFile(t, dir, "backup_ok.txt"); got != "mp1\n" {
+	if got := readBackupFile(t, dir, "backup_ok.txt"); got != "mybucket|mp1|2|0|5\n" {
 		t.Errorf("backup_ok.txt = %q", got)
 	}
 }
@@ -230,7 +230,7 @@ func TestBackupCheckerMultipartCleanSkips(t *testing.T) {
 	if len(f.Puts) != 0 {
 		t.Errorf("puts = %+v, want none", f.Puts)
 	}
-	if got := readBackupFile(t, dir, "backup_skipped_clean.txt"); got != "mp1\n" {
+	if got := readBackupFile(t, dir, "backup_skipped_clean.txt"); got != "mybucket|mp1|2|0|5\n" {
 		t.Errorf("backup_skipped_clean.txt = %q", got)
 	}
 	if got := c.stats.Snapshot().BackupSkippedClean; got != 1 {
@@ -255,7 +255,7 @@ func TestBackupCheckerMultipartETagMismatch(t *testing.T) {
 	c.Handle(BackupTask{Key: "mp1", RawLine: "mybucket|mp1|2|0|5", IsMultipart: true, Offsets: []int64{0, 5}})
 	flush()
 
-	if got := readBackupFile(t, dir, "backup_failed.txt"); got != "mp1\n" {
+	if got := readBackupFile(t, dir, "backup_failed.txt"); got != "mybucket|mp1|2|0|5\n" {
 		t.Errorf("backup_failed.txt = %q", got)
 	}
 	logContent := readBackupFile(t, dir, "backup_failed.log")
@@ -324,7 +324,7 @@ func TestBackupCheckerHeadErrorFails(t *testing.T) {
 	if len(f.Puts) != 0 && len(f.Completed) != 0 {
 		t.Fatalf("no upload expected")
 	}
-	if got := readBackupFile(t, dir, "backup_failed.txt"); got != "gone\n" {
+	if got := readBackupFile(t, dir, "backup_failed.txt"); got != "mybucket|gone\n" {
 		t.Errorf("backup_failed.txt = %q", got)
 	}
 	if got := c.stats.Snapshot().BackupFailed; got != 1 {
@@ -346,7 +346,7 @@ func TestBackupCheckerVerifyErrorFails(t *testing.T) {
 	c.Handle(BackupTask{Key: "mp1", RawLine: "mybucket|mp1|1|0", IsMultipart: true, Offsets: []int64{0}})
 	flush()
 
-	if got := readBackupFile(t, dir, "backup_failed.txt"); got != "mp1\n" {
+	if got := readBackupFile(t, dir, "backup_failed.txt"); got != "mybucket|mp1|1|0\n" {
 		t.Errorf("backup_failed.txt = %q", got)
 	}
 	logContent := readBackupFile(t, dir, "backup_failed.log")
@@ -368,7 +368,7 @@ func TestBackupCheckerUploadPartErrorAborts(t *testing.T) {
 	c.Handle(BackupTask{Key: "mp1", RawLine: "mybucket|mp1|2|0|5", IsMultipart: true, Offsets: []int64{0, 5}})
 	flush()
 
-	if got := readBackupFile(t, dir, "backup_failed.txt"); got != "mp1\n" {
+	if got := readBackupFile(t, dir, "backup_failed.txt"); got != "mybucket|mp1|2|0|5\n" {
 		t.Errorf("backup_failed.txt = %q", got)
 	}
 	logContent := readBackupFile(t, dir, "backup_failed.log")
@@ -395,7 +395,7 @@ func TestBackupCheckerDownloadErrorAborts(t *testing.T) {
 	c.Handle(BackupTask{Key: "mp1", RawLine: "mybucket|mp1|2|0|5", IsMultipart: true, Offsets: []int64{0, 5}})
 	flush()
 
-	if got := readBackupFile(t, dir, "backup_failed.txt"); got != "mp1\n" {
+	if got := readBackupFile(t, dir, "backup_failed.txt"); got != "mybucket|mp1|2|0|5\n" {
 		t.Errorf("backup_failed.txt = %q", got)
 	}
 	if len(f.Aborted) != 1 {

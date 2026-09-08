@@ -14,6 +14,13 @@ import (
 // into the configured backup bucket (download → re-upload) and verify the
 // destination ETag against the source.
 //
+// The four result .txt files (backup_ok / backup_failed /
+// backup_skipped_clean / mismatch) all carry the task's raw input line
+// verbatim (bkt|key or bkt|key|partcnt|offsets...) — the outputs stay
+// shape-compatible with the input, so e.g. backup_failed.txt can be fed
+// straight back into -backup-file for a retry (it carries the offsets).
+// The .log files stay structured with the bare key.
+//
 // Routing:
 //   - HEAD fails                         → backup_failed (stage=head)
 //   - line type != HEAD type             → mismatch (raw line), no relay
@@ -42,7 +49,7 @@ func NewBackupChecker(worker S3API, out *Output, stats *Stats, cfg *Config) *Bac
 func (c *BackupChecker) Handle(task BackupTask) {
 	etag, size, err := c.worker.HeadObject(context.Background(), task.Key)
 	if err != nil {
-		c.fail(task.Key, "head", err)
+		c.fail(task, "head", err)
 		return
 	}
 	if headIsMultipart := !isNormalETag(etag); headIsMultipart != task.IsMultipart {
@@ -65,14 +72,14 @@ func (c *BackupChecker) verifyCorrupt(task BackupTask) bool {
 	for _, off := range task.Offsets {
 		body, err := c.worker.RangeGetAt(context.Background(), task.Key, off, 128)
 		if err != nil {
-			c.fail(task.Key, "verify", err)
+			c.fail(task, "verify", err)
 			return false
 		}
 		if chunkSigRe.Match(body) {
 			return true
 		}
 	}
-	c.out.WriteBackupSkippedClean(task.Key)
+	c.out.WriteBackupSkippedClean(task.RawLine)
 	c.stats.IncrBackupSkippedClean()
 	return false
 }
@@ -91,14 +98,14 @@ func (c *BackupChecker) backup(task BackupTask, srcETag string, size int64) {
 		dstETag, err = c.relayRegular(task.Key, size)
 	}
 	if err != nil {
-		c.fail(task.Key, "upload", err)
+		c.fail(task, "upload", err)
 		return
 	}
 	if dstETag != srcETag {
-		c.fail(task.Key, "etag", fmt.Errorf("backup bucket etag %q != source etag %q", dstETag, srcETag))
+		c.fail(task, "etag", fmt.Errorf("backup bucket etag %q != source etag %q", dstETag, srcETag))
 		return
 	}
-	c.out.WriteBackupOk(task.Key)
+	c.out.WriteBackupOk(task.RawLine)
 	c.stats.IncrBackupOk()
 }
 
@@ -161,8 +168,8 @@ func (c *BackupChecker) relayMultipart(task BackupTask, size int64) (string, err
 	return dstETag, nil
 }
 
-func (c *BackupChecker) fail(key, stage string, err error) {
-	c.out.WriteBackupFailed(key)
-	c.out.WriteBackupFailedLog(key, stage, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
+func (c *BackupChecker) fail(task BackupTask, stage string, err error) {
+	c.out.WriteBackupFailed(task.RawLine)
+	c.out.WriteBackupFailedLog(task.Key, stage, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
 	c.stats.IncrBackupFailed()
 }

@@ -67,7 +67,7 @@ func TestBackupRelayRealS3(t *testing.T) {
 	regClean := fill(1<<20, 2)
 	mpPart1Corrupt := append([]byte(sig), fill(partSize-len(sig), 3)...)
 	mpPart1Clean := fill(partSize, 4)
-	mpPart2 := fill(1 << 20, 5)
+	mpPart2 := fill(1<<20, 5)
 
 	putRegular := func(key string, content []byte) {
 		t.Helper()
@@ -169,8 +169,9 @@ func TestBackupRelayRealS3(t *testing.T) {
 			t.Errorf("%s = %v, want %v (order-insensitive run)", name, got, want)
 		}
 	}
-	assertLines("backup_ok.txt", "reg-corrupt", "reg-clean", "mp-corrupt")
-	assertLines("backup_skipped_clean.txt", "mp-clean")
+	assertLines("backup_ok.txt", srcBkt+"|reg-corrupt", srcBkt+"|reg-clean",
+		fmt.Sprintf("%s|mp-corrupt|2|0|%d", srcBkt, partSize))
+	assertLines("backup_skipped_clean.txt", fmt.Sprintf("%s|mp-clean|2|0|%d", srcBkt, partSize))
 	assertLines("mismatch.txt", srcBkt+"|mp-clean")
 	assertLines("list_failed.txt", srcBkt+"|bad|1|100")
 	if data, err := os.ReadFile(filepath.Join(dir, "backup_failed.txt")); err == nil && len(data) > 0 {

@@ -469,14 +469,20 @@ func (o *Output) WriteMpCheckFailed(key string) {
 	}
 }
 
-func (o *Output) WriteBackupOk(key string) {
+// WriteBackupOk records the raw input line of a successfully backed-up
+// object into backup_ok.txt (shape-compatible with -backup-file input).
+func (o *Output) WriteBackupOk(rawLine string) {
 	if o.backupEnabled {
-		o.backupOkCh <- key
+		o.backupOkCh <- rawLine
 	}
 }
-func (o *Output) WriteBackupFailed(key string) {
+
+// WriteBackupFailed records the raw input line of a failed backup into
+// backup_failed.txt — the line carries the offsets, so the file can be fed
+// straight back into -backup-file for a retry.
+func (o *Output) WriteBackupFailed(rawLine string) {
 	if o.backupEnabled {
-		o.backupFailedCh <- key
+		o.backupFailedCh <- rawLine
 	}
 }
 
@@ -534,9 +540,12 @@ func (o *Output) WriteMismatchLog(key string, lineIsMultipart bool, headETag str
 	}
 	o.mismatchLogger.Warn("backup mismatch", attrs...)
 }
-func (o *Output) WriteBackupSkippedClean(key string) {
+
+// WriteBackupSkippedClean records the raw input line of a multipart object
+// whose verification probes were all clean (no relay happened).
+func (o *Output) WriteBackupSkippedClean(rawLine string) {
 	if o.backupEnabled {
-		o.backupSkippedCleanCh <- key
+		o.backupSkippedCleanCh <- rawLine
 	}
 }
 
