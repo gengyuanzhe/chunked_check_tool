@@ -272,6 +272,78 @@ func TestS3ClientDownloadRangeError(t *testing.T) {
 	}
 }
 
+// TestS3ClientDownloadRangeHeadRangeQuirk — regression for a self-built S3
+// that answers HEAD+Range with Content-Length: 0. The old implementation
+// forced minio-go's lazy GetObject to issue its request via Object.Stat(),
+// which sends a HEAD carrying our Range header; such a server made Stat
+// report Size=0 without an error, the first Read returned io.EOF, and every
+// relay upload failed with "http: ContentLength=N with Body length 0".
+// DownloadRange now uses the eager Core.GetObject (ranged GET only, no HEAD
+// at all), so the quirk cannot bite.
+func TestS3ClientDownloadRangeHeadRangeQuirk(t *testing.T) {
+	headWithRange := 0
+	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "HEAD":
+			if r.Header.Get("Range") != "" {
+				headWithRange++
+				w.Header().Set("Content-Range", "bytes 5-20/21")
+				w.Header().Set("Content-Length", "0")
+				w.WriteHeader(206)
+				return
+			}
+			w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
+			w.Header().Set("Content-Length", "21")
+			w.WriteHeader(200)
+		case "GET":
+			w.Header().Set("Content-Range", "bytes 5-20/21")
+			w.Header().Set("Content-Length", "16")
+			w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
+			w.WriteHeader(206)
+			w.Write([]byte("0123456789abcdef"))
+		default:
+			w.WriteHeader(400)
+		}
+	})
+	rc, err := c.DownloadRange(context.Background(), "k1", 5, 16)
+	if err != nil {
+		t.Fatalf("DownloadRange: %v", err)
+	}
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != "0123456789abcdef" {
+		t.Errorf("body = %q, want the full 16-byte range", body)
+	}
+	if headWithRange != 0 {
+		t.Errorf("HEAD+Range requests sent = %d, want 0 (DownloadRange must not probe via HEAD)", headWithRange)
+	}
+}
+
+// TestS3ClientDownloadRangeContentLengthMismatch — the 206 response's
+// Content-Length must match the requested range length. A disagreement
+// fails fast with an actionable error instead of surfacing later as the
+// streaming signer's cryptic "http: ContentLength=N with Body length M".
+func TestS3ClientDownloadRangeContentLengthMismatch(t *testing.T) {
+	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes 5-20/21")
+		w.Header().Set("Content-Length", "8")
+		w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
+		w.WriteHeader(206)
+		w.Write([]byte("01234567"))
+	})
+	_, err := c.DownloadRange(context.Background(), "k1", 5, 16)
+	if err == nil {
+		t.Fatal("expected error for Content-Length mismatch")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "8") || !strings.Contains(msg, "16") {
+		t.Errorf("error %q should report both the response Content-Length (8) and the requested length (16)", msg)
+	}
+}
+
 func TestS3ClientPutObject(t *testing.T) {
 	var gotPath string
 	var gotBody bytes.Buffer

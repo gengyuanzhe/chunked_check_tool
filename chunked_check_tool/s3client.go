@@ -133,6 +133,7 @@ func NewMinioClient(endpoint, ak, sk string, secure bool) (*minio.Client, error)
 type minioCoreAPI interface {
 	ListObjectsV2(bucketName, prefix, startAfter, continuationToken, delimiter string, maxKeys int) (minio.ListBucketV2Result, error)
 	ListObjects(bucket, prefix, marker, delimiter string, maxKeys int) (minio.ListBucketResult, error)
+	GetObject(ctx context.Context, bucketName, objectName string, opts minio.GetObjectOptions) (io.ReadCloser, minio.ObjectInfo, http.Header, error)
 	NewMultipartUpload(ctx context.Context, bucket, object string, opts minio.PutObjectOptions) (string, error)
 	PutObjectPart(ctx context.Context, bucket, object, uploadID string, partID int, data io.Reader, size int64, opts minio.PutObjectPartOptions) (minio.ObjectPart, error)
 	CompleteMultipartUpload(ctx context.Context, bucket, object, uploadID string, parts []minio.CompletePart, opts minio.PutObjectOptions) (minio.UploadInfo, error)
@@ -413,11 +414,10 @@ func (c *S3Client) headObjectOnce(ctx context.Context, key string) (string, int6
 
 // DownloadRange opens a streaming ranged GET of length bytes starting at
 // start from the client's bound bucket. The caller must Close the reader.
-// Stat() is called up front to force minio-go's lazy GetObject to actually
-// issue the request — without it, a 404/5xx would hide inside the reader
-// and neither the node-failover retry nor the caller's error handling
-// would see it. Mid-read failures after this point surface as read errors
-// on the returned reader (the stream cannot be replayed).
+// The GET is issued eagerly (Core.GetObject), so a 404/5xx returns here
+// instead of hiding inside the reader — mid-read failures after this point
+// surface as read errors (the stream cannot be replayed). Node failover
+// applies only to this initial request.
 func (c *S3Client) DownloadRange(ctx context.Context, key string, start, length int64) (io.ReadCloser, error) {
 	if length <= 0 {
 		return io.NopCloser(strings.NewReader("")), nil
@@ -440,15 +440,25 @@ func (c *S3Client) downloadRangeOnce(ctx context.Context, key string, start, len
 	if err := opts.SetRange(start, start+length-1); err != nil {
 		return nil, err
 	}
-	obj, err := c.client.GetObject(ctx, c.bucket, key, opts)
+	// Core.GetObject, NOT the lazy client.GetObject + Stat() probe: Stat()
+	// issues a HEAD carrying our Range header, and servers that answer that
+	// HEAD+Range with Content-Length: 0 make Stat report Size=0 without an
+	// error — the first Read on the lazy object then returns io.EOF and the
+	// relay's streaming-signed PUT fails with "http: ContentLength=N with
+	// Body length 0" for every object. Core.GetObject issues the ranged GET
+	// directly and returns the raw response body.
+	body, info, _, err := c.core.GetObject(ctx, c.bucket, key, opts)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := obj.Stat(); err != nil {
-		obj.Close()
-		return nil, err
+	// info.Size comes from the response Content-Length. For a 206 it must
+	// equal the requested length; anything else would otherwise surface
+	// later as the cryptic signer error or a short/over-long part upload.
+	if info.Size != length {
+		body.Close()
+		return nil, fmt.Errorf("get %s/%s bytes=%d-%d: response Content-Length %d, want %d", c.bucket, key, start, start+length-1, info.Size, length)
 	}
-	return obj, nil
+	return body, nil
 }
 
 // PutObject uploads size bytes from r to bucket/key and returns the

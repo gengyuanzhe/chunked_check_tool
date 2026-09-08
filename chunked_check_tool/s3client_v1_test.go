@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"net/http"
 	"testing"
 
 	"github.com/minio/minio-go/v7"
@@ -50,8 +51,11 @@ func (f *fakeCore) ListObjects(bucket, prefix, marker, delimiter string, maxKeys
 	return f.v1Result, f.err
 }
 
-// The multipart half of minioCoreAPI is unused by the list tests; stubs
+// The multipart/get half of minioCoreAPI is unused by the list tests; stubs
 // keep fakeCore satisfying the interface.
+func (f *fakeCore) GetObject(ctx context.Context, bucketName, objectName string, opts minio.GetObjectOptions) (io.ReadCloser, minio.ObjectInfo, http.Header, error) {
+	return nil, minio.ObjectInfo{}, nil, nil
+}
 func (f *fakeCore) NewMultipartUpload(ctx context.Context, bucket, object string, opts minio.PutObjectOptions) (string, error) {
 	return "", nil
 }
