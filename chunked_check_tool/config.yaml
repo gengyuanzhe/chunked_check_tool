@@ -2,6 +2,7 @@
 # 用法:
 #   ./chunked_check_tool -c config.yaml -bkt <bucket> [-prefix <p>] [-nextmarker <key>]
 #   ./chunked_check_tool -c config.yaml -bkt <bucket> -list-file <path>   # 跳过 S3 列举
+#   ./chunked_check_tool -c config.yaml -bkt <bucket> -backup-file <path> # 损坏对象备份（需配 backup_bucket）
 
 # S3 节点 ip:port 列表，至少 1 个；多个节点会做故障轮询隔离
 endpoints:
@@ -62,3 +63,11 @@ output_ch_capacity: 0
 # 仅影响 per-owner 结果文件（corrupted_objects/mp/corrupted_mp/ok_mp/ok_objects.txt）；
 # 处理文件（list_failed/check_failed/mp_check_failed 的 .txt）始终只存 key/prefix。
 result_line_format: <bucket>|<key>
+
+# 备份目标桶（-backup-file 模式必填，其他模式忽略）。
+# 备份流程：先上传输入列表文件到 backup_bucket 的 .backup_lists/<原名>_<时间戳>.txt，
+# 然后逐对象 HEAD 判型（普通/多段），类型与输入行不一致 → mismatch.txt；
+# 普通对象直接 copy；多段对象先按行内 offset 做 chunk-signature 校验，
+# 命中损坏才 copy（copy 保留源对象 usermeta），全部干净 → backup_skipped_clean.txt。
+# 本地输出：backup_ok.txt / backup_failed.txt / mismatch.txt / backup_skipped_clean.txt。
+backup_bucket:

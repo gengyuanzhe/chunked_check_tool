@@ -28,6 +28,7 @@ GOOS=linux GOARCH=arm64 go build -o chunked_check_tool-linux-arm64 .
 ./chunked_check_tool -c config.yaml -bkt mybucket -prefix data/2026/
 ./chunked_check_tool -c config.yaml -bkt mybucket -prefix data/2026/ -nextmarker data/2026/file_005
 ./chunked_check_tool -c config.yaml -bkt mybucket -list-file list.txt   # 跳过 S3 列举，按行校验
+./chunked_check_tool -c config.yaml -bkt mybucket -backup-file list.txt # 损坏对象备份（见 ## backup-file 模式）
 ```
 
 
@@ -40,6 +41,7 @@ GOOS=linux GOARCH=arm64 go build -o chunked_check_tool-linux-arm64 .
 | `-prefix` | 否 | 列举前缀，默认空（整个桶）                                         |
 | `-nextmarker` | 否 | start-after key，跳过该 key 之前的对象；**仅 list_type 为1时生效** |
 | `-list-file` | 否 | 列表文件路径；设置后跳过 S3 列举，直接读文件按行校验（见 `## list-file 模式`） |
+| `-backup-file` | 否 | 备份列表文件路径；与 `-list-file` 互斥，需配置 `backup_bucket`（见 `## backup-file 模式`） |
 
 ## 配置
 
@@ -66,6 +68,7 @@ progress_interval: 5000             # 进度记录间隔
 obj_ch_capacity: 0                  # lister→checker channel 容量；0=max(check_concurrency*4, 2000)
 output_ch_capacity: 0               # output writer channel 容量；0=1024
 result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>/<key>/<owner> 占位符
+backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填）
 ```
 
 | 字段 | 默认 | 说明 |
@@ -87,6 +90,7 @@ result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；0 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；0 走默认 |
 | `result_line_format` | `<bucket>\|<key>` | 结果文件每行格式，支持 `<bucket>`/`<key>`/`<owner>` 占位符；只影响 per-owner 结果文件，处理文件始终只存 key/prefix |
+| `backup_bucket` | 空 | 备份目标桶名；`-backup-file` 模式必填，其他模式忽略 |
 
 ## list-file 模式
 
@@ -102,6 +106,30 @@ result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>
 
 固定分段校验（`is_multipart_segment_check=true` + `multipart_segment_size`）是本模式的特殊情况：offsets 由 `[0, seg, 2*seg, ...]` 计算而来，本模式则显式给出。
 
+## backup-file 模式
+
+`-backup-file <path>` 对损坏对象做备份（copy 到 `backup_bucket`）。输入文件每行格式（两种可混排，按字段数自描述）：
+
+    bkt|key                          # 普通对象（即上一轮 <ownerID>/corrupted_objects.txt 的 err 列表）
+    bkt|key|partcnt|offset0|offset1|...  # 多段对象（与 -list-file 同格式）
+
+流程：
+
+1. 启动时先把输入列表文件整体上传到 `backup_bucket` 的 `.backup_lists/<原名>_<YYYYMMDD_HHMMSS>.txt`（失败则中止，不处理任何对象）
+2. 逐对象 HEAD，以 ETag 判型（32 位小写 hex = 普通，其余 = 多段）
+3. HEAD 类型与行类型不一致 → 原始行写入 `mismatch.txt`，跳过
+4. 普通行：直接 copy（输入列表即上一轮校验的损坏结果，不重新探测）
+5. 多段行：按行内 offset 逐段 Range GET 探测 chunk-signature，命中损坏才 copy；全部干净 → 写入 `backup_skipped_clean.txt`，不 copy
+6. copy 使用服务端 CopyObject（默认 COPY 指令，保留源对象 usermeta），目标 key 与源 key 相同，直接放 `backup_bucket` 根
+
+约束与说明：
+
+- `-list-file` 与 `-backup-file` 互斥；配置必须含非空 `backup_bucket`
+- HEAD/GET/copy 失败 → key 写入 `backup_failed.txt`，`backup_failed.log` 记录失败阶段（head/verify/copy）与错误
+- 坏行（格式错误/bkt 不匹配）与 `-list-file` 一致：写入 `list_failed.txt` 并跳过
+- 复用 `check_concurrency` 作为备份 worker 数；复用节点故障轮询（node-fault 重试一次到下一节点）
+- 汇总行：`backup_ok: N backup_failed: N backup_mismatch: N backup_skipped_clean: N`（另含 `get_calls`，多段校验产生）
+
 ## 输出
 
 全部以 append 模式打开。目录结构：
@@ -115,6 +143,11 @@ result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>
 ├── check_failed.log            # 普通对象 RangeGet 失败结构化错误
 ├── mp_check_failed.txt         # 多段分段 RangeGet 失败 key（is_multipart_segment_check=true 时）
 ├── mp_check_failed.log         # 多段分段 RangeGet 失败结构化错误
+├── backup_ok.txt               # 备份成功 key（-backup-file 模式）
+├── backup_failed.txt           # 备份失败 key（-backup-file 模式）
+├── backup_failed.log           # 备份失败结构化错误（stage=head/verify/copy）
+├── mismatch.txt                # HEAD 类型与输入行类型不一致的原始行（-backup-file 模式）
+├── backup_skipped_clean.txt    # 多段校验全部干净未备份的 key（-backup-file 模式）
 └── <ownerID>/                  # OwnerID 为空时落到 _unknown/
     ├── corrupted_objects.txt   # 损坏普通对象 key（Range GET 命中 chunk-signature）
     ├── ok_objects.txt          # 正常普通对象 key（is_success_log=true 时）
