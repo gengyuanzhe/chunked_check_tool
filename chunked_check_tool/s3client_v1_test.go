@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	"github.com/minio/minio-go/v7"
@@ -47,6 +48,21 @@ func (f *fakeCore) ListObjects(bucket, prefix, marker, delimiter string, maxKeys
 	f.lastV1Bucket = bucket
 	f.lastV1Marker = marker
 	return f.v1Result, f.err
+}
+
+// The multipart half of minioCoreAPI is unused by the list tests; stubs
+// keep fakeCore satisfying the interface.
+func (f *fakeCore) NewMultipartUpload(ctx context.Context, bucket, object string, opts minio.PutObjectOptions) (string, error) {
+	return "", nil
+}
+func (f *fakeCore) PutObjectPart(ctx context.Context, bucket, object, uploadID string, partID int, data io.Reader, size int64, opts minio.PutObjectPartOptions) (minio.ObjectPart, error) {
+	return minio.ObjectPart{}, nil
+}
+func (f *fakeCore) CompleteMultipartUpload(ctx context.Context, bucket, object, uploadID string, parts []minio.CompletePart, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
+	return minio.UploadInfo{}, nil
+}
+func (f *fakeCore) AbortMultipartUpload(ctx context.Context, bucket, object, uploadID string) error {
+	return nil
 }
 
 // TestListPageV1_UsesMarkerAndNextMarker verifies that with

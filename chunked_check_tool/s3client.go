@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -61,22 +64,46 @@ func trimETagQuotes(s string) string {
 // segment signature verification — each segment's first 128 bytes are
 // inspected in turn). offset is a byte offset into the object body.
 //
-// HeadObject returns the object's ETag (quotes stripped) via a HEAD
-// request — backup mode's authoritative regular-vs-multipart check.
+// HeadObject returns the object's ETag (quotes stripped) and size via a
+// HEAD request — backup mode's authoritative regular-vs-multipart check
+// and the size source for relay part boundaries.
 //
-// CopyObject server-side-copies srcKey from the client's bound source
-// bucket into dstBucket under dstKey. Default copy semantics: the source
-// object's user metadata is preserved (no REPLACE directive is sent).
+// DownloadRange opens a streaming ranged GET of `length` bytes starting at
+// `start` — the backup relay pipes this reader straight into an upload
+// without buffering. Node failover applies only to the initial request;
+// once the reader is returned, a mid-read failure surfaces as a read error
+// from the relay (the stream cannot be replayed).
 //
-// PutObject uploads size bytes from r to bucket/key — used to archive the
-// backup list file into the target bucket.
+// PutObject uploads size bytes from r to bucket/key and returns the
+// destination ETag (quotes stripped) — the backup list archive and the
+// regular-object relay.
+//
+// PutObjectStream is the relay variant for large bodies: it never buffers
+// r, so a node fault mid-upload is NOT retried (the stream cannot be
+// replayed) and surfaces as an error to the caller.
+//
+// CreateMultipart/UploadPart/CompleteMultipart/AbortMultipart are the
+// multipart lifecycle used by the multipart relay: parts are re-uploaded
+// at the input line's original offsets so that a byte-faithful relay
+// reproduces the source ETag (md5-of-part-md5s-N).
 type S3API interface {
 	ListPage(ctx context.Context, prefix, startAfter, continuationToken string, delim bool, maxKeys int) ([]ObjectInfo, []string, string, error)
 	RangeGet(ctx context.Context, key string) ([]byte, error)
 	RangeGetAt(ctx context.Context, key string, offset, length int64) ([]byte, error)
-	HeadObject(ctx context.Context, key string) (string, error)
-	CopyObject(ctx context.Context, srcKey, dstBucket, dstKey string) error
-	PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) error
+	HeadObject(ctx context.Context, key string) (string, int64, error)
+	DownloadRange(ctx context.Context, key string, start, length int64) (io.ReadCloser, error)
+	PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error)
+	PutObjectStream(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error)
+	CreateMultipart(ctx context.Context, bucket, key string) (string, error)
+	UploadPart(ctx context.Context, bucket, key, uploadID string, partNum int, r io.Reader, size int64) (string, error)
+	CompleteMultipart(ctx context.Context, bucket, key, uploadID string, parts []UploadedPart) (string, error)
+	AbortMultipart(ctx context.Context, bucket, key, uploadID string) error
+}
+
+// UploadedPart identifies one uploaded part for CompleteMultipart.
+type UploadedPart struct {
+	PartNumber int
+	ETag       string
 }
 
 // NewMinioClient constructs a minio.Client bound to a single endpoint.
@@ -98,14 +125,18 @@ func NewMinioClient(endpoint, ak, sk string, secure bool) (*minio.Client, error)
 	})
 }
 
-// minioListAPI is the subset of *minio.Core that S3Client calls for
-// listing. Extracting it as an interface lets tests inject a fake to
-// verify the V1/V2 dispatch and cursor normalization without a live
-// endpoint. Both methods are defined on Core with value receivers, so
-// *minio.Core satisfies this interface.
-type minioListAPI interface {
+// minioCoreAPI is the subset of *minio.Core that S3Client calls for
+// listing and multipart uploads. Extracting it as an interface lets tests
+// inject a fake to verify the V1/V2 dispatch and cursor normalization
+// without a live endpoint. All methods are defined on Core with value
+// receivers, so *minio.Core satisfies this interface.
+type minioCoreAPI interface {
 	ListObjectsV2(bucketName, prefix, startAfter, continuationToken, delimiter string, maxKeys int) (minio.ListBucketV2Result, error)
 	ListObjects(bucket, prefix, marker, delimiter string, maxKeys int) (minio.ListBucketResult, error)
+	NewMultipartUpload(ctx context.Context, bucket, object string, opts minio.PutObjectOptions) (string, error)
+	PutObjectPart(ctx context.Context, bucket, object, uploadID string, partID int, data io.Reader, size int64, opts minio.PutObjectPartOptions) (minio.ObjectPart, error)
+	CompleteMultipartUpload(ctx context.Context, bucket, object, uploadID string, parts []minio.CompletePart, opts minio.PutObjectOptions) (minio.UploadInfo, error)
+	AbortMultipartUpload(ctx context.Context, bucket, object, uploadID string) error
 }
 
 // S3Client wraps minio.Core for ListPage (exposes CommonPrefixes, which the
@@ -120,7 +151,7 @@ type minioListAPI interface {
 // the caller records list_failed/check_failed. Each worker owns its own
 // S3Client so no synchronization is needed on the mutable fields.
 type S3Client struct {
-	core    minioListAPI
+	core    minioCoreAPI
 	client  *minio.Client
 	bucket  string
 	stats   *Stats
@@ -352,15 +383,93 @@ func (c *S3Client) rangeGetAtOnce(ctx context.Context, key string, offset, lengt
 	return body, nil
 }
 
-// HeadObject returns the object's ETag with surrounding quotes stripped.
-// Used by backup mode: isNormalETag on the result decides regular vs
-// multipart. Same node-failover retry semantics as RangeGet.
-func (c *S3Client) HeadObject(ctx context.Context, key string) (string, error) {
-	etag, err := c.headObjectOnce(ctx, key)
+// HeadObject returns the object's ETag (quotes stripped) and size.
+// Used by backup mode: isNormalETag on the etag decides regular vs
+// multipart, and the size bounds the relay's last part. Same node-failover
+// retry semantics as RangeGet.
+func (c *S3Client) HeadObject(ctx context.Context, key string) (string, int64, error) {
+	etag, size, err := c.headObjectOnce(ctx, key)
 	if err != nil && c.pool != nil && isNodeFaultErr(err) {
 		c.pool.MarkFailed(c.nodeIdx)
 		if c.rebuild() {
-			etag, err = c.headObjectOnce(ctx, key)
+			etag, size, err = c.headObjectOnce(ctx, key)
+		}
+	}
+	if err != nil {
+		return "", 0, err
+	}
+	return trimETagQuotes(etag), size, nil
+}
+
+func (c *S3Client) headObjectOnce(ctx context.Context, key string) (string, int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	info, err := c.client.StatObject(ctx, c.bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		return "", 0, err
+	}
+	return info.ETag, info.Size, nil
+}
+
+// DownloadRange opens a streaming ranged GET of length bytes starting at
+// start from the client's bound bucket. The caller must Close the reader.
+// Stat() is called up front to force minio-go's lazy GetObject to actually
+// issue the request — without it, a 404/5xx would hide inside the reader
+// and neither the node-failover retry nor the caller's error handling
+// would see it. Mid-read failures after this point surface as read errors
+// on the returned reader (the stream cannot be replayed).
+func (c *S3Client) DownloadRange(ctx context.Context, key string, start, length int64) (io.ReadCloser, error) {
+	if length <= 0 {
+		return io.NopCloser(strings.NewReader("")), nil
+	}
+	obj, err := c.downloadRangeOnce(ctx, key, start, length)
+	if err != nil && c.pool != nil && isNodeFaultErr(err) {
+		c.pool.MarkFailed(c.nodeIdx)
+		if c.rebuild() {
+			obj, err = c.downloadRangeOnce(ctx, key, start, length)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return obj, nil
+}
+
+func (c *S3Client) downloadRangeOnce(ctx context.Context, key string, start, length int64) (io.ReadCloser, error) {
+	var opts minio.GetObjectOptions
+	if err := opts.SetRange(start, start+length-1); err != nil {
+		return nil, err
+	}
+	obj, err := c.client.GetObject(ctx, c.bucket, key, opts)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := obj.Stat(); err != nil {
+		obj.Close()
+		return nil, err
+	}
+	return obj, nil
+}
+
+// PutObject uploads size bytes from r to bucket/key and returns the
+// destination ETag (quotes stripped). The reader is fully drained into
+// memory once so the node-fault retry can replay it — used for the backup
+// list archive (a few MB). The regular-object relay also goes through
+// here; large relays stream via UploadPart instead, so the buffering is
+// bounded by design.
+func (c *S3Client) PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error) {
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return "", err
+	}
+	if int64(len(body)) != size {
+		return "", fmt.Errorf("put %s/%s: short read: got %d bytes, want %d", bucket, key, len(body), size)
+	}
+	etag, err := c.putObjectOnce(ctx, bucket, key, bytes.NewReader(body), size)
+	if err != nil && c.pool != nil && isNodeFaultErr(err) {
+		c.pool.MarkFailed(c.nodeIdx)
+		if c.rebuild() {
+			etag, err = c.putObjectOnce(ctx, bucket, key, bytes.NewReader(body), size)
 		}
 	}
 	if err != nil {
@@ -369,66 +478,73 @@ func (c *S3Client) HeadObject(ctx context.Context, key string) (string, error) {
 	return trimETagQuotes(etag), nil
 }
 
-func (c *S3Client) headObjectOnce(ctx context.Context, key string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+func (c *S3Client) putObjectOnce(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	info, err := c.client.StatObject(ctx, c.bucket, key, minio.StatObjectOptions{})
+	info, err := c.client.PutObject(ctx, bucket, key, r, size, minio.PutObjectOptions{})
 	if err != nil {
 		return "", err
 	}
 	return info.ETag, nil
 }
 
-// CopyObject server-side-copies srcKey (from the client's bound bucket)
-// into dstBucket/dstKey. No UserMetadata/ReplaceMetadata is set on the
-// destination, so the copy preserves the source's user metadata (minio-go
-// copies source metadata when none is provided). Same node-failover retry
-// semantics as RangeGet.
-func (c *S3Client) CopyObject(ctx context.Context, srcKey, dstBucket, dstKey string) error {
-	err := c.copyObjectOnce(ctx, srcKey, dstBucket, dstKey)
-	if err != nil && c.pool != nil && isNodeFaultErr(err) {
-		c.pool.MarkFailed(c.nodeIdx)
-		if c.rebuild() {
-			err = c.copyObjectOnce(ctx, srcKey, dstBucket, dstKey)
-		}
-	}
-	return err
-}
-
-func (c *S3Client) copyObjectOnce(ctx context.Context, srcKey, dstBucket, dstKey string) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-	dst := minio.CopyDestOptions{Bucket: dstBucket, Object: dstKey}
-	src := minio.CopySrcOptions{Bucket: c.bucket, Object: srcKey}
-	_, err := c.client.CopyObject(ctx, dst, src)
-	return err
-}
-
-// PutObject uploads size bytes from r to bucket/key. Used once per backup
-// run to archive the input list file into the target bucket. Same
-// node-failover retry semantics as RangeGet.
-func (c *S3Client) PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) error {
-	// r must be re-readable across the retry; copy into memory once (the
-	// list file is at most a few MB).
-	body, err := io.ReadAll(r)
+// PutObjectStream uploads r to bucket/key without buffering it in memory.
+// Unlike PutObject there is no node-fault retry: the caller's reader is a
+// live download stream that cannot be replayed, so any failure (including
+// mid-upload node faults) is returned to the caller.
+func (c *S3Client) PutObjectStream(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error) {
+	info, err := c.client.PutObject(ctx, bucket, key, r, size, minio.PutObjectOptions{})
 	if err != nil {
-		return err
+		return "", err
 	}
-	err = c.putObjectOnce(ctx, bucket, key, bytes.NewReader(body), size)
+	return trimETagQuotes(info.ETag), nil
+}
+
+// CreateMultipart starts a multipart upload in bucket/key and returns the
+// upload ID.
+func (c *S3Client) CreateMultipart(ctx context.Context, bucket, key string) (string, error) {
+	uploadID, err := c.core.NewMultipartUpload(ctx, bucket, key, minio.PutObjectOptions{})
 	if err != nil && c.pool != nil && isNodeFaultErr(err) {
 		c.pool.MarkFailed(c.nodeIdx)
 		if c.rebuild() {
-			err = c.putObjectOnce(ctx, bucket, key, bytes.NewReader(body), size)
+			uploadID, err = c.core.NewMultipartUpload(ctx, bucket, key, minio.PutObjectOptions{})
 		}
 	}
-	return err
+	return uploadID, err
 }
 
-func (c *S3Client) putObjectOnce(ctx context.Context, bucket, key string, r io.Reader, size int64) error {
+// UploadPart streams one part (partNum is 1-based) of a multipart upload
+// and returns the part's ETag. The reader is NOT replayable: a mid-stream
+// node fault surfaces as an error and the caller aborts the upload.
+func (c *S3Client) UploadPart(ctx context.Context, bucket, key, uploadID string, partNum int, r io.Reader, size int64) (string, error) {
+	part, err := c.core.PutObjectPart(ctx, bucket, key, uploadID, partNum, r, size, minio.PutObjectPartOptions{})
+	if err != nil {
+		return "", err
+	}
+	return trimETagQuotes(part.ETag), nil
+}
+
+// CompleteMultipart commits the multipart upload and returns the
+// destination object's ETag.
+func (c *S3Client) CompleteMultipart(ctx context.Context, bucket, key, uploadID string, parts []UploadedPart) (string, error) {
+	cp := make([]minio.CompletePart, len(parts))
+	for i, p := range parts {
+		cp[i] = minio.CompletePart{PartNumber: p.PartNumber, ETag: p.ETag}
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	_, err := c.client.PutObject(ctx, bucket, key, r, size, minio.PutObjectOptions{})
-	return err
+	info, err := c.core.CompleteMultipartUpload(ctx, bucket, key, uploadID, cp, minio.PutObjectOptions{})
+	if err != nil {
+		return "", err
+	}
+	return trimETagQuotes(info.ETag), nil
+}
+
+// AbortMultipart discards an in-progress multipart upload.
+func (c *S3Client) AbortMultipart(ctx context.Context, bucket, key, uploadID string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return c.core.AbortMultipartUpload(ctx, bucket, key, uploadID)
 }
 
 // isNodeFaultErr reports whether err is a transient node-fault error that
@@ -498,26 +614,48 @@ type FakeS3 struct {
 	// When nil, RangeGetAt returns Body (same as RangeGet).
 	RangeGetHandler func(offset, length int64) ([]byte, error)
 
-	// Heads maps key → ETag (quotes already stripped) returned by
-	// HeadObject. A missing key returns HeadErr (or a default normal ETag
-	// when HeadErr is nil) so tests only set what they care about.
-	Heads   map[string]string
+	// Heads maps key → HEAD result. A missing key returns HeadErr (or a
+	// default normal ETag with size 1 when HeadErr is nil) so tests only
+	// set what they care about.
+	Heads   map[string]HeadInfo
 	HeadErr error
-	// CopyErr, when non-nil, makes CopyObject fail. Calls are recorded in
-	// Copies for assertion.
-	CopyErr error
-	Copies  []CopyCall
+
+	// RelayBodies maps key → full object content served by DownloadRange
+	// (ranged). Falls back to Body for unset keys. DownloadErr, when
+	// non-nil, fails every DownloadRange call.
+	RelayBodies map[string][]byte
+	DownloadErr error
+
+	// Multipart lifecycle knobs and state. CreateErr/UploadErr/CompleteErr
+	// fail the respective call. Uploads tracks in-progress part content;
+	// Completed/Aborted record outcomes for assertion.
+	CreateErr   error
+	UploadErr   error
+	CompleteErr error
+	Uploads     map[string]map[int][]byte
+	nextUpload  int
+	Completed   []FakeCompletedUpload
+	Aborted     []string
+
 	// PutErr, when non-nil, makes PutObject fail. Calls are recorded in
 	// Puts for assertion.
 	PutErr error
 	Puts   []PutCall
 }
 
-// CopyCall records one FakeS3.CopyObject invocation.
-type CopyCall struct {
-	SrcKey    string
-	DstBucket string
-	DstKey    string
+// HeadInfo is the FakeS3 HEAD result.
+type HeadInfo struct {
+	ETag string
+	Size int64
+}
+
+// FakeCompletedUpload records one completed multipart upload: the combined
+// ETag and the per-part content keyed by part number.
+type FakeCompletedUpload struct {
+	Bucket string
+	Key    string
+	ETag   string
+	Parts  map[int][]byte
 }
 
 // PutCall records one FakeS3.PutObject invocation.
@@ -557,35 +695,122 @@ func (f *FakeS3) RangeGetAt(ctx context.Context, key string, offset, length int6
 	return f.Body, nil
 }
 
-func (f *FakeS3) HeadObject(ctx context.Context, key string) (string, error) {
+func (f *FakeS3) HeadObject(ctx context.Context, key string) (string, int64, error) {
 	if f.HeadErr != nil {
-		return "", f.HeadErr
+		return "", 0, f.HeadErr
 	}
-	if etag, ok := f.Heads[key]; ok {
-		return etag, nil
+	if h, ok := f.Heads[key]; ok {
+		return h.ETag, h.Size, nil
 	}
 	// Default: a normal 32-hex ETag so unset keys behave as regular objects.
-	return "0123456789abcdef0123456789abcdef", nil
+	return "0123456789abcdef0123456789abcdef", 1, nil
 }
 
-func (f *FakeS3) CopyObject(ctx context.Context, srcKey, dstBucket, dstKey string) error {
-	f.Copies = append(f.Copies, CopyCall{SrcKey: srcKey, DstBucket: dstBucket, DstKey: dstKey})
-	if f.CopyErr != nil {
-		return f.CopyErr
+func (f *FakeS3) DownloadRange(ctx context.Context, key string, start, length int64) (io.ReadCloser, error) {
+	if f.DownloadErr != nil {
+		return nil, f.DownloadErr
 	}
-	return nil
+	body := f.Body
+	if b, ok := f.RelayBodies[key]; ok {
+		body = b
+	}
+	if start < 0 || start >= int64(len(body)) {
+		return io.NopCloser(strings.NewReader("")), nil
+	}
+	end := start + length
+	if end > int64(len(body)) {
+		end = int64(len(body))
+	}
+	return io.NopCloser(bytes.NewReader(body[start:end])), nil
 }
 
-func (f *FakeS3) PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) error {
+func (f *FakeS3) PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error) {
 	body, err := io.ReadAll(r)
 	if err != nil {
-		return err
+		return "", err
 	}
 	f.Puts = append(f.Puts, PutCall{Bucket: bucket, Key: key, Content: string(body)})
 	if f.PutErr != nil {
-		return f.PutErr
+		return "", f.PutErr
 	}
+	return fmt.Sprintf("%x", md5.Sum(body)), nil
+}
+
+func (f *FakeS3) PutObjectStream(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error) {
+	return f.PutObject(ctx, bucket, key, r, size)
+}
+
+func (f *FakeS3) CreateMultipart(ctx context.Context, bucket, key string) (string, error) {
+	if f.CreateErr != nil {
+		return "", f.CreateErr
+	}
+	if f.Uploads == nil {
+		f.Uploads = map[string]map[int][]byte{}
+	}
+	f.nextUpload++
+	id := fmt.Sprintf("up-%d", f.nextUpload)
+	f.Uploads[id] = map[int][]byte{}
+	return id, nil
+}
+
+func (f *FakeS3) UploadPart(ctx context.Context, bucket, key, uploadID string, partNum int, r io.Reader, size int64) (string, error) {
+	if f.UploadErr != nil {
+		return "", f.UploadErr
+	}
+	parts, ok := f.Uploads[uploadID]
+	if !ok {
+		return "", fmt.Errorf("unknown uploadID %q", uploadID)
+	}
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return "", err
+	}
+	parts[partNum] = body
+	return fmt.Sprintf("%x", md5.Sum(body)), nil
+}
+
+func (f *FakeS3) CompleteMultipart(ctx context.Context, bucket, key, uploadID string, parts []UploadedPart) (string, error) {
+	if f.CompleteErr != nil {
+		return "", f.CompleteErr
+	}
+	stored, ok := f.Uploads[uploadID]
+	if !ok {
+		return "", fmt.Errorf("unknown uploadID %q", uploadID)
+	}
+	content := make(map[int][]byte, len(parts))
+	for _, p := range parts {
+		body, ok := stored[p.PartNumber]
+		if !ok {
+			return "", fmt.Errorf("part %d not uploaded", p.PartNumber)
+		}
+		content[p.PartNumber] = body
+	}
+	etag := multipartETag(content)
+	delete(f.Uploads, uploadID)
+	f.Completed = append(f.Completed, FakeCompletedUpload{Bucket: bucket, Key: key, ETag: etag, Parts: content})
+	return etag, nil
+}
+
+func (f *FakeS3) AbortMultipart(ctx context.Context, bucket, key, uploadID string) error {
+	delete(f.Uploads, uploadID)
+	f.Aborted = append(f.Aborted, uploadID)
 	return nil
+}
+
+// multipartETag computes the S3 multipart ETag over the parts: the MD5 of
+// the concatenated per-part binary MD5s, suffixed with the part count.
+func multipartETag(parts map[int][]byte) string {
+	nums := make([]int, 0, len(parts))
+	for n := range parts {
+		nums = append(nums, n)
+	}
+	sort.Ints(nums)
+	h := md5.New()
+	for _, n := range nums {
+		sum := md5.Sum(parts[n])
+		h.Write(sum[:])
+	}
+	return fmt.Sprintf("%x-%d", h.Sum(nil), len(nums))
 }
 
 var _ S3API = (*FakeS3)(nil)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -188,9 +189,10 @@ func TestS3ClientHeadObject(t *testing.T) {
 		gotPath = r.URL.Path
 		w.Header().Set("ETag", `"0123456789abcdef0123456789abcdef"`)
 		w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
+		w.Header().Set("Content-Length", "1048576")
 		w.WriteHeader(200)
 	})
-	etag, err := c.HeadObject(context.Background(), "k1")
+	etag, size, err := c.HeadObject(context.Background(), "k1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,15 +202,19 @@ func TestS3ClientHeadObject(t *testing.T) {
 	if etag != "0123456789abcdef0123456789abcdef" {
 		t.Errorf("etag = %q, want quotes stripped", etag)
 	}
+	if size != 1048576 {
+		t.Errorf("size = %d, want 1048576", size)
+	}
 }
 
 func TestS3ClientHeadObjectMultipartETag(t *testing.T) {
 	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", `"abc-3"`)
 		w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
+		w.Header().Set("Content-Length", "9437184")
 		w.WriteHeader(200)
 	})
-	etag, err := c.HeadObject(context.Background(), "k1")
+	etag, _, err := c.HeadObject(context.Background(), "k1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +227,7 @@ func TestS3ClientHeadObjectNotFound(t *testing.T) {
 	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
 	})
-	_, err := c.HeadObject(context.Background(), "missing")
+	_, _, err := c.HeadObject(context.Background(), "missing")
 	if err == nil {
 		t.Fatal("expected error for 404 HEAD")
 	}
@@ -230,36 +236,39 @@ func TestS3ClientHeadObjectNotFound(t *testing.T) {
 	}
 }
 
-func TestS3ClientCopyObject(t *testing.T) {
-	var gotMethod, gotCopySource, gotPath string
+// TestS3ClientDownloadRange — a streaming ranged GET used by backup relay.
+func TestS3ClientDownloadRange(t *testing.T) {
+	var gotRange string
 	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotCopySource = r.Header.Get("x-amz-copy-source")
-		gotPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/xml")
-		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><CopyObjectResult><LastModified>2026-09-08T00:00:00Z</LastModified><ETag>"abc"</ETag></CopyObjectResult>`))
+		gotRange = r.Header.Get("Range")
+		w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
+		w.WriteHeader(206)
+		w.Write([]byte("0123456789abcdef"))
 	})
-	if err := c.CopyObject(context.Background(), "src/key1", "dstbucket", "src/key1"); err != nil {
+	rc, err := c.DownloadRange(context.Background(), "k1", 5, 16)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if gotMethod != "PUT" {
-		t.Errorf("method = %q, want PUT", gotMethod)
+	defer rc.Close()
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if gotPath != "/dstbucket/src/key1" {
-		t.Errorf("path = %q, want /dstbucket/src/key1", gotPath)
+	if gotRange != "bytes=5-20" {
+		t.Errorf("Range header = %q, want bytes=5-20", gotRange)
 	}
-	if gotCopySource != "srcbucket/src/key1" {
-		t.Errorf("x-amz-copy-source = %q, want srcbucket/src/key1", gotCopySource)
+	if string(body) != "0123456789abcdef" {
+		t.Errorf("body = %q", body)
 	}
 }
 
-func TestS3ClientCopyObjectError(t *testing.T) {
+func TestS3ClientDownloadRangeError(t *testing.T) {
 	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
 	})
-	err := c.CopyObject(context.Background(), "src/key1", "dstbucket", "src/key1")
+	_, err := c.DownloadRange(context.Background(), "missing", 0, 10)
 	if err == nil {
-		t.Fatal("expected error for 404 copy")
+		t.Fatal("expected error for 404 GET")
 	}
 }
 
@@ -269,10 +278,12 @@ func TestS3ClientPutObject(t *testing.T) {
 	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		io.Copy(&gotBody, r.Body)
+		w.Header().Set("ETag", `"d41d8cd98f00b204e9800998ecf8427e"`)
 		w.WriteHeader(200)
 	})
 	content := "mybucket|k1\nmybucket|k2|1|0\n"
-	if err := c.PutObject(context.Background(), "dstbucket", ".backup_lists/list.txt", strings.NewReader(content), int64(len(content))); err != nil {
+	etag, err := c.PutObject(context.Background(), "dstbucket", ".backup_lists/list.txt", strings.NewReader(content), int64(len(content)))
+	if err != nil {
 		t.Fatal(err)
 	}
 	if gotPath != "/dstbucket/.backup_lists/list.txt" {
@@ -280,6 +291,9 @@ func TestS3ClientPutObject(t *testing.T) {
 	}
 	if decodeAwsChunked(gotBody.Bytes()) != content {
 		t.Errorf("body = %q, want %q", gotBody.String(), content)
+	}
+	if etag != "d41d8cd98f00b204e9800998ecf8427e" {
+		t.Errorf("etag = %q, want server-returned etag quotes stripped", etag)
 	}
 }
 
@@ -320,8 +334,88 @@ func TestS3ClientPutObjectError(t *testing.T) {
 	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(403)
 	})
-	err := c.PutObject(context.Background(), "dstbucket", "k", strings.NewReader("x"), 1)
+	_, err := c.PutObject(context.Background(), "dstbucket", "k", strings.NewReader("x"), 1)
 	if err == nil {
 		t.Fatal("expected error for 403 put")
+	}
+}
+
+// TestS3ClientMultipartFlow — Create/UploadPart/Complete/Abort against a
+// scripted fake server, asserting the wire format of each call.
+func TestS3ClientMultipartFlow(t *testing.T) {
+	var gotCompleteBody string
+	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		switch {
+		case r.Method == "POST" && q.Has("uploads"):
+			w.Header().Set("Content-Type", "application/xml")
+			fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult><Bucket>dstbucket</Bucket><Key>k</Key><UploadId>uid-1</UploadId></InitiateMultipartUploadResult>`)
+		case r.Method == "PUT" && q.Get("uploadId") == "uid-1":
+			io.Copy(io.Discard, r.Body)
+			w.Header().Set("ETag", `"part-etag"`)
+			w.WriteHeader(200)
+		case r.Method == "POST" && q.Get("uploadId") == "uid-1":
+			b, _ := io.ReadAll(r.Body)
+			// POST bodies are signed (not streaming-chunked) — plain XML.
+			gotCompleteBody = string(b)
+			w.Header().Set("Content-Type", "application/xml")
+			fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult><Bucket>dstbucket</Bucket><Key>k</Key><ETag>"mp-etag-2"</ETag></CompleteMultipartUploadResult>`)
+		case r.Method == "DELETE" && q.Get("uploadId") != "":
+			w.WriteHeader(204)
+		default:
+			w.WriteHeader(400)
+		}
+	})
+
+	uploadID, err := c.CreateMultipart(context.Background(), "dstbucket", "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uploadID != "uid-1" {
+		t.Fatalf("uploadID = %q, want uid-1", uploadID)
+	}
+
+	etag1, err := c.UploadPart(context.Background(), "dstbucket", "k", uploadID, 1, strings.NewReader("part-one"), 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if etag1 != "part-etag" {
+		t.Errorf("part etag = %q, want part-etag", etag1)
+	}
+
+	gotETag, err := c.CompleteMultipart(context.Background(), "dstbucket", "k", uploadID, []UploadedPart{{PartNumber: 1, ETag: etag1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotETag != "mp-etag-2" {
+		t.Errorf("complete etag = %q, want mp-etag-2", gotETag)
+	}
+	// The complete request body must list the uploaded parts.
+	if !strings.Contains(gotCompleteBody, "<PartNumber>1</PartNumber>") || !strings.Contains(gotCompleteBody, "<ETag>part-etag</ETag>") {
+		t.Errorf("complete body = %q, want part 1 with etag", gotCompleteBody)
+	}
+
+	if err := c.AbortMultipart(context.Background(), "dstbucket", "k", "uid-2"); err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+}
+
+func TestS3ClientMultipartPartError(t *testing.T) {
+	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if r.Method == "POST" && q.Has("uploads") {
+			w.Header().Set("Content-Type", "application/xml")
+			fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult><UploadId>uid-1</UploadId></InitiateMultipartUploadResult>`)
+			return
+		}
+		w.WriteHeader(500)
+	})
+	uploadID, err := c.CreateMultipart(context.Background(), "dstbucket", "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.UploadPart(context.Background(), "dstbucket", "k", uploadID, 1, strings.NewReader("x"), 1)
+	if err == nil {
+		t.Fatal("expected error for 500 part upload")
 	}
 }

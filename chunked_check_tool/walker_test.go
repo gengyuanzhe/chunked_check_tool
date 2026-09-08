@@ -230,15 +230,35 @@ func (c *countingS3) RangeGetAt(ctx context.Context, key string, offset, length 
 	return nil, nil
 }
 
-func (c *countingS3) HeadObject(ctx context.Context, key string) (string, error) {
+func (c *countingS3) HeadObject(ctx context.Context, key string) (string, int64, error) {
+	return "", 0, nil
+}
+
+func (c *countingS3) DownloadRange(ctx context.Context, key string, start, length int64) (io.ReadCloser, error) {
+	return nil, nil
+}
+
+func (c *countingS3) PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error) {
 	return "", nil
 }
 
-func (c *countingS3) CopyObject(ctx context.Context, srcKey, dstBucket, dstKey string) error {
-	return nil
+func (c *countingS3) PutObjectStream(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error) {
+	return "", nil
 }
 
-func (c *countingS3) PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) error {
+func (c *countingS3) CreateMultipart(ctx context.Context, bucket, key string) (string, error) {
+	return "", nil
+}
+
+func (c *countingS3) UploadPart(ctx context.Context, bucket, key, uploadID string, partNum int, r io.Reader, size int64) (string, error) {
+	return "", nil
+}
+
+func (c *countingS3) CompleteMultipart(ctx context.Context, bucket, key, uploadID string, parts []UploadedPart) (string, error) {
+	return "", nil
+}
+
+func (c *countingS3) AbortMultipart(ctx context.Context, bucket, key, uploadID string) error {
 	return nil
 }
 
