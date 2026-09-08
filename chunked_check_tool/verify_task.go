@@ -8,6 +8,7 @@ package main
 //     probe, write to mp_all without claiming ok_mp
 //   - IsMultipart=true, Offsets=[...] → probe each offset (fixed-segment or
 //     list-file sources)
+//
 // ETag/Size may be empty/zero for list-file-sourced tasks.
 type VerifyTask struct {
 	Key         string

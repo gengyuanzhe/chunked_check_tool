@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -59,10 +60,23 @@ func trimETagQuotes(s string) string {
 // RangeGetAt fetches `length` bytes starting at `offset` (for multipart
 // segment signature verification — each segment's first 128 bytes are
 // inspected in turn). offset is a byte offset into the object body.
+//
+// HeadObject returns the object's ETag (quotes stripped) via a HEAD
+// request — backup mode's authoritative regular-vs-multipart check.
+//
+// CopyObject server-side-copies srcKey from the client's bound source
+// bucket into dstBucket under dstKey. Default copy semantics: the source
+// object's user metadata is preserved (no REPLACE directive is sent).
+//
+// PutObject uploads size bytes from r to bucket/key — used to archive the
+// backup list file into the target bucket.
 type S3API interface {
 	ListPage(ctx context.Context, prefix, startAfter, continuationToken string, delim bool, maxKeys int) ([]ObjectInfo, []string, string, error)
 	RangeGet(ctx context.Context, key string) ([]byte, error)
 	RangeGetAt(ctx context.Context, key string, offset, length int64) ([]byte, error)
+	HeadObject(ctx context.Context, key string) (string, error)
+	CopyObject(ctx context.Context, srcKey, dstBucket, dstKey string) error
+	PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) error
 }
 
 // NewMinioClient constructs a minio.Client bound to a single endpoint.
@@ -338,6 +352,85 @@ func (c *S3Client) rangeGetAtOnce(ctx context.Context, key string, offset, lengt
 	return body, nil
 }
 
+// HeadObject returns the object's ETag with surrounding quotes stripped.
+// Used by backup mode: isNormalETag on the result decides regular vs
+// multipart. Same node-failover retry semantics as RangeGet.
+func (c *S3Client) HeadObject(ctx context.Context, key string) (string, error) {
+	etag, err := c.headObjectOnce(ctx, key)
+	if err != nil && c.pool != nil && isNodeFaultErr(err) {
+		c.pool.MarkFailed(c.nodeIdx)
+		if c.rebuild() {
+			etag, err = c.headObjectOnce(ctx, key)
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	return trimETagQuotes(etag), nil
+}
+
+func (c *S3Client) headObjectOnce(ctx context.Context, key string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	info, err := c.client.StatObject(ctx, c.bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		return "", err
+	}
+	return info.ETag, nil
+}
+
+// CopyObject server-side-copies srcKey (from the client's bound bucket)
+// into dstBucket/dstKey. No UserMetadata/ReplaceMetadata is set on the
+// destination, so the copy preserves the source's user metadata (minio-go
+// copies source metadata when none is provided). Same node-failover retry
+// semantics as RangeGet.
+func (c *S3Client) CopyObject(ctx context.Context, srcKey, dstBucket, dstKey string) error {
+	err := c.copyObjectOnce(ctx, srcKey, dstBucket, dstKey)
+	if err != nil && c.pool != nil && isNodeFaultErr(err) {
+		c.pool.MarkFailed(c.nodeIdx)
+		if c.rebuild() {
+			err = c.copyObjectOnce(ctx, srcKey, dstBucket, dstKey)
+		}
+	}
+	return err
+}
+
+func (c *S3Client) copyObjectOnce(ctx context.Context, srcKey, dstBucket, dstKey string) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	dst := minio.CopyDestOptions{Bucket: dstBucket, Object: dstKey}
+	src := minio.CopySrcOptions{Bucket: c.bucket, Object: srcKey}
+	_, err := c.client.CopyObject(ctx, dst, src)
+	return err
+}
+
+// PutObject uploads size bytes from r to bucket/key. Used once per backup
+// run to archive the input list file into the target bucket. Same
+// node-failover retry semantics as RangeGet.
+func (c *S3Client) PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) error {
+	// r must be re-readable across the retry; copy into memory once (the
+	// list file is at most a few MB).
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	err = c.putObjectOnce(ctx, bucket, key, bytes.NewReader(body), size)
+	if err != nil && c.pool != nil && isNodeFaultErr(err) {
+		c.pool.MarkFailed(c.nodeIdx)
+		if c.rebuild() {
+			err = c.putObjectOnce(ctx, bucket, key, bytes.NewReader(body), size)
+		}
+	}
+	return err
+}
+
+func (c *S3Client) putObjectOnce(ctx context.Context, bucket, key string, r io.Reader, size int64) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	_, err := c.client.PutObject(ctx, bucket, key, r, size, minio.PutObjectOptions{})
+	return err
+}
+
 // isNodeFaultErr reports whether err is a transient node-fault error that
 // should trigger failover: connection errors, timeouts, and HTTP 5xx
 // responses. Business-level 4xx errors (404 Not Found, 403 Forbidden,
@@ -404,6 +497,34 @@ type FakeS3 struct {
 	// "first segment clean, second segment matches the chunk signature".
 	// When nil, RangeGetAt returns Body (same as RangeGet).
 	RangeGetHandler func(offset, length int64) ([]byte, error)
+
+	// Heads maps key → ETag (quotes already stripped) returned by
+	// HeadObject. A missing key returns HeadErr (or a default normal ETag
+	// when HeadErr is nil) so tests only set what they care about.
+	Heads   map[string]string
+	HeadErr error
+	// CopyErr, when non-nil, makes CopyObject fail. Calls are recorded in
+	// Copies for assertion.
+	CopyErr error
+	Copies  []CopyCall
+	// PutErr, when non-nil, makes PutObject fail. Calls are recorded in
+	// Puts for assertion.
+	PutErr error
+	Puts   []PutCall
+}
+
+// CopyCall records one FakeS3.CopyObject invocation.
+type CopyCall struct {
+	SrcKey    string
+	DstBucket string
+	DstKey    string
+}
+
+// PutCall records one FakeS3.PutObject invocation.
+type PutCall struct {
+	Bucket  string
+	Key     string
+	Content string
 }
 
 func (f *FakeS3) ListPage(ctx context.Context, prefix, startAfter, continuationToken string, delim bool, maxKeys int) ([]ObjectInfo, []string, string, error) {
@@ -434,6 +555,37 @@ func (f *FakeS3) RangeGetAt(ctx context.Context, key string, offset, length int6
 		return f.RangeGetHandler(offset, length)
 	}
 	return f.Body, nil
+}
+
+func (f *FakeS3) HeadObject(ctx context.Context, key string) (string, error) {
+	if f.HeadErr != nil {
+		return "", f.HeadErr
+	}
+	if etag, ok := f.Heads[key]; ok {
+		return etag, nil
+	}
+	// Default: a normal 32-hex ETag so unset keys behave as regular objects.
+	return "0123456789abcdef0123456789abcdef", nil
+}
+
+func (f *FakeS3) CopyObject(ctx context.Context, srcKey, dstBucket, dstKey string) error {
+	f.Copies = append(f.Copies, CopyCall{SrcKey: srcKey, DstBucket: dstBucket, DstKey: dstKey})
+	if f.CopyErr != nil {
+		return f.CopyErr
+	}
+	return nil
+}
+
+func (f *FakeS3) PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) error {
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	f.Puts = append(f.Puts, PutCall{Bucket: bucket, Key: key, Content: string(body)})
+	if f.PutErr != nil {
+		return f.PutErr
+	}
+	return nil
 }
 
 var _ S3API = (*FakeS3)(nil)

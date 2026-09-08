@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -227,6 +228,18 @@ func (c *countingS3) RangeGet(ctx context.Context, key string) ([]byte, error) {
 
 func (c *countingS3) RangeGetAt(ctx context.Context, key string, offset, length int64) ([]byte, error) {
 	return nil, nil
+}
+
+func (c *countingS3) HeadObject(ctx context.Context, key string) (string, error) {
+	return "", nil
+}
+
+func (c *countingS3) CopyObject(ctx context.Context, srcKey, dstBucket, dstKey string) error {
+	return nil
+}
+
+func (c *countingS3) PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) error {
+	return nil
 }
 
 var _ S3API = (*countingS3)(nil)
