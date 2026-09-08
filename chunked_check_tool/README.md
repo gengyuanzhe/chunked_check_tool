@@ -104,7 +104,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 - `partcnt` 个 offset，`offset0=0`，严格递增
 - 坏行（格式错误/bkt 不匹配）写入 `list_failed.txt` 并跳过
 - 必须 `is_check=true`（文件即列表，无需列举）
-- 此模式下 `list_all` 显示 0（不经过 S3 LIST），`list_failed` 仅统计坏行
+- 此模式无 S3 LIST，进度行与汇总不显示 `list_*` 指标，改用输入消耗量：进度行 `[progress] read=X/Y ok_mp=… corrupt_mp=… list_failed=… mp_check_failed=… get_calls=… get_avg_ms=… (checked=N) q=obj:… cor_mp:… ok_mp:… mcf:… lf:…`；汇总 `read: X/Y` + `list_failed`（仅坏行）+ `get_calls` + `ok_mp/corrupt_mp/mp_check_failed`。`read` 每读一行 +1（含坏行）；`Y` 为启动时统计的文件总行数，统计失败时只显示 `read: X`
 - 校验结果正常输出：损坏 → `<ownerID>/corrupted_mp.txt`，GET 失败 → `mp_check_failed.txt/.log`（无需配 `is_multipart_segment_check`）；全部干净 → `ok_mp.txt`（需配 `is_multipart_success_log: true`）。行内无 owner 信息，结果落在 `_unknown/` 子目录
 
 固定分段校验（`is_multipart_segment_check=true` + `multipart_segment_size`）是本模式的特殊情况：offsets 由 `[0, seg, 2*seg, ...]` 计算而来，本模式则显式给出。
@@ -141,7 +141,7 @@ mismatch，每条原因见 `mismatch.log`。
 - 坏行（格式错误/bkt 不匹配）与 `-list-file` 一致：写入 `list_failed.txt` 并跳过
 - 复用 `check_concurrency` 作为备份 worker 数；节点故障轮询仅覆盖请求发起阶段——流式中转一旦开始，中途故障不重试（流不可重放），整对象记为失败
 - S3 多段约束：非末段必须 ≥5MB。输入行语义是原始 part 边界（原上传本来合规）；若喂入"固定分段"格式（段 <5MB）会被 S3 拒绝（EntityTooSmall）→ `backup_failed`
-- 汇总行：`backup_ok: N backup_failed: N backup_mismatch: N backup_skipped_clean: N`（另含 `get_calls`，多段校验产生；`backup_mismatch` = 输入类型校验失败数，见流程第 3 步）
+- 观测指标（无 S3 LIST，不显示 `list_*`）：进度行 `[progress] read=X/Y list_failed=… backup_ok=… backup_failed=… backup_mismatch=… backup_skipped_clean=… get_calls=… get_avg_ms=… (backed=N) q=obj:… lf:… bok:… bfail:… mm:… bsc:…`；汇总 `read: X/Y`（输入消耗，含坏行；`Y` 为启动时统计的总行数，统计失败时只显示 `read: X`）+ `list_failed` + `get_calls`（多段校验探测产生）+ `backup_ok: N backup_failed: N backup_mismatch: N backup_skipped_clean: N`（`backup_mismatch` = 输入类型校验失败数，见流程第 3 步）
 
 ## 输出
 

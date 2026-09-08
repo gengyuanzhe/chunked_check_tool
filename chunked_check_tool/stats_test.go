@@ -83,7 +83,7 @@ func TestStatsPrintSummaryCheckMode(t *testing.T) {
 	s.IncrMpCheckFailed()
 	s.SetTotalDuration(15 * time.Second)
 	var buf strings.Builder
-	s.PrintSummary(&buf, true, false)
+	s.PrintSummary(&buf, ModeListCheck)
 	out := buf.String()
 	for _, want := range []string{
 		"=== summary ===",
@@ -111,7 +111,7 @@ func TestStatsPrintSummaryListOnlyMode(t *testing.T) {
 	s.IncrListFailed()
 	s.SetTotalDuration(2 * time.Second)
 	var buf strings.Builder
-	s.PrintSummary(&buf, false, false)
+	s.PrintSummary(&buf, ModeListOnly)
 	out := buf.String()
 	for _, want := range []string{
 		"=== summary ===",
@@ -139,6 +139,53 @@ func TestStatsPrintSummaryListOnlyMode(t *testing.T) {
 	}
 }
 
+func TestStatsPrintSummaryListFileMode(t *testing.T) {
+	s := NewStats()
+	s.SetTotalLines(4)
+	for i := 0; i < 4; i++ {
+		s.IncrReadLine()
+	}
+	s.IncrOkMp()
+	s.IncrOkMp()
+	s.IncrCorruptedMp()
+	s.IncrMpCheckFailed()
+	s.IncrListFailed()
+	s.AddGetCall(10 * time.Millisecond)
+	s.SetTotalDuration(20 * time.Second)
+	var buf strings.Builder
+	s.PrintSummary(&buf, ModeListFile)
+	out := buf.String()
+	for _, want := range []string{
+		"=== summary ===",
+		"read: 4/4 total_sec: 20.00",
+		"list_failed: 1",
+		"get_calls: 1",
+		"ok_mp: 2 corrupt_mp: 1 mp_check_failed: 1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list-file summary missing %q\nfull:\n%s", want, out)
+		}
+	}
+	// No S3 LIST happens in list-file mode — list_* lines are all-zero noise.
+	// The leading space on " check_failed:" avoids matching mp_check_failed.
+	for _, notWant := range []string{"list_all:", "list_obj:", "list_calls:", "ok_obj:", "corrupt_obj:", " check_failed:", "backup_ok:", "read: 4 "} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("list-file summary should not contain %q\nfull:\n%s", notWant, out)
+		}
+	}
+}
+
+func TestStatsPrintSummaryListFileModeNoTotal(t *testing.T) {
+	// Total unknown: bare read count, no /0.
+	s := NewStats()
+	s.IncrReadLine()
+	var buf strings.Builder
+	s.PrintSummary(&buf, ModeListFile)
+	if !strings.Contains(buf.String(), "read: 1 total_sec") {
+		t.Errorf("want read: 1 without denominator, got:\n%s", buf.String())
+	}
+}
+
 func TestStatsBackupCounters(t *testing.T) {
 	s := NewStats()
 	s.IncrBackupOk()
@@ -154,6 +201,10 @@ func TestStatsBackupCounters(t *testing.T) {
 
 func TestStatsPrintSummaryBackupMode(t *testing.T) {
 	s := NewStats()
+	s.SetTotalLines(5)
+	for i := 0; i < 5; i++ {
+		s.IncrReadLine()
+	}
 	s.IncrBackupOk()
 	s.IncrBackupFailed()
 	s.IncrBackupMismatch()
@@ -161,8 +212,11 @@ func TestStatsPrintSummaryBackupMode(t *testing.T) {
 	s.AddGetCall(5 * time.Millisecond)
 	s.SetTotalDuration(3 * time.Second)
 	var buf strings.Builder
-	s.PrintSummary(&buf, true, true)
+	s.PrintSummary(&buf, ModeBackup)
 	out := buf.String()
+	if !strings.Contains(out, "read: 5/5 total_sec: 3.00") {
+		t.Errorf("backup summary missing read line\nfull:\n%s", out)
+	}
 	// One new line, all four counters on it.
 	if !strings.Contains(out, "backup_ok: 1 backup_failed: 1 backup_mismatch: 1 backup_skipped_clean: 1") {
 		t.Errorf("backup summary line missing\nfull:\n%s", out)
@@ -181,5 +235,11 @@ func TestStatsPrintSummaryBackupMode(t *testing.T) {
 	// check_failed: must be absent too.
 	if strings.Contains(out, "check_failed:") {
 		t.Errorf("backup summary should not contain check_failed\nfull:\n%s", out)
+	}
+	// No S3 LIST happens in backup mode — list_* lines are all-zero noise.
+	for _, notWant := range []string{"list_all:", "list_obj:", "list_calls:"} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("backup summary should not contain %q\nfull:\n%s", notWant, out)
+		}
 	}
 }

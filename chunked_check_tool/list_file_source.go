@@ -3,9 +3,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -95,9 +97,11 @@ func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyT
 
 // listFileSource reads a list file line-by-line and pushes VerifyTasks to
 // objCh. Malformed lines are written to list_failed (with line number) and
-// bump IncrListFailed; processing continues. The source does NOT bump
-// listed_obj/listed_mp counters (per spec §6 — list-file mode bypasses S3
-// LIST, so "listed" semantics don't apply; summary shows list_all: 0).
+// bump IncrListFailed; processing continues. Every line read (valid or
+// malformed) bumps IncrReadLine — the read=X/Y progress denominator for
+// this mode. The listed_* counters are NOT bumped (per spec §6 — list-file
+// mode bypasses S3 LIST, so "listed" semantics don't apply; the summary
+// reports read instead of list_all).
 type listFileSource struct {
 	path   string
 	bucket string
@@ -122,6 +126,7 @@ func (s *listFileSource) Run(ctx context.Context, objCh chan<- VerifyTask) error
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
+		s.stats.IncrReadLine()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -150,4 +155,38 @@ func (s *listFileSource) Run(ctx context.Context, objCh chan<- VerifyTask) error
 		}
 	}
 	return scanner.Err()
+}
+
+// countFileLines counts the lines in path with one sequential read. A
+// final line without a trailing newline counts as one line, matching the
+// bufio.Scanner semantics of listFileSource/backupSource (so read can
+// reach total exactly). Used once at startup as the read=X/Y progress
+// denominator; a mid-count file modification is tolerated (the total is
+// advisory).
+func countFileLines(path string) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	var n int64
+	buf := make([]byte, 256*1024)
+	last := byte('\n')
+	for {
+		c, err := f.Read(buf)
+		if c > 0 {
+			n += int64(bytes.Count(buf[:c], []byte{'\n'}))
+			last = buf[c-1]
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
+	if last != '\n' {
+		n++
+	}
+	return n, nil
 }

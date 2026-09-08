@@ -88,7 +88,8 @@ func NewChecker(worker S3API, out *Output, stats *Stats, cfg *Config) *Checker {
 // here (RangeGet on an empty body returns 416 → would misclassify as
 // check_failed). Listed-counter bumps (list_obj/list_mp) are NOT done here —
 // the S3 lister bumps them in check mode before pushing the task. List-file
-// source does not bump them, so summary shows list_all: 0 in list-file mode.
+// source does not bump them (no S3 LIST); its summary reports read=X/Y
+// instead of list_all.
 func (c *Checker) Handle(task VerifyTask) {
 	if !task.IsMultipart && task.Size == 0 {
 		c.stats.IncrOkObjects()

@@ -34,8 +34,8 @@
 | `checker.go` | `Checker`、`isNormalETag`（严格 32 位小写 hex）、`chunkSigRe` |
 | `output.go` | 8 channel + writer goroutine（5 个按 OwnerID 分目录 fan-out，3 个根目录全局），`bufio.Writer` 64KB，append 模式，per-owner 文件按 `<ownerID>/<filename>` 路由（OwnerID 为空 → `_unknown/`） |
 | `queue.go` | 无界队列（slice + mutex + cond），ctx-aware 阻塞 Pop |
-| `stats.go` | atomic.Int64 计数器 + `StatsSnapshot` + `PrintSummary`（写入 stdout，被 `mwOut` tee 进 run.log） |
-| `progress.go` | `ProgressPrinter` + `localCounter`（每 worker 本地 int，无 per-obj atomic） |
+| `stats.go` | atomic.Int64 计数器 + `StatsSnapshot` + `PrintSummary`（按 `RunMode` 分模式输出指标集；写入 stdout，被 `mwOut` tee 进 run.log） |
+| `progress.go` | `ProgressPrinter`（按 `RunMode` 输出进度行字段集）+ `localCounter`（每 worker 本地 int，无 per-obj atomic） |
 
 ## 4. 关键不变量（改动前必须守住）
 
@@ -67,7 +67,9 @@
 
 14. **多段分段检查的失败分流**：分段 RangeGet 报错走 `mp_check_failed` 路径（`WriteMpCheckFailed` + `IncrMpCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）。
 
-15. **统计字段命名**（display name / Go 字段）：`list_obj` (`ListedObjects`) / `list_mp` (`ListedMp`) / `list_all` (`ListedAll=list_obj+list_mp`) / `ok_obj` (`OkObjects`) / `corrupt_obj` (`CorruptedObjects`) / `ok_mp` (`OkMp`) / `corrupt_mp` (`CorruptedMp`) / `list_failed` (`ListFailed`) / `check_failed` (`CheckFailed`) / `mp_check_failed` (`MpCheckFailed`)。**关键语义**：`ok_mp` 只在 `is_multipart_segment_check=true` 且通过分段检查时 +1；switch off 时多段对象只计 `list_mp`，**不**计 `ok_mp`——未校验不能谎称干净。`is_check=false`（list-only）时 `ok_obj`/`corrupt_obj`/`ok_mp`/`corrupt_mp`/`check_failed`/`mp_check_failed` 全部为 0，summary 不输出这些字段。
+15. **统计字段命名**（display name / Go 字段）：`list_obj` (`ListedObjects`) / `list_mp` (`ListedMp`) / `list_all` (`ListedAll=list_obj+list_mp`) / `ok_obj` (`OkObjects`) / `corrupt_obj` (`CorruptedObjects`) / `ok_mp` (`OkMp`) / `corrupt_mp` (`CorruptedMp`) / `list_failed` (`ListFailed`) / `check_failed` (`CheckFailed`) / `mp_check_failed` (`MpCheckFailed`) / `read` (`ReadLines`，-list-file/-backup-file 的输入行消耗，每读一行 +1 含坏行) / `total` (`TotalLines`，启动时 `countFileLines` 统计的输入文件总行数)。**关键语义**：`ok_mp` 只在 `is_multipart_segment_check=true` 且通过分段检查时 +1；switch off 时多段对象只计 `list_mp`，**不**计 `ok_mp`——未校验不能谎称干净。`is_check=false`（list-only）时 `ok_obj`/`corrupt_obj`/`ok_mp`/`corrupt_mp`/`check_failed`/`mp_check_failed` 全部为 0，summary 不输出这些字段。
+
+16. **进度行与 summary 按 `RunMode` 输出指标集**：`ModeListCheck`/`ModeListOnly` 用 list/check 全量字段；`ModeListFile`（-list-file）打 `read=X/Y` + `ok_mp/corrupt_mp/mp_check_failed`；`ModeBackup`（-backup-file）打 `read=X/Y` + `backup_ok/backup_failed/backup_mismatch/backup_skipped_clean`。后两种模式**不**输出 `list_all`/`list_calls`/`list_obj` 等 list 指标——无 S3 LIST，全是 0 噪声。`q=` 队列快照同理按模式裁剪（list-file 无 BFS 队列，backup 用 `BackupChannelSnapshot`）。`Y`（总行数）统计失败时输出裸 `read: X`，不打印 `/0`。
 
 ## 5. CLI 与配置
 
@@ -77,6 +79,8 @@
 -bkt <bucket>      # 桶名，必填
 -prefix <prefix>   # 列举前缀，可选，默认空
 -nextmarker <key>  # start-after key，可选；仅 Mode 1 根分页使用
+-list-file <path>  # 列表文件，可选；跳过 S3 LIST 按行校验（与 -backup-file 互斥，需 is_check=true）
+-backup-file <path># 备份列表文件，可选；HEAD+校验+中转（与 -list-file 互斥，需配置 backup_bucket）
 ```
 
 ### config.yaml 字段

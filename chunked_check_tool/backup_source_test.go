@@ -197,6 +197,11 @@ func TestBackupSourceRunEndToEnd(t *testing.T) {
 	if got := stats.Snapshot().ListFailed; got != 2 {
 		t.Errorf("ListFailed=%d want 2", got)
 	}
+	// Every line read (valid + malformed) bumps read for the read=X/Y
+	// progress denominator.
+	if got := stats.Snapshot().ReadLines; got != 6 {
+		t.Errorf("ReadLines=%d want 6 (all lines read, malformed included)", got)
+	}
 	if err := out.Close(); err != nil {
 		t.Fatalf("output close: %v", err)
 	}

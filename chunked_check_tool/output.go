@@ -588,6 +588,22 @@ func (o *Output) ChannelSnapshot() (corrupted, multipartAll, corruptedMultipart,
 	return
 }
 
+// BackupChannelSnapshot returns the current length of the backup-mode
+// writer channels. list_failed is shared with the other modes and always
+// reports; the four backup channels report 0 when backup mode is off.
+// Called from ProgressPrinter's queueSnapshot provider once per progress
+// line in -backup-file mode.
+func (o *Output) BackupChannelSnapshot() (listFailed, backupOk, backupFailed, mismatch, backupSkippedClean int) {
+	listFailed = len(o.listFailedCh)
+	if o.backupEnabled {
+		backupOk = len(o.backupOkCh)
+		backupFailed = len(o.backupFailedCh)
+		mismatch = len(o.mismatchCh)
+		backupSkippedClean = len(o.backupSkippedCleanCh)
+	}
+	return
+}
+
 func (o *Output) Close() error {
 	// list_failed always has a consumer. The other channels only have a
 	// consumer when their file was opened (gated on the enable flags in

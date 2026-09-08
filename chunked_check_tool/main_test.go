@@ -105,8 +105,13 @@ func TestRunListFileDispatch(t *testing.T) {
 	if !strings.Contains(out, "list_failed: 1") {
 		t.Errorf("stdout = %q, want substring %q", out, "list_failed: 1")
 	}
-	if !strings.Contains(out, "list_all: 0") {
-		t.Errorf("stdout = %q, want substring %q (list-file source does not bump listed counters)", out, "list_all: 0")
+	// list-file summary reports input consumption instead of list_all (no
+	// S3 LIST happens): the one malformed line was still read.
+	if !strings.Contains(out, "read: 1/1") {
+		t.Errorf("stdout = %q, want substring %q (list-file summary reports read=X/Y)", out, "read: 1/1")
+	}
+	if strings.Contains(out, "list_all:") {
+		t.Errorf("stdout = %q should not contain list_all (all-zero noise in list-file mode)", out)
 	}
 
 	// The malformed line must be persisted to list_failed.txt for resumable
@@ -164,5 +169,55 @@ func TestRunListFileMultipartResultsEndToEnd(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "corrupt_mp: 1") || !strings.Contains(out, "ok_mp: 1") {
 		t.Errorf("summary missing mp counts\nfull:\n%s", out)
+	}
+}
+
+// TestRunListFileProgressLine — the list-file progress line must fire
+// through the full run() wiring (mode-aware printer + read/total counters),
+// not just direct MaybePrint calls: interval=1 fires one line per task.
+func TestRunListFileProgressLine(t *testing.T) {
+	f := newFakeBackupS3Server(t)
+	f.objects["mp1"] = fakeBackupObject{ETag: "0123456789abcdef0123456789abcdef-1", Content: []byte(corruptBody)}
+	f.objects["mpclean"] = fakeBackupObject{ETag: "0123456789abcdef0123456789abcdef-1", Content: []byte("clean multipart content")}
+	host := strings.TrimPrefix(f.srv.URL, "http://")
+	dir := t.TempDir()
+	cfg := &Config{
+		Endpoints:        []string{host},
+		Scheme:           "http",
+		AK:               "t",
+		SK:               "t",
+		OutputDir:        dir,
+		IsCheck:          true,
+		ProgressInterval: 1,
+		CheckConcurrency: 2,
+		ListConcurrency:  2,
+		ListAPIVersion:   2,
+	}
+	listPath := filepath.Join(dir, "list.txt")
+	content := "srcbucket|mp1|1|0\n" +
+		"srcbucket|mpclean|1|0\n"
+	if err := os.WriteFile(listPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := run(context.Background(), cfg, "srcbucket", "", "", listPath, "", &buf); err != nil {
+		t.Fatalf("run returned err: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "[progress] read=") {
+		t.Errorf("no list-file progress line in output:\n%s", out)
+	}
+	// A task is only handed to a worker after its line was read, so the
+	// progress line following the second task shows read=2/2.
+	if !strings.Contains(out, "read=2/2") {
+		t.Errorf("progress output missing read=2/2:\n%s", out)
+	}
+	for _, want := range []string{"ok_mp=", "corrupt_mp=", "get_calls=", "(checked="} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list-file progress line missing %q\nfull:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "list_all=") || strings.Contains(out, "list_calls=") {
+		t.Errorf("list-file progress should not contain list_* noise:\n%s", out)
 	}
 }

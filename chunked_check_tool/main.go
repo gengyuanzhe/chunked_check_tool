@@ -150,7 +150,16 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter, listFile,
 		return fmt.Errorf("output: %w", err)
 	}
 	stats := NewStats()
-	printer := NewProgressPrinter(stdout)
+	mode := ModeListCheck
+	if listFile != "" {
+		mode = ModeListFile
+	} else if !cfg.IsCheck {
+		mode = ModeListOnly
+	}
+	printer := NewProgressPrinter(stdout, mode)
+	if listFile != "" {
+		setTotalLinesOrLog(stats, listFile)
+	}
 	start := time.Now()
 
 	objChCap := cfg.ObjChCapacity
@@ -216,7 +225,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter, listFile,
 			log.Printf("output close: %v", err)
 		}
 		stats.SetTotalDuration(time.Since(start))
-		stats.PrintSummary(stdout, cfg.IsCheck, false)
+		stats.PrintSummary(stdout, mode)
 		// Return ctx.Err() (nil on happy path, context.Canceled on SIGINT)
 		// so main logs the interrupt and exits non-zero, matching the S3
 		// mode's seedErr path. Output and stats are flushed above first.
@@ -340,7 +349,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter, listFile,
 		log.Printf("output close: %v", err)
 	}
 	stats.SetTotalDuration(time.Since(start))
-	stats.PrintSummary(stdout, cfg.IsCheck, false)
+	stats.PrintSummary(stdout, mode)
 	// Return the seed-loop error (e.g. ctx.Err() on SIGINT) AFTER shutdown
 	// has flushed buffered output and written stats. main logs the interrupt
 	// and exits non-zero, but no data is lost.
@@ -373,7 +382,8 @@ func runBackup(ctx context.Context, cfg *Config, bucket, backupFile string, stdo
 		return fmt.Errorf("output: %w", err)
 	}
 	stats := NewStats()
-	printer := NewProgressPrinter(stdout)
+	printer := NewProgressPrinter(stdout, ModeBackup)
+	setTotalLinesOrLog(stats, backupFile)
 	start := time.Now()
 
 	// The list archive is the record of what this run intended to back up,
@@ -392,6 +402,17 @@ func runBackup(ctx context.Context, cfg *Config, bucket, backupFile string, stdo
 		}
 	}
 	ch := make(chan BackupTask, objChCap)
+	printer.SetQueueSnapshotProvider(func() QueueSnapshot {
+		lf, bok, bfail, mm, bsc := out.BackupChannelSnapshot()
+		return QueueSnapshot{
+			ObjCh:              len(ch),
+			ListFailed:         lf,
+			BackupOk:           bok,
+			BackupFailed:       bfail,
+			Mismatch:           mm,
+			BackupSkippedClean: bsc,
+		}
+	})
 
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.CheckConcurrency; i++ {
@@ -421,10 +442,23 @@ func runBackup(ctx context.Context, cfg *Config, bucket, backupFile string, stdo
 		log.Printf("output close: %v", err)
 	}
 	stats.SetTotalDuration(time.Since(start))
-	stats.PrintSummary(stdout, true, true)
+	stats.PrintSummary(stdout, ModeBackup)
 	// ctx.Err() (nil on happy path, context.Canceled on SIGINT) so main logs
 	// the interrupt and exits non-zero, matching the other modes.
 	return ctx.Err()
+}
+
+// setTotalLinesOrLog counts the input file's lines once at startup so
+// progress lines and the summary can show read=X/Y. A counting failure is
+// non-fatal — the source reports an unreadable file when it opens it —
+// and leaves the total at 0, which readTotal renders as a bare count.
+func setTotalLinesOrLog(stats *Stats, path string) {
+	total, err := countFileLines(path)
+	if err != nil {
+		log.Printf("count lines in %s: %v", path, err)
+		return
+	}
+	stats.SetTotalLines(total)
 }
 
 // uploadBackupList archives the input list file into the backup bucket under

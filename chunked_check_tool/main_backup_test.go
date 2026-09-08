@@ -275,6 +275,14 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 	if !strings.Contains(out, "backup_ok: 2 backup_failed: 0 backup_mismatch: 1 backup_skipped_clean: 1") {
 		t.Errorf("stdout missing backup summary line\nfull:\n%s", out)
 	}
+	// Input consumption replaces the bucket modes' list_all line: 5 lines in
+	// the backup list, all read (the malformed one included).
+	if !strings.Contains(out, "read: 5/5") {
+		t.Errorf("stdout missing read: 5/5 summary line\nfull:\n%s", out)
+	}
+	if strings.Contains(out, "list_all:") {
+		t.Errorf("stdout should not contain list_all (all-zero noise in backup mode)\nfull:\n%s", out)
+	}
 
 	// Local result files. cfg.OutputDir carries the timestamp suffix
 	// (default-on output_dir_timestamp), which runBackup created.
@@ -380,5 +388,54 @@ func TestRunBackupListUploadFailure(t *testing.T) {
 	err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, &buf)
 	if err == nil || !strings.Contains(err.Error(), "upload backup list") {
 		t.Fatalf("run err = %v, want upload backup list failure", err)
+	}
+}
+
+// TestRunBackupProgressLine — the backup progress line must fire through
+// the full runBackup wiring (mode-aware printer + read/total counters +
+// backup queue snapshot): interval=1 fires one line per task.
+func TestRunBackupProgressLine(t *testing.T) {
+	f := newFakeBackupS3Server(t)
+	regContent := []byte("plain regular object body")
+	f.objects["reg1"] = fakeBackupObject{ETag: md5Hex(regContent), Content: regContent}
+	// reg2 is absent on purpose: HEAD 404 → backup_failed (stage=head).
+	host := strings.TrimPrefix(f.srv.URL, "http://")
+	dir := t.TempDir()
+	cfg := &Config{
+		Endpoints:        []string{host},
+		Scheme:           "http",
+		AK:               "test",
+		SK:               "test",
+		OutputDir:        dir,
+		ProgressInterval: 1,
+		BackupBucket:     "dstbucket",
+		CheckConcurrency: 2,
+		ListConcurrency:  2,
+		ListAPIVersion:   2,
+	}
+	backupPath := filepath.Join(dir, "list.txt")
+	if err := os.WriteFile(backupPath, []byte("srcbucket|reg1\nsrcbucket|reg2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, &buf); err != nil {
+		t.Fatalf("run returned err: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "[progress] read=") {
+		t.Errorf("no backup progress line in output:\n%s", out)
+	}
+	// A task is only handed to a worker after its line was read, so the
+	// progress line following the second task shows read=2/2.
+	if !strings.Contains(out, "read=2/2") {
+		t.Errorf("progress output missing read=2/2:\n%s", out)
+	}
+	for _, want := range []string{"backup_ok=", "backup_failed=", "(backed="} {
+		if !strings.Contains(out, want) {
+			t.Errorf("backup progress line missing %q\nfull:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "list_all=") || strings.Contains(out, "corrupt_obj=") {
+		t.Errorf("backup progress should not contain check-mode noise:\n%s", out)
 	}
 }

@@ -57,7 +57,8 @@ func parseBackupFileLine(line string, expectedBucket string, lineNum int) (Backu
 
 // backupSource reads a backup list file line-by-line and pushes BackupTasks
 // to ch. Malformed lines go to list_failed (same as listFileSource) and
-// processing continues.
+// processing continues. Every line read (valid or malformed) bumps
+// IncrReadLine — the read=X/Y progress denominator for backup mode.
 type backupSource struct {
 	path   string
 	bucket string
@@ -81,6 +82,7 @@ func (s *backupSource) Run(ctx context.Context, ch chan<- BackupTask) error {
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
+		s.stats.IncrReadLine()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
