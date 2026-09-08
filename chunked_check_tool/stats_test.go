@@ -83,7 +83,7 @@ func TestStatsPrintSummaryCheckMode(t *testing.T) {
 	s.IncrMpCheckFailed()
 	s.SetTotalDuration(15 * time.Second)
 	var buf strings.Builder
-	s.PrintSummary(&buf, true)
+	s.PrintSummary(&buf, true, false)
 	out := buf.String()
 	for _, want := range []string{
 		"=== summary ===",
@@ -111,7 +111,7 @@ func TestStatsPrintSummaryListOnlyMode(t *testing.T) {
 	s.IncrListFailed()
 	s.SetTotalDuration(2 * time.Second)
 	var buf strings.Builder
-	s.PrintSummary(&buf, false)
+	s.PrintSummary(&buf, false, false)
 	out := buf.String()
 	for _, want := range []string{
 		"=== summary ===",
@@ -136,5 +136,50 @@ func TestStatsPrintSummaryListOnlyMode(t *testing.T) {
 		if strings.Contains(out, notWant) {
 			t.Errorf("list-only summary should not contain %q\nfull:\n%s", notWant, out)
 		}
+	}
+}
+
+func TestStatsBackupCounters(t *testing.T) {
+	s := NewStats()
+	s.IncrBackupOk()
+	s.IncrBackupOk()
+	s.IncrBackupFailed()
+	s.IncrBackupMismatch()
+	s.IncrBackupSkippedClean()
+	snap := s.Snapshot()
+	if snap.BackupOk != 2 || snap.BackupFailed != 1 || snap.BackupMismatch != 1 || snap.BackupSkippedClean != 1 {
+		t.Errorf("backup counters = %+v", snap)
+	}
+}
+
+func TestStatsPrintSummaryBackupMode(t *testing.T) {
+	s := NewStats()
+	s.IncrBackupOk()
+	s.IncrBackupFailed()
+	s.IncrBackupMismatch()
+	s.IncrBackupSkippedClean()
+	s.AddGetCall(5 * time.Millisecond)
+	s.SetTotalDuration(3 * time.Second)
+	var buf strings.Builder
+	s.PrintSummary(&buf, true, true)
+	out := buf.String()
+	// One new line, all four counters on it.
+	if !strings.Contains(out, "backup_ok: 1 backup_failed: 1 backup_mismatch: 1 backup_skipped_clean: 1") {
+		t.Errorf("backup summary line missing\nfull:\n%s", out)
+	}
+	// get_calls stays (multipart verify uses RangeGetAt).
+	if !strings.Contains(out, "get_calls: 1") {
+		t.Errorf("backup summary missing get_calls\nfull:\n%s", out)
+	}
+	// Check-mode counters are not bumped in backup mode — don't print them.
+	for _, notWant := range []string{"ok_obj:", "corrupt_obj:", "ok_mp:", "corrupt_mp:", "mp_check_failed:"} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("backup summary should not contain %q\nfull:\n%s", notWant, out)
+		}
+	}
+	// check_failed appears only in the list_failed form on line 1? No —
+	// check_failed: must be absent too.
+	if strings.Contains(out, "check_failed:") {
+		t.Errorf("backup summary should not contain check_failed\nfull:\n%s", out)
 	}
 }

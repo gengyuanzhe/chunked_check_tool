@@ -35,9 +35,13 @@ type Output struct {
 	successCh            chan ownerLine
 
 	// root-level channels (global, no ownerID)
-	listFailedCh    chan string
-	checkFailedCh   chan string
-	mpCheckFailedCh chan string
+	listFailedCh         chan string
+	checkFailedCh        chan string
+	mpCheckFailedCh      chan string
+	backupOkCh           chan string
+	backupFailedCh       chan string
+	mismatchCh           chan string
+	backupSkippedCleanCh chan string
 
 	// slog loggers for the three .log files (root, concurrency-safe)
 	listLogger           *slog.Logger
@@ -46,6 +50,8 @@ type Output struct {
 	checkLogFile         *os.File
 	mpCheckFailedLogger  *slog.Logger
 	mpCheckFailedLogFile *os.File
+	backupFailedLogger   *slog.Logger
+	backupFailedLogFile  *os.File
 
 	// enable flags — each gates one writer goroutine + file
 	corruptedEnabled          bool // is_check
@@ -55,6 +61,7 @@ type Output struct {
 	mpCheckFailedEnabled      bool // is_check && is_multipart_segment_check
 	checkEnabled              bool // is_check
 	successEnabled            bool // is_check && is_success_log
+	backupEnabled             bool // backup mode: the four backup files
 
 	wg    sync.WaitGroup
 	files []*os.File // root files only — per-owner files are owned by their goroutines
@@ -148,6 +155,61 @@ func NewOutput(cfg *Config, bucket string) (*Output, error) {
 		if err := o.openMpCheckFailedLog(); err != nil {
 			return nil, err
 		}
+	}
+	return o, nil
+}
+
+// NewBackupOutput builds an Output for -backup-file mode: list_failed
+// (malformed input lines) plus the four backup result files and
+// backup_failed.log. The per-owner check-mode files (corrupted/ok/multipart)
+// are not opened.
+func NewBackupOutput(cfg *Config, bucket string) (*Output, error) {
+	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
+		return nil, fmt.Errorf("mkdir output: %w", err)
+	}
+	chCap := cfg.OutputChCapacity
+	if chCap <= 0 {
+		chCap = 1024
+	}
+	format := cfg.ResultLineFormat
+	if format == "" {
+		format = "<bucket>|<key>"
+	}
+	lineFmt, err := parseLineFormat(format)
+	if err != nil {
+		return nil, err
+	}
+	o := &Output{
+		dir:                  cfg.OutputDir,
+		bucket:               bucket,
+		lineFmt:              lineFmt,
+		listFailedCh:         make(chan string, chCap),
+		backupOkCh:           make(chan string, chCap),
+		backupFailedCh:       make(chan string, chCap),
+		mismatchCh:           make(chan string, chCap),
+		backupSkippedCleanCh: make(chan string, chCap),
+		backupEnabled:        true,
+	}
+	if err := o.openAndStartRoot("list_failed.txt", o.listFailedCh); err != nil {
+		return nil, err
+	}
+	if err := o.openListFailedLog(); err != nil {
+		return nil, err
+	}
+	if err := o.openAndStartRoot("backup_ok.txt", o.backupOkCh); err != nil {
+		return nil, err
+	}
+	if err := o.openAndStartRoot("backup_failed.txt", o.backupFailedCh); err != nil {
+		return nil, err
+	}
+	if err := o.openBackupFailedLog(); err != nil {
+		return nil, err
+	}
+	if err := o.openAndStartRoot("mismatch.txt", o.mismatchCh); err != nil {
+		return nil, err
+	}
+	if err := o.openAndStartRoot("backup_skipped_clean.txt", o.backupSkippedCleanCh); err != nil {
+		return nil, err
 	}
 	return o, nil
 }
@@ -282,6 +344,22 @@ func (o *Output) openMpCheckFailedLog() error {
 	return nil
 }
 
+// openBackupFailedLog opens backup_failed.log at the root and wires it to a
+// *slog.Logger. Each WriteBackupFailedLog call becomes one structured
+// record carrying the failure stage (head/verify/copy) and the error:
+//
+//	time=... level=ERROR msg="backup failed" req_id=... key=... stage=copy http_code=... s3_code=... err=...
+func (o *Output) openBackupFailedLog() error {
+	f, err := os.OpenFile(filepath.Join(o.dir, "backup_failed.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("open backup_failed.log: %w", err)
+	}
+	o.backupFailedLogFile = f
+	o.files = append(o.files, f)
+	o.backupFailedLogger = slog.New(slog.NewTextHandler(f, nil))
+	return nil
+}
+
 func (o *Output) WriteCorrupted(ownerID, key string) {
 	if o.corruptedEnabled {
 		o.corruptedCh <- ownerLine{ownerID, key}
@@ -363,6 +441,51 @@ func (o *Output) WriteMpCheckFailed(key string) {
 		o.mpCheckFailedCh <- key
 	}
 }
+
+func (o *Output) WriteBackupOk(key string) {
+	if o.backupEnabled {
+		o.backupOkCh <- key
+	}
+}
+func (o *Output) WriteBackupFailed(key string) {
+	if o.backupEnabled {
+		o.backupFailedCh <- key
+	}
+}
+
+// WriteBackupFailedLog records the failure stage (head/verify/copy) and the
+// error behind a backup_failed.txt entry.
+func (o *Output) WriteBackupFailedLog(key, stage string, statusCode int, s3Code, reqID string, err error) {
+	if !o.backupEnabled || o.backupFailedLogger == nil {
+		return
+	}
+	attrs := []any{slog.String("req_id", orDash(reqID)), slog.String("bucket", orDash(o.bucket))}
+	attrs = append(attrs, slog.String("key", key), slog.String("stage", stage))
+	if statusCode > 0 {
+		attrs = append(attrs, slog.Int("http_code", statusCode))
+	} else {
+		attrs = append(attrs, slog.String("http_code", "N/A"))
+	}
+	if s3Code != "" {
+		attrs = append(attrs, slog.String("s3_code", s3Code))
+	}
+	attrs = append(attrs, slog.Any("err", err))
+	o.backupFailedLogger.Error("backup failed", attrs...)
+}
+
+// WriteMismatch records the raw input line whose field shape (regular vs
+// multipart) disagrees with the HEAD ETag.
+func (o *Output) WriteMismatch(rawLine string) {
+	if o.backupEnabled {
+		o.mismatchCh <- rawLine
+	}
+}
+func (o *Output) WriteBackupSkippedClean(key string) {
+	if o.backupEnabled {
+		o.backupSkippedCleanCh <- key
+	}
+}
+
 func (o *Output) WriteMpCheckFailedLog(key string, statusCode int, s3Code, reqID string, err error) {
 	if !o.mpCheckFailedEnabled || o.mpCheckFailedLogger == nil {
 		return
@@ -436,6 +559,12 @@ func (o *Output) Close() error {
 	}
 	if o.successEnabled {
 		close(o.successCh)
+	}
+	if o.backupEnabled {
+		close(o.backupOkCh)
+		close(o.backupFailedCh)
+		close(o.mismatchCh)
+		close(o.backupSkippedCleanCh)
 	}
 	o.wg.Wait()
 	var firstErr error

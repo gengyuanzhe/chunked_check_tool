@@ -246,3 +246,56 @@ func TestOutputListOnlySkipsPerOwnerFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestBackupOutputWritesFourFiles(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true}
+	out, err := NewBackupOutput(cfg, "mybucket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.WriteBackupOk("k1")
+	out.WriteBackupOk("k2")
+	out.WriteBackupFailed("k3")
+	out.WriteMismatch("mybucket|k4|1|0")
+	out.WriteBackupSkippedClean("k5")
+	out.WriteListFailed("mybucket|bad")
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, dir, "backup_ok.txt", "k1\nk2\n")
+	assertFileContent(t, dir, "backup_failed.txt", "k3\n")
+	assertFileContent(t, dir, "mismatch.txt", "mybucket|k4|1|0\n")
+	assertFileContent(t, dir, "backup_skipped_clean.txt", "k5\n")
+	assertFileContent(t, dir, "list_failed.txt", "mybucket|bad\n")
+}
+
+// TestBackupOutputNoCheckModeFiles — backup output must not create the
+// per-owner check-mode files; only the backup files + list_failed exist.
+func TestBackupOutputNoCheckModeFiles(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, IsSuccessLog: true, IsMultipartSegmentCheck: true, MultipartSegmentSize: 1024, IsMultipartSuccessLog: true}
+	out, err := NewBackupOutput(cfg, "mybucket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"corrupted_objects.txt", "mp.txt", "corrupted_mp.txt", "ok_mp.txt", "ok_objects.txt", "check_failed.txt", "mp_check_failed.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			t.Errorf("backup output created check-mode file %s", name)
+		}
+	}
+}
+
+func assertFileContent(t *testing.T, dir, name, want string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	if string(data) != want {
+		t.Errorf("%s = %q, want %q", name, string(data), want)
+	}
+}

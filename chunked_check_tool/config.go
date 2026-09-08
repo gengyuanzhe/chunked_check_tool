@@ -26,6 +26,7 @@ type Config struct {
 	ObjChCapacity           int      `yaml:"obj_ch_capacity"`
 	OutputChCapacity        int      `yaml:"output_ch_capacity"`
 	ResultLineFormat        string   `yaml:"result_line_format"`
+	BackupBucket            string   `yaml:"backup_bucket"`
 }
 
 func LoadConfig(path string) (*Config, error) {

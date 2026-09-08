@@ -134,6 +134,47 @@ multipart_segment_size: 5242880
 	}
 }
 
+func TestLoadConfig_BackupBucket(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte(`
+endpoints:
+  - 10.0.0.1:9000
+ak: x
+sk: y
+backup_bucket: backup-target
+`)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BackupBucket != "backup-target" {
+		t.Errorf("backup_bucket = %q, want %q", cfg.BackupBucket, "backup-target")
+	}
+}
+
+// TestLoadConfig_BackupBucketDefaultEmpty — no "reasonable" default for the
+// backup target; it must be explicit. Backup mode validates non-empty at
+// startup (LoadConfig is mode-agnostic because the mode comes from flags).
+func TestLoadConfig_BackupBucketDefaultEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\n")
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BackupBucket != "" {
+		t.Errorf("backup_bucket default = %q, want empty (unset)", cfg.BackupBucket)
+	}
+}
+
 // TestLoadConfig_SegmentCheckWithoutSize — is_multipart_segment_check=true
 // with multipart_segment_size=0 is a contradictory config: the user asked for
 // segment check but provided no segment size. Fail fast at startup rather
