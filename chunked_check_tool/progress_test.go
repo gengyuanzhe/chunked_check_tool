@@ -96,7 +96,6 @@ func TestProgressNoQueueLengthsWhenProvidersNil(t *testing.T) {
 
 func TestProgressListFileMode(t *testing.T) {
 	s := NewStats()
-	s.SetTotalLines(50000)
 	for i := 0; i < 12000; i++ {
 		s.IncrReadLine()
 	}
@@ -118,7 +117,7 @@ func TestProgressListFileMode(t *testing.T) {
 	pp.MaybePrint(s, "checked", 100)
 	out := buf.String()
 	for _, want := range []string{
-		`read=12000/50000`,
+		`read=12000`,
 		`ok_mp=1`,
 		`corrupt_mp=2`,
 		`list_failed=1`,
@@ -145,24 +144,8 @@ func TestProgressListFileMode(t *testing.T) {
 	}
 }
 
-func TestProgressListFileModeNoTotal(t *testing.T) {
-	// Total unknown (count failed / empty file): bare read count, no /0.
-	s := NewStats()
-	s.IncrReadLine()
-	var buf bytes.Buffer
-	pp := NewProgressPrinter(&buf, ModeListFile)
-	pp.MaybePrint(s, "checked", 1)
-	if !strings.Contains(buf.String(), "read=1 ") {
-		t.Errorf("want read=1 without denominator, got:\n%s", buf.String())
-	}
-	if strings.Contains(buf.String(), "read=1/") {
-		t.Errorf("should not print /0 total, got:\n%s", buf.String())
-	}
-}
-
 func TestProgressBackupMode(t *testing.T) {
 	s := NewStats()
-	s.SetTotalLines(1000)
 	for i := 0; i < 300; i++ {
 		s.IncrReadLine()
 	}
@@ -187,7 +170,7 @@ func TestProgressBackupMode(t *testing.T) {
 	pp.MaybePrint(s, "backed", 50)
 	out := buf.String()
 	for _, want := range []string{
-		`read=300/1000`,
+		`read=300`,
 		`list_failed=1`,
 		`backup_ok=3`,
 		`backup_failed=1`,

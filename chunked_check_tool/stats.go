@@ -16,16 +16,6 @@ const (
 	ModeBackup                   // -backup-file: HEAD + verify + relay
 )
 
-// readTotal renders the read/total progress fraction: "12/5000", or just
-// "12" when the total is unknown (0 — input line counting failed or the
-// file was empty).
-func readTotal(read, total int64) string {
-	if total > 0 {
-		return fmt.Sprintf("%d/%d", read, total)
-	}
-	return fmt.Sprintf("%d", read)
-}
-
 type Stats struct {
 	listedObjectsCount    atomic.Int64
 	listedMpCount         atomic.Int64
@@ -46,11 +36,11 @@ type Stats struct {
 	backupSkippedCleanCnt atomic.Int64
 
 	// Input-file consumption for -list-file / -backup-file: every line read
-	// (valid or malformed) bumps readLines; totalLines is set once at
-	// startup from a line count of the input file. read=X/Y is the progress
-	// denominator for the file modes, replacing the bucket modes' list_all.
-	readLines  atomic.Int64
-	totalLines atomic.Int64
+	// (valid or malformed) bumps readLines. read=X is the cumulative
+	// progress counter for the file modes, replacing the bucket modes'
+	// list_all (no total is counted — a full pre-scan of the input file is
+	// not worth the extra pass).
+	readLines atomic.Int64
 
 	// Durations are atomics because SetListDuration is called from the
 	// goroutine that closes objCh while the main goroutine may already be
@@ -82,7 +72,6 @@ type StatsSnapshot struct {
 	BackupMismatch     int64
 	BackupSkippedClean int64
 	ReadLines          int64
-	TotalLines         int64
 	TotalSec           float64
 }
 
@@ -104,7 +93,6 @@ func (s *Stats) IncrBackupFailed()       { s.backupFailedCount.Add(1) }
 func (s *Stats) IncrBackupMismatch()     { s.backupMismatchCount.Add(1) }
 func (s *Stats) IncrBackupSkippedClean() { s.backupSkippedCleanCnt.Add(1) }
 func (s *Stats) IncrReadLine()           { s.readLines.Add(1) }
-func (s *Stats) SetTotalLines(n int64)   { s.totalLines.Store(n) }
 
 func (s *Stats) AddListCall(latency time.Duration) {
 	s.listCalls.Add(1)
@@ -160,14 +148,13 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		BackupMismatch:     s.backupMismatchCount.Load(),
 		BackupSkippedClean: s.backupSkippedCleanCnt.Load(),
 		ReadLines:          s.readLines.Load(),
-		TotalLines:         s.totalLines.Load(),
 		TotalSec:           time.Duration(s.totalDurationNs.Load()).Seconds(),
 	}
 }
 
 // PrintSummary writes the final === summary === block. The metric set is
 // mode-specific: the bucket modes print list_* + check outcomes, while
-// -list-file and -backup-file print input consumption (read=X/Y) plus only
+// -list-file and -backup-file print input consumption (read) plus only
 // the outcomes those modes can produce — no S3 LIST happens, so list_all/
 // list_calls would be all-zero noise.
 func (s *Stats) PrintSummary(w io.Writer, mode RunMode) {
@@ -175,8 +162,7 @@ func (s *Stats) PrintSummary(w io.Writer, mode RunMode) {
 	fmt.Fprintf(w, "=== summary ===\n")
 	switch mode {
 	case ModeListFile, ModeBackup:
-		fmt.Fprintf(w, "read: %s total_sec: %.2f\n",
-			readTotal(snap.ReadLines, snap.TotalLines), snap.TotalSec)
+		fmt.Fprintf(w, "read: %d total_sec: %.2f\n", snap.ReadLines, snap.TotalSec)
 		fmt.Fprintf(w, "list_failed: %d\n", snap.ListFailed)
 		// get_calls stays: multipart verification goes through RangeGetAt.
 		fmt.Fprintf(w, "get_calls: %d avg_latency_ms: %.2f get_total_sec: %.2f\n",

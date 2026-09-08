@@ -157,9 +157,6 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter, listFile,
 		mode = ModeListOnly
 	}
 	printer := NewProgressPrinter(stdout, mode)
-	if listFile != "" {
-		setTotalLinesOrLog(stats, listFile)
-	}
 	start := time.Now()
 
 	objChCap := cfg.ObjChCapacity
@@ -383,7 +380,6 @@ func runBackup(ctx context.Context, cfg *Config, bucket, backupFile string, stdo
 	}
 	stats := NewStats()
 	printer := NewProgressPrinter(stdout, ModeBackup)
-	setTotalLinesOrLog(stats, backupFile)
 	start := time.Now()
 
 	// The list archive is the record of what this run intended to back up,
@@ -446,19 +442,6 @@ func runBackup(ctx context.Context, cfg *Config, bucket, backupFile string, stdo
 	// ctx.Err() (nil on happy path, context.Canceled on SIGINT) so main logs
 	// the interrupt and exits non-zero, matching the other modes.
 	return ctx.Err()
-}
-
-// setTotalLinesOrLog counts the input file's lines once at startup so
-// progress lines and the summary can show read=X/Y. A counting failure is
-// non-fatal — the source reports an unreadable file when it opens it —
-// and leaves the total at 0, which readTotal renders as a bare count.
-func setTotalLinesOrLog(stats *Stats, path string) {
-	total, err := countFileLines(path)
-	if err != nil {
-		log.Printf("count lines in %s: %v", path, err)
-		return
-	}
-	stats.SetTotalLines(total)
 }
 
 // uploadBackupList archives the input list file into the backup bucket under

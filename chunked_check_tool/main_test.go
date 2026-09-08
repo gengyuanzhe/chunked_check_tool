@@ -107,8 +107,8 @@ func TestRunListFileDispatch(t *testing.T) {
 	}
 	// list-file summary reports input consumption instead of list_all (no
 	// S3 LIST happens): the one malformed line was still read.
-	if !strings.Contains(out, "read: 1/1") {
-		t.Errorf("stdout = %q, want substring %q (list-file summary reports read=X/Y)", out, "read: 1/1")
+	if !strings.Contains(out, "read: 1") {
+		t.Errorf("stdout = %q, want substring %q (list-file summary reports read)", out, "read: 1")
 	}
 	if strings.Contains(out, "list_all:") {
 		t.Errorf("stdout = %q should not contain list_all (all-zero noise in list-file mode)", out)
@@ -208,9 +208,9 @@ func TestRunListFileProgressLine(t *testing.T) {
 		t.Errorf("no list-file progress line in output:\n%s", out)
 	}
 	// A task is only handed to a worker after its line was read, so the
-	// progress line following the second task shows read=2/2.
-	if !strings.Contains(out, "read=2/2") {
-		t.Errorf("progress output missing read=2/2:\n%s", out)
+	// progress line following the second task shows read=2.
+	if !strings.Contains(out, "read=2 ") {
+		t.Errorf("progress output missing read=2:\n%s", out)
 	}
 	for _, want := range []string{"ok_mp=", "corrupt_mp=", "get_calls=", "(checked="} {
 		if !strings.Contains(out, want) {

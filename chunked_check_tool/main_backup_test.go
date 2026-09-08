@@ -277,8 +277,8 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 	}
 	// Input consumption replaces the bucket modes' list_all line: 5 lines in
 	// the backup list, all read (the malformed one included).
-	if !strings.Contains(out, "read: 5/5") {
-		t.Errorf("stdout missing read: 5/5 summary line\nfull:\n%s", out)
+	if !strings.Contains(out, "read: 5") {
+		t.Errorf("stdout missing read: 5 summary line\nfull:\n%s", out)
 	}
 	if strings.Contains(out, "list_all:") {
 		t.Errorf("stdout should not contain list_all (all-zero noise in backup mode)\nfull:\n%s", out)
@@ -426,9 +426,9 @@ func TestRunBackupProgressLine(t *testing.T) {
 		t.Errorf("no backup progress line in output:\n%s", out)
 	}
 	// A task is only handed to a worker after its line was read, so the
-	// progress line following the second task shows read=2/2.
-	if !strings.Contains(out, "read=2/2") {
-		t.Errorf("progress output missing read=2/2:\n%s", out)
+	// progress line following the second task shows read=2.
+	if !strings.Contains(out, "read=2 ") {
+		t.Errorf("progress output missing read=2:\n%s", out)
 	}
 	for _, want := range []string{"backup_ok=", "backup_failed=", "(backed="} {
 		if !strings.Contains(out, want) {

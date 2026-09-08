@@ -54,10 +54,10 @@ func (p *ProgressPrinter) SetQueueSnapshotProvider(fn func() QueueSnapshot) {
 
 // MaybePrint reads a global stats snapshot and prints one progress line.
 // The field set is mode-specific: bucket modes print the list/check
-// metrics, -list-file prints input consumption (read=X/Y) plus the
-// multipart outcomes it can produce, -backup-file prints input consumption
-// plus the relay outcomes. label is "listed"/"checked"/"backed"; count is
-// the worker's local accumulated value since the last print. The snapshot
+// metrics, -list-file prints input consumption (read) plus the multipart
+// outcomes it can produce, -backup-file prints input consumption plus the
+// relay outcomes. label is "listed"/"checked"/"backed"; count is the
+// worker's local accumulated value since the last print. The snapshot
 // fields are read atomically here (once per threshold crossing), never
 // per-object.
 func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
@@ -67,14 +67,14 @@ func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
 	switch p.mode {
 	case ModeListFile:
 		fmt.Fprintf(p.w,
-			"[progress] read=%s ok_mp=%d corrupt_mp=%d list_failed=%d mp_check_failed=%d get_calls=%d get_avg_ms=%.2f (%s=%d)",
-			readTotal(snap.ReadLines, snap.TotalLines),
+			"[progress] read=%d ok_mp=%d corrupt_mp=%d list_failed=%d mp_check_failed=%d get_calls=%d get_avg_ms=%.2f (%s=%d)",
+			snap.ReadLines,
 			snap.OkMp, snap.CorruptedMp, snap.ListFailed, snap.MpCheckFailed,
 			snap.GetCalls, snap.GetAvgLatencyMs, label, count)
 	case ModeBackup:
 		fmt.Fprintf(p.w,
-			"[progress] read=%s list_failed=%d backup_ok=%d backup_failed=%d backup_mismatch=%d backup_skipped_clean=%d get_calls=%d get_avg_ms=%.2f (%s=%d)",
-			readTotal(snap.ReadLines, snap.TotalLines),
+			"[progress] read=%d list_failed=%d backup_ok=%d backup_failed=%d backup_mismatch=%d backup_skipped_clean=%d get_calls=%d get_avg_ms=%.2f (%s=%d)",
+			snap.ReadLines,
 			snap.ListFailed, snap.BackupOk, snap.BackupFailed,
 			snap.BackupMismatch, snap.BackupSkippedClean,
 			snap.GetCalls, snap.GetAvgLatencyMs, label, count)

@@ -141,7 +141,6 @@ func TestStatsPrintSummaryListOnlyMode(t *testing.T) {
 
 func TestStatsPrintSummaryListFileMode(t *testing.T) {
 	s := NewStats()
-	s.SetTotalLines(4)
 	for i := 0; i < 4; i++ {
 		s.IncrReadLine()
 	}
@@ -157,7 +156,7 @@ func TestStatsPrintSummaryListFileMode(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"=== summary ===",
-		"read: 4/4 total_sec: 20.00",
+		"read: 4 total_sec: 20.00",
 		"list_failed: 1",
 		"get_calls: 1",
 		"ok_mp: 2 corrupt_mp: 1 mp_check_failed: 1",
@@ -168,21 +167,10 @@ func TestStatsPrintSummaryListFileMode(t *testing.T) {
 	}
 	// No S3 LIST happens in list-file mode — list_* lines are all-zero noise.
 	// The leading space on " check_failed:" avoids matching mp_check_failed.
-	for _, notWant := range []string{"list_all:", "list_obj:", "list_calls:", "ok_obj:", "corrupt_obj:", " check_failed:", "backup_ok:", "read: 4 "} {
+	for _, notWant := range []string{"list_all:", "list_obj:", "list_calls:", "ok_obj:", "corrupt_obj:", " check_failed:", "backup_ok:"} {
 		if strings.Contains(out, notWant) {
 			t.Errorf("list-file summary should not contain %q\nfull:\n%s", notWant, out)
 		}
-	}
-}
-
-func TestStatsPrintSummaryListFileModeNoTotal(t *testing.T) {
-	// Total unknown: bare read count, no /0.
-	s := NewStats()
-	s.IncrReadLine()
-	var buf strings.Builder
-	s.PrintSummary(&buf, ModeListFile)
-	if !strings.Contains(buf.String(), "read: 1 total_sec") {
-		t.Errorf("want read: 1 without denominator, got:\n%s", buf.String())
 	}
 }
 
@@ -201,7 +189,6 @@ func TestStatsBackupCounters(t *testing.T) {
 
 func TestStatsPrintSummaryBackupMode(t *testing.T) {
 	s := NewStats()
-	s.SetTotalLines(5)
 	for i := 0; i < 5; i++ {
 		s.IncrReadLine()
 	}
@@ -214,7 +201,7 @@ func TestStatsPrintSummaryBackupMode(t *testing.T) {
 	var buf strings.Builder
 	s.PrintSummary(&buf, ModeBackup)
 	out := buf.String()
-	if !strings.Contains(out, "read: 5/5 total_sec: 3.00") {
+	if !strings.Contains(out, "read: 5 total_sec: 3.00") {
 		t.Errorf("backup summary missing read line\nfull:\n%s", out)
 	}
 	// One new line, all four counters on it.

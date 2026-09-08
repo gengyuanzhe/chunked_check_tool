@@ -178,8 +178,8 @@ func TestListFileSourceRunEndToEnd(t *testing.T) {
 	if got := stats.Snapshot().ListedObjects; got != 0 {
 		t.Errorf("ListedObjects=%d want 0", got)
 	}
-	// Every line read (valid + malformed) bumps read for the read=X/Y
-	// progress denominator.
+	// Every line read (valid + malformed) bumps read for the read progress
+	// counter.
 	if got := stats.Snapshot().ReadLines; got != 4 {
 		t.Errorf("ReadLines=%d want 4 (all lines read, malformed included)", got)
 	}
@@ -217,45 +217,5 @@ func TestParseListFileLineErrorFields(t *testing.T) {
 	}
 	if mle.LineNum != 42 {
 		t.Errorf("LineNum = %d, want 42", mle.LineNum)
-	}
-}
-
-// TestCountFileLines covers the read=X/Y denominator: trailing newline,
-// final line without newline, empty file, and CRLF-ish content (the count
-// only looks for '\n', matching bufio.Scanner's line splitting).
-func TestCountFileLines(t *testing.T) {
-	dir := t.TempDir()
-	cases := []struct {
-		name    string
-		content string
-		want    int64
-	}{
-		{"trailing newline", "a\nb\nc\n", 3},
-		{"no trailing newline", "a\nb\nc", 3},
-		{"single line no newline", "a", 1},
-		{"empty", "", 0},
-		{"blank lines count", "\n\n", 2},
-		{"crlf", "a\r\nb\r\n", 2},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			p := filepath.Join(dir, tc.name)
-			if err := os.WriteFile(p, []byte(tc.content), 0644); err != nil {
-				t.Fatal(err)
-			}
-			got, err := countFileLines(p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != tc.want {
-				t.Errorf("countFileLines(%q) = %d, want %d", tc.content, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestCountFileLinesMissingFile(t *testing.T) {
-	if _, err := countFileLines(filepath.Join(t.TempDir(), "nope.txt")); err == nil {
-		t.Error("expected error for missing file")
 	}
 }
