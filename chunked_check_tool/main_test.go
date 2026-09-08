@@ -44,7 +44,7 @@ func TestRunEndToEnd_smoke(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var buf bytes.Buffer
-	if err := run(ctx, cfg, os.Getenv("S3_BUCKET"), os.Getenv("S3_PREFIX"), "", &buf); err != nil {
+	if err := run(ctx, cfg, os.Getenv("S3_BUCKET"), os.Getenv("S3_PREFIX"), "", "", &buf); err != nil {
 		t.Fatal(err)
 	}
 }
