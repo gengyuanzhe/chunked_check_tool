@@ -49,14 +49,24 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: -backup-file requires -c config with backup_bucket=<name>")
 		os.Exit(2)
 	}
+	if *backupFile != "" && cfg.BackupOutputDir == "" {
+		fmt.Fprintln(os.Stderr, "usage: -backup-file requires -c config with backup_output_dir=<path>")
+		os.Exit(2)
+	}
 
-	// Open run.log at output_dir root and tee stdout+stderr into it. We
-	// open it before NewOutput so that NewOutput's mkdir error (if any)
-	// is also captured. The dir may not exist yet, so mkdir here first.
-	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
+	// Open run.log at the active output dir root and tee stdout+stderr into
+	// it. Backup mode writes to BackupOutputDir; list/check modes write to
+	// OutputDir. We open it before NewOutput so that NewOutput's mkdir error
+	// (if any) is also captured. The dir may not exist yet, so mkdir here
+	// first.
+	outDir := cfg.OutputDir
+	if *backupFile != "" {
+		outDir = cfg.BackupOutputDir
+	}
+	if err := os.MkdirAll(outDir, 0755); err != nil {
 		log.Fatalf("mkdir output dir: %v", err)
 	}
-	runLogPath := filepath.Join(cfg.OutputDir, "run.log")
+	runLogPath := filepath.Join(outDir, "run.log")
 	runLog, err := os.OpenFile(runLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		log.Fatalf("open run.log: %v", err)
@@ -99,6 +109,7 @@ func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, start
 	fmt.Fprintf(w, "    check_concurrency: %d\n", cfg.CheckConcurrency)
 	fmt.Fprintf(w, "    output_dir: %s\n", cfg.OutputDir)
 	fmt.Fprintf(w, "    output_dir_timestamp: %t\n", cfg.OutputDirTimestamp)
+	fmt.Fprintf(w, "    backup_output_dir: %s\n", orEmpty(cfg.BackupOutputDir))
 	fmt.Fprintf(w, "    is_check: %t\n", cfg.IsCheck)
 	fmt.Fprintf(w, "    is_success_log: %t\n", cfg.IsSuccessLog)
 	fmt.Fprintf(w, "    is_multipart_segment_check: %t\n", cfg.IsMultipartSegmentCheck)

@@ -287,6 +287,90 @@ func TestLoadConfig_OutputDirTimestampExplicitTrue(t *testing.T) {
 	assertStampedOutputDir(t, cfg, "/tmp/e2e_out")
 }
 
+// TestLoadConfig_BackupOutputDir — a dedicated output directory for
+// -backup-file mode, kept separate from output_dir so a single config can
+// drive both list/check and backup runs without their result files mixing.
+// Required when in backup mode (main.go enforces); ignored otherwise.
+func TestLoadConfig_BackupOutputDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte(`
+endpoints:
+  - 10.0.0.1:9000
+ak: x
+sk: y
+output_dir: ./out
+backup_output_dir: ./backup_out
+`)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// output_dir_timestamp defaults to true, so backup_output_dir also gets
+	// the stamp — same stamp as output_dir so a run lands in a matched pair.
+	if !strings.HasPrefix(cfg.BackupOutputDir, "./backup_out_") {
+		t.Errorf("backup_output_dir = %q, want prefix %q", cfg.BackupOutputDir, "./backup_out_")
+	}
+	outputStamp := strings.TrimPrefix(cfg.OutputDir, "./out_")
+	backupStamp := strings.TrimPrefix(cfg.BackupOutputDir, "./backup_out_")
+	if outputStamp != backupStamp {
+		t.Errorf("output_dir stamp %q != backup_output_dir stamp %q (should share one timestamp)", outputStamp, backupStamp)
+	}
+}
+
+// TestLoadConfig_BackupOutputDirTimestampOff — with output_dir_timestamp
+// explicitly false, backup_output_dir is used verbatim (no stamp). Resume-
+// friendly for backup retries that need to append into a fixed dir.
+func TestLoadConfig_BackupOutputDirTimestampOff(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte(`
+endpoints:
+  - 10.0.0.1:9000
+ak: x
+sk: y
+output_dir: ./out
+backup_output_dir: ./backup_out
+output_dir_timestamp: false
+`)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BackupOutputDir != "./backup_out" {
+		t.Errorf("backup_output_dir = %q, want %q verbatim", cfg.BackupOutputDir, "./backup_out")
+	}
+	if cfg.OutputDir != "./out" {
+		t.Errorf("output_dir = %q, want %q verbatim", cfg.OutputDir, "./out")
+	}
+}
+
+// TestLoadConfig_BackupOutputDirDefaultEmpty — no "reasonable" default for
+// the backup output dir; it must be explicit in backup mode. LoadConfig is
+// mode-agnostic (the mode comes from flags), so it stays empty here and
+// main.go fatals when -backup-file is used without it.
+func TestLoadConfig_BackupOutputDirDefaultEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\n")
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BackupOutputDir != "" {
+		t.Errorf("backup_output_dir default = %q, want empty (unset)", cfg.BackupOutputDir)
+	}
+}
+
 // TestLoadConfig_SegmentCheckWithoutSize — is_multipart_segment_check=true
 // with multipart_segment_size=0 is a contradictory config: the user asked for
 // segment check but provided no segment size. Fail fast at startup rather

@@ -36,7 +36,7 @@ func relayParts() map[int][]byte {
 func newBackupTestEnv(t *testing.T, f *FakeS3) (*BackupChecker, string, func()) {
 	t.Helper()
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, BackupBucket: "dstbucket"}
+	cfg := &Config{OutputDir: dir, BackupOutputDir: dir, BackupBucket: "dstbucket"}
 	out, err := NewBackupOutput(cfg, "mybucket")
 	if err != nil {
 		t.Fatal(err)

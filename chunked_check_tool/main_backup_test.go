@@ -246,7 +246,7 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 	cfgContent := "endpoints:\n  - " + host + "\n" +
 		"scheme: http\nak: test\nsk: test\n" +
 		"list_api_version: 2\nlist_concurrency: 2\ncheck_concurrency: 2\n" +
-		"output_dir: " + dir + "\nprogress_interval: 1000\n" +
+		"output_dir: " + dir + "\nbackup_output_dir: " + dir + "\nprogress_interval: 1000\n" +
 		"backup_bucket: dstbucket\n"
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
 		t.Fatal(err)
@@ -335,6 +335,7 @@ func TestRunBackupFileETagMismatchEndToEnd(t *testing.T) {
 		AK:               "test",
 		SK:               "test",
 		OutputDir:        dir,
+		BackupOutputDir:  dir,
 		ProgressInterval: 1000,
 		BackupBucket:     "dstbucket",
 		CheckConcurrency: 2,
@@ -380,6 +381,7 @@ func TestRunBackupListUploadFailure(t *testing.T) {
 		AK:               "test",
 		SK:               "test",
 		OutputDir:        dir,
+		BackupOutputDir:  dir,
 		ProgressInterval: 1000,
 		BackupBucket:     "dstbucket",
 	}
@@ -410,6 +412,7 @@ func TestRunBackupProgressLine(t *testing.T) {
 		AK:               "test",
 		SK:               "test",
 		OutputDir:        dir,
+		BackupOutputDir:  dir,
 		ProgressInterval: 1,
 		BackupBucket:     "dstbucket",
 		CheckConcurrency: 2,

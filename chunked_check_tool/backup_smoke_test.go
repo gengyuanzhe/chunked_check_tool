@@ -131,6 +131,7 @@ func TestBackupRelayRealS3(t *testing.T) {
 		AK:               ak,
 		SK:               sk,
 		OutputDir:        dir,
+		BackupOutputDir:  dir,
 		BackupBucket:     dstBkt,
 		CheckConcurrency: 4,
 		ListConcurrency:  2,

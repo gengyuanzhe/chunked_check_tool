@@ -20,6 +20,13 @@ type Config struct {
 	CheckConcurrency        int      `yaml:"check_concurrency"`
 	OutputDir               string   `yaml:"output_dir"`
 	OutputDirTimestamp      bool     `yaml:"output_dir_timestamp"`
+	// BackupOutputDir is the output directory for -backup-file mode. Kept
+	// separate from OutputDir so a single config can drive both list/check
+	// runs and backup runs without their result files mixing. Required when
+	// running in backup mode (main.go enforces); ignored by list/check modes.
+	// When OutputDirTimestamp is true, a sibling-suffix stamp is applied to
+	// BackupOutputDir the same way it is to OutputDir.
+	BackupOutputDir         string   `yaml:"backup_output_dir"`
 	IsCheck                 bool     `yaml:"is_check"`
 	IsSuccessLog            bool     `yaml:"is_success_log"`
 	IsMultipartSegmentCheck bool     `yaml:"is_multipart_segment_check"`
@@ -59,8 +66,15 @@ func LoadConfig(path string) (*Config, error) {
 		// Sibling-suffix form: ./out → ./out_20260908_175201. Every run gets
 		// its own directory so repeated runs never append into the same files
 		// and mix results. Trailing separators are trimmed first — ./out/
-		// must not become a subdir named "_<stamp>" inside ./out.
-		cfg.OutputDir = strings.TrimRight(cfg.OutputDir, "/\\") + "_" + time.Now().Format("20060102_150405")
+		// must not become a subdir named "_<stamp>" inside ./out. The same
+		// stamp is applied to BackupOutputDir when configured, so a run that
+		// uses both directories lands in a matched pair
+		// (./out_<stamp>, ./backup_<stamp>).
+		stamp := time.Now().Format("20060102_150405")
+		cfg.OutputDir = strings.TrimRight(cfg.OutputDir, "/\\") + "_" + stamp
+		if cfg.BackupOutputDir != "" {
+			cfg.BackupOutputDir = strings.TrimRight(cfg.BackupOutputDir, "/\\") + "_" + stamp
+		}
 	}
 	if cfg.ListConcurrency <= 0 {
 		cfg.ListConcurrency = 8

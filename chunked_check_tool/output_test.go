@@ -249,7 +249,7 @@ func TestOutputListOnlySkipsPerOwnerFiles(t *testing.T) {
 
 func TestBackupOutputWritesFourFiles(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true}
+	cfg := &Config{OutputDir: dir, BackupOutputDir: dir, IsCheck: true}
 	out, err := NewBackupOutput(cfg, "mybucket")
 	if err != nil {
 		t.Fatal(err)
@@ -274,7 +274,7 @@ func TestBackupOutputWritesFourFiles(t *testing.T) {
 // per-owner check-mode files; only the backup files + list_failed exist.
 func TestBackupOutputNoCheckModeFiles(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsSuccessLog: true, IsMultipartSegmentCheck: true, MultipartSegmentSize: 1024, IsMultipartSuccessLog: true}
+	cfg := &Config{OutputDir: dir, BackupOutputDir: dir, IsCheck: true, IsSuccessLog: true, IsMultipartSegmentCheck: true, MultipartSegmentSize: 1024, IsMultipartSuccessLog: true}
 	out, err := NewBackupOutput(cfg, "mybucket")
 	if err != nil {
 		t.Fatal(err)

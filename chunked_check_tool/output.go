@@ -172,7 +172,7 @@ func NewOutput(cfg *Config, bucket string, listFileMode bool) (*Output, error) {
 // backup_failed.log. The per-owner check-mode files (corrupted/ok/multipart)
 // are not opened.
 func NewBackupOutput(cfg *Config, bucket string) (*Output, error) {
-	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
+	if err := os.MkdirAll(cfg.BackupOutputDir, 0755); err != nil {
 		return nil, fmt.Errorf("mkdir output: %w", err)
 	}
 	chCap := cfg.OutputChCapacity
@@ -188,7 +188,7 @@ func NewBackupOutput(cfg *Config, bucket string) (*Output, error) {
 		return nil, err
 	}
 	o := &Output{
-		dir:                  cfg.OutputDir,
+		dir:                  cfg.BackupOutputDir,
 		bucket:               bucket,
 		lineFmt:              lineFmt,
 		listFailedCh:         make(chan string, chCap),

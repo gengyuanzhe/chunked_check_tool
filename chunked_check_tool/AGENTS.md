@@ -94,7 +94,8 @@
 | `list_concurrency` | `8` | 列举并发度 |
 | `check_concurrency` | `16` | 校验并发度 |
 | `output_dir` | `.` | 输出目录 |
-| `output_dir_timestamp` | `true` | true=目录名追加 `<YYYYMMDD_HHMMSS>` 后缀（`./out` → `./out_20260908_175201`）隔离每次运行；false=固定使用 output_dir 原样路径（断点续跑需显式 false）。后缀在 `LoadConfig` 内追加（尾部 `/` 先裁剪），下游全部用改写后的 `cfg.OutputDir` |
+| `output_dir_timestamp` | `true` | true=目录名追加 `<YYYYMMDD_HHMMSS>` 后缀（`./out` → `./out_20260908_175201`）隔离每次运行；false=固定使用 output_dir 原样路径（断点续跑需显式 false）。后缀在 `LoadConfig` 内追加（尾部 `/` 先裁剪），下游全部用改写后的 `cfg.OutputDir`；同一 `stamp` 同时作用于 `backup_output_dir` |
+| `backup_output_dir` | （无，必填） | `-backup-file` 模式专用输出目录；与 `output_dir` 分离以免 backup 结果与 list/check 结果混写。`NewBackupOutput` 用 `cfg.BackupOutputDir` 建 `MkdirAll` 并写所有 backup 文件；list/check 模式忽略该字段。`main` 启动时若 `-backup-file` 而 `BackupOutputDir==""` 直接 `os.Exit(2)`，同样受 `output_dir_timestamp` 控制并与 `output_dir` 共享同一时间戳成对生成 |
 | `is_check` | `true` | true=列举+校验；false=仅列举（不校验普通对象，不写对象文件，不创建 owner 目录，仅写 list_failed.*） |
 | `is_success_log` | `false` | 是否记录正常普通对象到 `<ownerID>/ok_objects.txt` |
 | `is_multipart_segment_check` | `false` | 是否按固定 part size（`multipart_segment_size`）对多段对象做分段损坏检查；`true` 时必须配 `multipart_segment_size > 0`，否则启动报错中止 |
