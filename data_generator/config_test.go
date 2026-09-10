@@ -190,6 +190,25 @@ multipart_endpoint_pattern: [0, 0]
 	}
 }
 
+func TestLoadConfig_MultipartPattern_ObjectSizeNotExceedPartSizeMax(t *testing.T) {
+	path := writeCfg(t, `endpoints: ["1.1.1.1:80", "2.2.2.2:80"]
+ak: a
+sk: s
+bucket: b
+depth: 1
+width: 2
+files_per_dir: 1
+object_size_min: 5242880
+object_size_max: 5242880
+part_size_min: 5242880
+part_size_max: 5242880
+multipart_endpoint_pattern: [0, 0, 1, 0, 1]
+`)
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("expected error for object_size_min <= part_size_max with pattern set, got nil")
+	}
+}
+
 func TestLoadConfig_MultipartEndpointPattern_EndpointOutOfRange(t *testing.T) {
 	path := writeCfg(t, `endpoints: ["1.1.1.1:80", "2.2.2.2:80"]
 ak: a

@@ -78,7 +78,7 @@ SIGINT/SIGTERM 触发优雅退出。
 
 - **默认（自动）**：`multipart_endpoint_pattern` 为空时走 minio-go 自动 multipart。对象 size > partSize → multipart；否则单 PUT。partSize 在 `[part_size_min, part_size_max]` 内随机（min==max 即固定）。minio-go 自动拆段，每对象单节点 round-robin（`endpointIdx = objIdx % len(endpoints)`）。
 
-- **手动编排**：`multipart_endpoint_pattern` 非空时走手动 multipart。pattern 控制每个操作的 endpoint index：
+- **手动编排**：`multipart_endpoint_pattern` 非空时**强制**走手动 multipart（不再比较 `size > partSize`）。pattern 控制每个操作的 endpoint index：
   ```
   pattern[0]         = NewMultipartUpload (init)
   pattern[1..N]     = 各 PutObjectPart（N = ceil(size/partSize)）
@@ -88,7 +88,7 @@ SIGINT/SIGTERM 触发优雅退出。
 
 - **前置条件（手动模式）**：S3 集群必须跨节点共享 multipart upload 状态——某节点 init 拿到的 uploadID 在另一节点 PutObjectPart 必须可用。本工具不负责验证此特性，由用户保证集群支持。
 
-- 仅当 `size > partSize` 时走手动 multipart；`size <= partSize` 走单 PUT，pattern 忽略（不会触发 multipart）。
+- **手动模式 size 约束**：`multipart_endpoint_pattern` 非空时，`object_size_min` 必须 > `part_size_max`——保证每个对象 size 恒 > partSize，手动多段一定可走（否则 S3 拒绝 part < 5MiB）。`LoadConfig` 启动期校验，违反即报错中止。
 
 - `part_size_min >= 5MiB` 是 S3 最小 part size 硬约束；minio-go 在 size > partSize 时按 partSize 拆段，最后一段可小于 5MiB。
 

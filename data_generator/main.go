@@ -129,7 +129,7 @@ func processOne(ctx context.Context, cfg *Config, pool *NodePool, uploader Uploa
 
 	endpointIdx := pool.Assign(key.Idx)
 	var multipart bool
-	if len(cfg.MultipartEndpointPattern) > 0 && size > partSize {
+	if len(cfg.MultipartEndpointPattern) > 0 {
 		if err := uploader.UploadObjectMultipart(ctx, cfg.Bucket, key.Key, tee, size, partSize, cfg.MultipartEndpointPattern); err != nil {
 			stats.IncFailed()
 			progress.Mark()
