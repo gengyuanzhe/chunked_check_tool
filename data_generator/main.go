@@ -116,20 +116,21 @@ func runWorkers(ctx context.Context, cfg *Config, pool *NodePool, uploader Uploa
 func processOne(ctx context.Context, cfg *Config, pool *NodePool, uploader Uploader, stats *Stats, progress *Progress, md5w *MD5Writer, r *rand.Rand, key ObjectKey) error {
 	sizeRange := cfg.ObjectSizeMax - cfg.ObjectSizeMin + 1
 	size := cfg.ObjectSizeMin + r.Int63n(sizeRange)
-	content := make([]byte, size)
-	if _, err := r.Read(content); err != nil {
-		return fmt.Errorf("prng read: %w", err)
-	}
-	sum := md5.Sum(content)
-	md5hex := hex.EncodeToString(sum[:])
 
-	partRange := cfg.ChunkSizeMax - cfg.ChunkSizeMin + 1
-	partSize := cfg.ChunkSizeMin + r.Int63n(partRange)
+	partRange := cfg.PartSizeMax - cfg.PartSizeMin + 1
+	partSize := cfg.PartSizeMin + r.Int63n(partRange)
+
+	// Stream random bytes through a TeeReader so the MD5 hasher sees the
+	// exact bytes uploaded — no full-object buffer in memory. prngReader
+	// draws from the same per-worker *rand.Rand sequentially.
+	body := newPrngReader(r, size)
+	hasher := md5.New()
+	tee := io.TeeReader(body, hasher)
 
 	endpointIdx := pool.Assign(key.Idx)
 	var multipart bool
 	if len(cfg.MultipartEndpointPattern) > 0 && size > partSize {
-		if err := uploader.UploadObjectMultipart(ctx, cfg.Bucket, key.Key, content, partSize, cfg.MultipartEndpointPattern); err != nil {
+		if err := uploader.UploadObjectMultipart(ctx, cfg.Bucket, key.Key, tee, size, partSize, cfg.MultipartEndpointPattern); err != nil {
 			stats.IncFailed()
 			progress.Mark()
 			return err
@@ -137,13 +138,15 @@ func processOne(ctx context.Context, cfg *Config, pool *NodePool, uploader Uploa
 		multipart = true
 	} else {
 		var err error
-		multipart, err = uploader.UploadObject(ctx, endpointIdx, cfg.Bucket, key.Key, content, partSize)
+		multipart, err = uploader.UploadObject(ctx, endpointIdx, cfg.Bucket, key.Key, tee, size, partSize)
 		if err != nil {
 			stats.IncFailed()
 			progress.Mark()
 			return err
 		}
 	}
+	md5hex := hex.EncodeToString(hasher.Sum(nil))
+
 	stats.IncUploaded(size)
 	if multipart {
 		stats.IncMultipart()
@@ -159,6 +162,33 @@ func processOne(ctx context.Context, cfg *Config, pool *NodePool, uploader Uploa
 	return nil
 }
 
+// prngReader streams exactly `size` bytes from a *rand.Rand. Reads beyond
+// size return EOF. Used as the body source for streaming uploads so the
+// object never needs to be fully materialized in memory.
+type prngReader struct {
+	r    *rand.Rand
+	size int64
+	read int64
+}
+
+func newPrngReader(r *rand.Rand, size int64) *prngReader {
+	return &prngReader{r: r, size: size}
+}
+
+func (p *prngReader) Read(out []byte) (int, error) {
+	remaining := p.size - p.read
+	if remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := int64(len(out))
+	if n > remaining {
+		n = remaining
+	}
+	nn, err := p.r.Read(out[:n])
+	p.read += int64(nn)
+	return nn, err
+}
+
 func printConfigSnapshot(w io.Writer, cfg *Config) {
 	fmt.Fprintf(w, "config:\n")
 	fmt.Fprintf(w, "  endpoints: %v\n", cfg.Endpoints)
@@ -169,7 +199,7 @@ func printConfigSnapshot(w io.Writer, cfg *Config) {
 	fmt.Fprintf(w, "  prefix: %q\n", cfg.Prefix)
 	fmt.Fprintf(w, "  depth: %d  width: %d  files_per_dir: %d\n", cfg.Depth, cfg.Width, cfg.FilesPerDir)
 	fmt.Fprintf(w, "  object_size_min: %d  max: %d\n", cfg.ObjectSizeMin, cfg.ObjectSizeMax)
-	fmt.Fprintf(w, "  chunk_size_min: %d  max: %d\n", cfg.ChunkSizeMin, cfg.ChunkSizeMax)
+	fmt.Fprintf(w, "  part_size_min: %d  max: %d\n", cfg.PartSizeMin, cfg.PartSizeMax)
 	fmt.Fprintf(w, "  output_dir: %s  md5_file: %s\n", cfg.OutputDir, cfg.MD5File)
 	fmt.Fprintf(w, "  concurrency: %d  progress_interval: %d\n", cfg.Concurrency, cfg.ProgressInterval)
 	fmt.Fprintf(w, "  use_trailer: %v\n", cfg.UseTrailer)

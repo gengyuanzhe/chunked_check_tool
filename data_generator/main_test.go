@@ -26,39 +26,39 @@ type recordedUpload struct {
 	endpointIdx int
 	bucket      string
 	key         string
-	size        int
+	size        int64
 	partSize    int64
 	multipart   bool
-	contentMD5  string
 }
 
 type recordedMultipart struct {
 	bucket   string
 	key      string
-	size     int
+	size     int64
 	partSize int64
 	pattern  []int
 }
 
-func (r *recordingUploader) UploadObject(ctx context.Context, endpointIdx int, bucket, key string, content []byte, partSize int64) (bool, error) {
+func (r *recordingUploader) UploadObject(ctx context.Context, endpointIdx int, bucket, key string, body io.Reader, size, partSize int64) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.putErr != nil {
 		return false, r.putErr
 	}
-	multipart := int64(len(content)) > partSize
+	multipart := size > partSize
 	r.uploads = append(r.uploads, recordedUpload{
 		endpointIdx: endpointIdx,
 		bucket:      bucket,
 		key:         key,
-		size:        len(content),
+		size:        size,
 		partSize:    partSize,
 		multipart:   multipart,
 	})
+	io.Copy(io.Discard, body)
 	return multipart, nil
 }
 
-func (r *recordingUploader) UploadObjectMultipart(ctx context.Context, bucket, key string, content []byte, partSize int64, pattern []int) error {
+func (r *recordingUploader) UploadObjectMultipart(ctx context.Context, bucket, key string, body io.Reader, size, partSize int64, pattern []int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.multipartErr != nil {
@@ -67,10 +67,11 @@ func (r *recordingUploader) UploadObjectMultipart(ctx context.Context, bucket, k
 	r.multipart = append(r.multipart, recordedMultipart{
 		bucket:   bucket,
 		key:      key,
-		size:     len(content),
+		size:     size,
 		partSize: partSize,
 		pattern:  append([]int(nil), pattern...),
 	})
+	io.Copy(io.Discard, body)
 	return nil
 }
 
@@ -89,8 +90,8 @@ func TestProcessOne_BranchesToMultipartWhenPatternSet(t *testing.T) {
 		FilesPerDir:              1,
 		ObjectSizeMin:            15 * 1024 * 1024,
 		ObjectSizeMax:            15 * 1024 * 1024,
-		ChunkSizeMin:             5 * 1024 * 1024,
-		ChunkSizeMax:             5 * 1024 * 1024,
+		PartSizeMin:             5 * 1024 * 1024,
+		PartSizeMax:             5 * 1024 * 1024,
 		Concurrency:              1,
 		MultipartEndpointPattern: []int{0, 0, 1, 0, 1},
 	}
@@ -139,8 +140,8 @@ func TestProcessOne_FallsBackToUploadObjectWhenPatternEmpty(t *testing.T) {
 		FilesPerDir:   1,
 		ObjectSizeMin: 1024,
 		ObjectSizeMax: 1024,
-		ChunkSizeMin:  5 * 1024 * 1024,
-		ChunkSizeMax:  5 * 1024 * 1024,
+		PartSizeMin:  5 * 1024 * 1024,
+		PartSizeMax:  5 * 1024 * 1024,
 		Concurrency:   1,
 	}
 	pool := NewNodePool(cfg)
@@ -175,8 +176,8 @@ func TestRunWorkers_EndToEndSmall(t *testing.T) {
 		FilesPerDir:   2,
 		ObjectSizeMin: 100,
 		ObjectSizeMax: 1000,
-		ChunkSizeMin:  5 * 1024 * 1024,
-		ChunkSizeMax:  5 * 1024 * 1024,
+		PartSizeMin:  5 * 1024 * 1024,
+		PartSizeMax:  5 * 1024 * 1024,
 		Concurrency:   2,
 	}
 	pool := NewNodePool(cfg)
@@ -259,8 +260,8 @@ func TestRunWorkers_LargeObjectsMultipart(t *testing.T) {
 		FilesPerDir:   3,
 		ObjectSizeMin: 6 * 1024 * 1024, // 6MiB > 5MiB partSize → multipart
 		ObjectSizeMax: 6 * 1024 * 1024,
-		ChunkSizeMin:  5 * 1024 * 1024,
-		ChunkSizeMax:  5 * 1024 * 1024,
+		PartSizeMin:  5 * 1024 * 1024,
+		PartSizeMax:  5 * 1024 * 1024,
 		Concurrency:   1,
 	}
 	pool := NewNodePool(cfg)
@@ -290,8 +291,8 @@ func TestRunWorkers_FailuresRecordedButFlowContinues(t *testing.T) {
 		FilesPerDir:   5,
 		ObjectSizeMin: 1,
 		ObjectSizeMax: 1,
-		ChunkSizeMin:  5 * 1024 * 1024,
-		ChunkSizeMax:  5 * 1024 * 1024,
+		PartSizeMin:  5 * 1024 * 1024,
+		PartSizeMax:  5 * 1024 * 1024,
 		Concurrency:   1,
 	}
 	uploader := &recordingUploader{

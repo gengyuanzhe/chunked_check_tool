@@ -30,7 +30,7 @@
 
 ## 4. 关键不变量（改动前必须守住）
 
-1. **MD5 本地计算**：`md5.Sum(content)` 在上传**前**对生成的 content 算，**不**用 S3 返回的 ETag（multipart ETag 是 part-MD5 的聚合，不是整对象 MD5）。`processOne` 中 `sum := md5.Sum(content)` 必须在上传前完成。
+1. **MD5 本地计算**：`io.TeeReader(prngReader, md5.New())` 在上传**期间**对流过的字节算 plain MD5，**不**用 S3 返回的 ETag（multipart ETag 是 part-MD5 的聚合，不是整对象 MD5）。`processOne` 中 `tee := io.TeeReader(body, hasher)` 必须作为 body 传给 uploader；uploader 读取多少字节，hasher 就累加多少；上传成功后 `hasher.Sum(nil)` 得到整对象的 plain MD5（单段多段一致）。**prngReader 必须恰好产 `size` 字节**——若 uploader 多读会 EOF、少读则 MD5 与 S3 对象字节不一致。
 
 2. **失败对象不写 md5**：`UploadObject` 报错走 `stats.IncFailed()` + `progress.Mark()`，**不**写 `md5.txt`。否则 checker 会去找不存在的对象。
 
@@ -40,11 +40,11 @@
 
 5. **multipart 判定**：`size > partSize` → multipart=true。minio-go 在 size > partSize 时自动拆段（最后一段可小于 5MiB）；size <= partSize 时单 PUT。**不**从 `UploadInfo.ETag` 反推 multipart 状态（脆弱，依赖 ETag 格式）。
 
-6. **chunk_size_min >= 5MiB**：S3 最小 part size 硬约束。`LoadConfig` 启动期校验失败即中止，避免运行到 multipart 调用时才报错。
+6. **part_size_min >= 5MiB**：S3 最小 part size 硬约束。`LoadConfig` 启动期校验失败即中止，避免运行到 multipart 调用时才报错。
 
-7. **object_size_max <= 100MB**：per-object 全内存 buffer 上限保护。生成 content 用 `make([]byte, size)` + `r.Read(content)`，简单但有内存上限；超过 100MB 启动期报错。
+7. **流式上传 + 无 object_size_max 上限**：`processOne` 用 `prngReader`（从 `*rand.Rand` 顺序产 `size` 字节）+ `io.TeeReader` 绑定 `md5.New()`，body 以 `io.Reader` 形式传给 uploader。内存峰值 = 一个 worker 的 part 缓冲（minio-go 内部 64KB 级），与对象大小无关，因此 **object_size_max 无上限**。`Uploader` 接口签名 `(body io.Reader, size, partSize int64)`——multipart 用 `io.LimitReader(body, partLen)` 顺序读每个 part。
 
-8. **per-worker PRNG 独立种子**：每个 worker `rand.NewSource(baseSeed ^ int64(workerIdx))`，避免多 worker 共享全局 rand 的锁竞争。content 用 `math/rand`（非 `crypto/rand`）——快，对损坏检测场景足够（chunked_check_tool 看的是 body 头部的 chunk-signature 头，不关心 content 的随机性强度）。
+8. **per-worker PRNG 独立种子**：每个 worker `rand.NewSource(baseSeed ^ int64(workerIdx))`，避免多 worker 共享全局 rand 的锁竞争。content 用 `math/rand`（非 `crypto/rand`）——快，对损坏检测场景足够（chunked_check_tool 看的是 body 头部的 chunk-signature 头，不关心 content 的随机性强度）。`prngReader` 顺序调用 `r.Read(out[:n])`——prng 流的精确字节取决于下游读取模式（minio-go 的 buffer 大小），但同一二进制内可复现。
 
 9. **md5writer 的 ctx-cancel drain**：`Close()` 取消内部 ctx，run goroutine 进入 drain 循环读取 channel 残留记录再 flush + close file。`defer` 顺序：先 `bw.Flush()` → `file.Close()` → `close(done)`——**不能**先 `close(done)`，否则 `Close()` 在 `<-w.done` 解阻塞时 bufio 还没落盘，读文件得到空/部分内容。
 
@@ -66,7 +66,7 @@
 
 ### config.yaml 字段
 
-见 `README.md` 的"配置"表。强制显式配置（endpoints/ak/sk/bucket/depth/width/files_per_dir/object_size_min/max/chunk_size_min/max 全部必填），可选项有默认（scheme/output_dir/concurrency/progress_interval/md5_file）。
+见 `README.md` 的"配置"表。强制显式配置（endpoints/ak/sk/bucket/depth/width/files_per_dir/object_size_min/max/part_size_min/max 全部必填），可选项有默认（scheme/output_dir/concurrency/progress_interval/md5_file）。
 
 ## 6. 输出文件
 
@@ -91,11 +91,11 @@ Go 1.27 二进制路径：`/Users/gengyuanzhe/sdk/go1.27.1/bin/go`。
 - **无断点续跑**：`md5.txt` truncate，重跑从头开始。需要 append + 索引去重再加。
 - **multipart 不实现"每段随机节点"（自动模式）**：minio-go 自动 multipart 用单一 client。手动模式（`multipart_endpoint_pattern` 非空）实现了 per-operation 显式路由，但要求集群跨节点共享 multipart upload 状态。
 - **content 用 math/rand**：可复现，对损坏检测场景足够（chunked_check_tool 看的是 body 头部的 chunk-signature 头）；若需不可预测内容，换 crypto/rand（性能下降）。
-- **per-object 全内存 buffer**：100MB 上限保护；更大对象需切流式 PRNG reader（`io.TeeReader(prngReader, md5hasher)` + minio-go streaming PutObject）。
+- **流式 prng 的字节取决于下游读取模式**：`prngReader` 直接调 `r.Read(out[:n])`，prng 流的精确字节取决于 minio-go 的 buffer 读取大小（同二进制内可复现，跨 minio-go 版本不一定）。若需跨版本可复现，可改成固定大小内部 buffer 的 prngReader。
 - **NodePool 无故障转移**：节点宕时 upload 失败即失败，不重绑。生成场景下重试策略由用户决定（重跑或人工处理）。
 - **md5writer drain 的 `default` 退出**：ctx-cancel 后 drain 用 `select { case rec := <-ch; default: return }`。理论上若 producer 在 cancel 后还在发，drain 可能在 producer 还没发完时退出——但 `runWorkers` 在 ctx cancel 后 worker 从 `keyCh` 收到 close 才退出，`md5w.Write` 不会被调用。实际无 race。
 - **`processOne` 中 md5 写失败仍 IncUploaded**：stats 已 IncUploaded 在 md5 写之前；若 md5 写失败，对象已上传但 md5 没记录——`stats.IncFailed()` 在返回前补上，但 uploaded 计数仍 +1。理想是 md5 写失败时回滚 uploaded，但 S3 没有"删除已上传对象"的语义，回滚 stats 也不解决问题。当前行为：uploaded +1 + failed +1（双计），summary 时用户自行解读。
-- **use_trailer 仅对 multipart 生效**：minio-go 在 size > partSize 走 multipart 时才发 aws-chunked + trailer；单 PUT（size <= partSize）只在请求头加 `x-amz-checksum-sha256`，不发 chunked 编码。若用户想覆盖单 PUT 路径，需把 `object_size_min` 设到 `chunk_size_min` 之上强制 multipart。
+- **use_trailer 仅对 multipart 生效**：minio-go 在 size > partSize 走 multipart 时才发 aws-chunked + trailer；单 PUT（size <= partSize）只在请求头加 `x-amz-checksum-sha256`，不发 chunked 编码。若用户想覆盖单 PUT 路径，需把 `object_size_min` 设到 `part_size_min` 之上强制 multipart。
 
 ## 9. 工作流约定
 

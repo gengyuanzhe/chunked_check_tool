@@ -46,8 +46,8 @@ object_size_max: 65536
 
 # multipart part size 范围（字节），在 [min, max] 内随机；min==max 即固定
 # min 必须 >= 5MiB（S3 最小 part size）；对象 size > partSize 时走 multipart
-chunk_size_min: 5242880
-chunk_size_max: 5242880
+part_size_min: 5242880
+part_size_max: 5242880
 
 # 输出目录（自动创建，run.log append 模式，md5.txt truncate 模式）
 output_dir: ./out

@@ -8,8 +8,7 @@ import (
 )
 
 const (
-	minPartSize  int64 = 5 * 1024 * 1024
-	maxObjectCap int64 = 100 * 1024 * 1024
+	minPartSize int64 = 5 * 1024 * 1024
 )
 
 type Config struct {
@@ -24,8 +23,8 @@ type Config struct {
 	FilesPerDir      int      `yaml:"files_per_dir"`
 	ObjectSizeMin    int64    `yaml:"object_size_min"`
 	ObjectSizeMax    int64    `yaml:"object_size_max"`
-	ChunkSizeMin     int64    `yaml:"chunk_size_min"`
-	ChunkSizeMax     int64    `yaml:"chunk_size_max"`
+	PartSizeMin     int64    `yaml:"part_size_min"`
+	PartSizeMax     int64    `yaml:"part_size_max"`
 	OutputDir        string   `yaml:"output_dir"`
 	Concurrency      int      `yaml:"concurrency"`
 	ProgressInterval int      `yaml:"progress_interval"`
@@ -70,14 +69,11 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.ObjectSizeMax < cfg.ObjectSizeMin {
 		return nil, fmt.Errorf("object_size_max (%d) must be >= object_size_min (%d)", cfg.ObjectSizeMax, cfg.ObjectSizeMin)
 	}
-	if cfg.ObjectSizeMax > maxObjectCap {
-		return nil, fmt.Errorf("object_size_max (%d) exceeds %d (100MB per-object buffer cap)", cfg.ObjectSizeMax, maxObjectCap)
+	if cfg.PartSizeMin < minPartSize {
+		return nil, fmt.Errorf("part_size_min (%d) must be >= %d (S3 minimum part size 5MiB)", cfg.PartSizeMin, minPartSize)
 	}
-	if cfg.ChunkSizeMin < minPartSize {
-		return nil, fmt.Errorf("chunk_size_min (%d) must be >= %d (S3 minimum part size 5MiB)", cfg.ChunkSizeMin, minPartSize)
-	}
-	if cfg.ChunkSizeMax < cfg.ChunkSizeMin {
-		return nil, fmt.Errorf("chunk_size_max (%d) must be >= chunk_size_min (%d)", cfg.ChunkSizeMax, cfg.ChunkSizeMin)
+	if cfg.PartSizeMax < cfg.PartSizeMin {
+		return nil, fmt.Errorf("part_size_max (%d) must be >= part_size_min (%d)", cfg.PartSizeMax, cfg.PartSizeMin)
 	}
 	if cfg.Scheme == "" {
 		cfg.Scheme = "http"

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -41,7 +42,7 @@ func TestS3Uploader_UploadSmallObjectSinglePUT(t *testing.T) {
 	u := newS3UploaderWithFactory(fakeFactory(fake), false)
 
 	content := make([]byte, 1000)
-	multipart, err := u.UploadObject(context.Background(), 0, "bkt", "k1", content, 5*1024*1024)
+	multipart, err := u.UploadObject(context.Background(), 0, "bkt", "k1", bytes.NewReader(content), 1000, 5*1024*1024)
 	if err != nil {
 		t.Fatalf("UploadObject: %v", err)
 	}
@@ -68,7 +69,7 @@ func TestS3Uploader_UploadLargeObjectMultipart(t *testing.T) {
 	u := newS3UploaderWithFactory(fakeFactory(fake), false)
 
 	content := make([]byte, 10*1024*1024) // 10MiB > 5MiB partSize
-	multipart, err := u.UploadObject(context.Background(), 0, "bkt", "k1", content, 5*1024*1024)
+	multipart, err := u.UploadObject(context.Background(), 0, "bkt", "k1", bytes.NewReader(content), int64(len(content)), 5*1024*1024)
 	if err != nil {
 		t.Fatalf("UploadObject: %v", err)
 	}
@@ -83,7 +84,7 @@ func TestS3Uploader_PropagatesError(t *testing.T) {
 	u := newS3UploaderWithFactory(fakeFactory(fake), false)
 
 	content := []byte{1, 2, 3}
-	_, err := u.UploadObject(context.Background(), 0, "bkt", "k1", content, 5*1024*1024)
+	_, err := u.UploadObject(context.Background(), 0, "bkt", "k1", bytes.NewReader(content), int64(len(content)), 5*1024*1024)
 	if !errors.Is(err, putErr) {
 		t.Errorf("err = %v, want %v", err, putErr)
 	}
@@ -100,7 +101,7 @@ func TestS3Uploader_LazyClientCaching(t *testing.T) {
 
 	content := []byte{1, 2, 3}
 	for i := 0; i < 5; i++ {
-		_, err := u.UploadObject(context.Background(), 0, "bkt", "k1", content, 5*1024*1024)
+		_, err := u.UploadObject(context.Background(), 0, "bkt", "k1", bytes.NewReader(content), int64(len(content)), 5*1024*1024)
 		if err != nil {
 			t.Fatalf("UploadObject %d: %v", i, err)
 		}
@@ -123,8 +124,8 @@ func TestS3Uploader_DifferentEndpointsDifferentClients(t *testing.T) {
 	u := &S3Uploader{pool: pool, clientFactory: factory, clients: make(map[int]minioPutAPI)}
 
 	content := []byte{1, 2, 3}
-	_, _ = u.UploadObject(context.Background(), 0, "b", "k1", content, 5*1024*1024)
-	_, _ = u.UploadObject(context.Background(), 1, "b", "k2", content, 5*1024*1024)
+	_, _ = u.UploadObject(context.Background(), 0, "b", "k1", bytes.NewReader(content), int64(len(content)), 5*1024*1024)
+	_, _ = u.UploadObject(context.Background(), 1, "b", "k2", bytes.NewReader(content), int64(len(content)), 5*1024*1024)
 
 	if creates != 2 {
 		t.Errorf("client created %d times, want 2 (one per endpoint)", creates)
@@ -155,7 +156,7 @@ func TestS3Uploader_UseTrailerSetsSHA256Checksum(t *testing.T) {
 	u := newS3UploaderWithFactory(fakeFactory(fake), true)
 
 	content := make([]byte, 100)
-	if _, err := u.UploadObject(context.Background(), 0, "bkt", "k1", content, 5*1024*1024); err != nil {
+	if _, err := u.UploadObject(context.Background(), 0, "bkt", "k1", bytes.NewReader(content), int64(len(content)), 5*1024*1024); err != nil {
 		t.Fatalf("UploadObject: %v", err)
 	}
 	if len(fake.putCalls) != 1 {
@@ -172,7 +173,7 @@ func TestS3Uploader_NoTrailerLeavesChecksumZero(t *testing.T) {
 	u := newS3UploaderWithFactory(fakeFactory(fake), false)
 
 	content := make([]byte, 100)
-	if _, err := u.UploadObject(context.Background(), 0, "bkt", "k1", content, 5*1024*1024); err != nil {
+	if _, err := u.UploadObject(context.Background(), 0, "bkt", "k1", bytes.NewReader(content), int64(len(content)), 5*1024*1024); err != nil {
 		t.Fatalf("UploadObject: %v", err)
 	}
 	if len(fake.putCalls) != 1 {

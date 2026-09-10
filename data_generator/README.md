@@ -62,8 +62,8 @@ SIGINT/SIGTERM 触发优雅退出。
 | `depth` | ✓ | 目录树深度 ≥ 1 |
 | `width` | ✓ | 每层目录数 ≥ 2 |
 | `files_per_dir` | ✓ | 每叶子目录文件数 ≥ 1 |
-| `object_size_min` / `object_size_max` | ✓ | 字节；max≥min≥1；max≤100MB |
-| `chunk_size_min` / `chunk_size_max` | ✓ | multipart part size；min≥5MiB；max≥min |
+| `object_size_min` / `object_size_max` | ✓ | 字节；max≥min≥1（流式上传，无上限） |
+| `part_size_min` / `part_size_max` | ✓ | multipart part size；min≥5MiB；max≥min |
 | `output_dir` | | `.`（默认） |
 | `concurrency` | | 8（默认） |
 | `progress_interval` | | 100（默认） |
@@ -76,7 +76,7 @@ SIGINT/SIGTERM 触发优雅退出。
 
 ## 多段上传与节点选择
 
-- **默认（自动）**：`multipart_endpoint_pattern` 为空时走 minio-go 自动 multipart。对象 size > partSize → multipart；否则单 PUT。partSize 在 `[chunk_size_min, chunk_size_max]` 内随机（min==max 即固定）。minio-go 自动拆段，每对象单节点 round-robin（`endpointIdx = objIdx % len(endpoints)`）。
+- **默认（自动）**：`multipart_endpoint_pattern` 为空时走 minio-go 自动 multipart。对象 size > partSize → multipart；否则单 PUT。partSize 在 `[part_size_min, part_size_max]` 内随机（min==max 即固定）。minio-go 自动拆段，每对象单节点 round-robin（`endpointIdx = objIdx % len(endpoints)`）。
 
 - **手动编排**：`multipart_endpoint_pattern` 非空时走手动 multipart。pattern 控制每个操作的 endpoint index：
   ```
@@ -90,7 +90,7 @@ SIGINT/SIGTERM 触发优雅退出。
 
 - 仅当 `size > partSize` 时走手动 multipart；`size <= partSize` 走单 PUT，pattern 忽略（不会触发 multipart）。
 
-- `chunk_size_min >= 5MiB` 是 S3 最小 part size 硬约束；minio-go 在 size > partSize 时按 partSize 拆段，最后一段可小于 5MiB。
+- `part_size_min >= 5MiB` 是 S3 最小 part size 硬约束；minio-go 在 size > partSize 时按 partSize 拆段，最后一段可小于 5MiB。
 
 - `use_trailer=true` 在手动模式下：init 与 complete 的 PutObjectOptions 带 `ChecksumSHA256`，每个 part 走 aws-chunked + `x-amz-checksum-sha256` trailer 编码。
 

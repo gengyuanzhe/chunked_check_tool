@@ -31,8 +31,8 @@ width: 4
 files_per_dir: 10
 object_size_min: 1024
 object_size_max: 65536
-chunk_size_min: 5242880
-chunk_size_max: 10485760
+part_size_min: 5242880
+part_size_max: 10485760
 output_dir: ./out
 concurrency: 4
 progress_interval: 50
@@ -73,8 +73,8 @@ width: 3
 files_per_dir: 5
 object_size_min: 1
 object_size_max: 100
-chunk_size_min: 5242880
-chunk_size_max: 5242880
+part_size_min: 5242880
+part_size_max: 5242880
 `)
 	cfg, err := LoadConfig(path)
 	if err != nil {
@@ -109,8 +109,8 @@ width: 2
 files_per_dir: 1
 object_size_min: 1
 object_size_max: 1
-chunk_size_min: 5242880
-chunk_size_max: 5242880
+part_size_min: 5242880
+part_size_max: 5242880
 `)
 	if _, err := LoadConfig(path); err == nil {
 		t.Fatal("expected error for missing endpoints, got nil")
@@ -127,15 +127,15 @@ width: 2
 files_per_dir: 1
 object_size_min: 1
 object_size_max: 1
-chunk_size_min: 5242880
-chunk_size_max: 5242880
+part_size_min: 5242880
+part_size_max: 5242880
 `)
 	if _, err := LoadConfig(path); err == nil {
 		t.Fatal("expected error for empty ak/sk, got nil")
 	}
 }
 
-func TestLoadConfig_ChunkSizeMinBelow5MiB(t *testing.T) {
+func TestLoadConfig_PartSizeMinBelow5MiB(t *testing.T) {
 	path := writeCfg(t, `endpoints: ["1.1.1.1:80"]
 ak: a
 sk: s
@@ -145,11 +145,11 @@ width: 2
 files_per_dir: 1
 object_size_min: 1
 object_size_max: 1
-chunk_size_min: 1048576
-chunk_size_max: 5242880
+part_size_min: 1048576
+part_size_max: 5242880
 `)
 	if _, err := LoadConfig(path); err == nil {
-		t.Fatal("expected error for chunk_size_min < 5MiB, got nil")
+		t.Fatal("expected error for part_size_min < 5MiB, got nil")
 	}
 }
 
@@ -163,29 +163,11 @@ width: 2
 files_per_dir: 1
 object_size_min: 1000
 object_size_max: 100
-chunk_size_min: 5242880
-chunk_size_max: 5242880
+part_size_min: 5242880
+part_size_max: 5242880
 `)
 	if _, err := LoadConfig(path); err == nil {
 		t.Fatal("expected error for object_size_max < min, got nil")
-	}
-}
-
-func TestLoadConfig_SizeMaxOver100MB(t *testing.T) {
-	path := writeCfg(t, `endpoints: ["1.1.1.1:80"]
-ak: a
-sk: s
-bucket: b
-depth: 1
-width: 2
-files_per_dir: 1
-object_size_min: 1
-object_size_max: 104857601
-chunk_size_min: 5242880
-chunk_size_max: 5242880
-`)
-	if _, err := LoadConfig(path); err == nil {
-		t.Fatal("expected error for object_size_max > 100MB, got nil")
 	}
 }
 
@@ -199,8 +181,8 @@ width: 2
 files_per_dir: 1
 object_size_min: 10485760
 object_size_max: 10485760
-chunk_size_min: 5242880
-chunk_size_max: 5242880
+part_size_min: 5242880
+part_size_max: 5242880
 multipart_endpoint_pattern: [0, 0]
 `)
 	if _, err := LoadConfig(path); err == nil {
@@ -218,8 +200,8 @@ width: 2
 files_per_dir: 1
 object_size_min: 10485760
 object_size_max: 10485760
-chunk_size_min: 5242880
-chunk_size_max: 5242880
+part_size_min: 5242880
+part_size_max: 5242880
 multipart_endpoint_pattern: [0, 0, 2, 0, 1]
 `)
 	if _, err := LoadConfig(path); err == nil {
@@ -237,8 +219,8 @@ width: 2
 files_per_dir: 1
 object_size_min: 10485760
 object_size_max: 10485760
-chunk_size_min: 5242880
-chunk_size_max: 5242880
+part_size_min: 5242880
+part_size_max: 5242880
 multipart_endpoint_pattern: [0, 0, 1, 0, 1]
 `)
 	cfg, err := LoadConfig(path)
@@ -270,8 +252,8 @@ width: 2
 files_per_dir: 1
 object_size_min: 1
 object_size_max: 1
-chunk_size_min: 5242880
-chunk_size_max: 5242880
+part_size_min: 5242880
+part_size_max: 5242880
 `},
 		{"width_one", `endpoints: ["1.1.1.1:80"]
 ak: a
@@ -282,8 +264,8 @@ width: 1
 files_per_dir: 1
 object_size_min: 1
 object_size_max: 1
-chunk_size_min: 5242880
-chunk_size_max: 5242880
+part_size_min: 5242880
+part_size_max: 5242880
 `},
 		{"files_per_dir_zero", `endpoints: ["1.1.1.1:80"]
 ak: a
@@ -294,8 +276,8 @@ width: 2
 files_per_dir: 0
 object_size_min: 1
 object_size_max: 1
-chunk_size_min: 5242880
-chunk_size_max: 5242880
+part_size_min: 5242880
+part_size_max: 5242880
 `},
 	}
 	for _, tc := range cases {

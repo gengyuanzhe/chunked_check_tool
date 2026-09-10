@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -34,8 +33,8 @@ type minioCoreAPI interface {
 // Uploader is the high-level surface workers depend on. S3Uploader
 // satisfies it; tests inject a recording fake.
 type Uploader interface {
-	UploadObject(ctx context.Context, endpointIdx int, bucket, key string, content []byte, partSize int64) (bool, error)
-	UploadObjectMultipart(ctx context.Context, bucket, key string, content []byte, partSize int64, pattern []int) error
+	UploadObject(ctx context.Context, endpointIdx int, bucket, key string, body io.Reader, size, partSize int64) (bool, error)
+	UploadObjectMultipart(ctx context.Context, bucket, key string, body io.Reader, size, partSize int64, pattern []int) error
 	BucketExists(ctx context.Context, bucket string) (bool, error)
 }
 
@@ -131,17 +130,16 @@ func (u *S3Uploader) getCore(idx int) (minioCoreAPI, error) {
 // When useTrailer is set, opts.Checksum=ChecksumSHA256 is also set, which
 // (combined with the TrailingHeaders=true client) makes minio-go emit the
 // aws-chunked + x-amz-checksum-sha256 trailer for multipart uploads.
-func (u *S3Uploader) UploadObject(ctx context.Context, endpointIdx int, bucket, key string, content []byte, partSize int64) (bool, error) {
+func (u *S3Uploader) UploadObject(ctx context.Context, endpointIdx int, bucket, key string, body io.Reader, size, partSize int64) (bool, error) {
 	c, err := u.getClient(endpointIdx)
 	if err != nil {
 		return false, err
 	}
-	size := int64(len(content))
 	opts := minio.PutObjectOptions{PartSize: uint64(partSize)}
 	if u.useTrailer {
 		opts.Checksum = minio.ChecksumSHA256
 	}
-	if _, err := c.PutObject(ctx, bucket, key, bytes.NewReader(content), size, opts); err != nil {
+	if _, err := c.PutObject(ctx, bucket, key, body, size, opts); err != nil {
 		return false, err
 	}
 	return size > partSize, nil
@@ -162,10 +160,13 @@ func (u *S3Uploader) BucketExists(ctx context.Context, bucket string) (bool, err
 //	pattern[1..N]          → PutObjectPart endpoints (one per part)
 //	pattern[N+1]           → CompleteMultipartUpload endpoint
 //
-// where N = ceil(len(content)/partSize). Caller MUST ensure size > partSize
+// where N = ceil(size/partSize). Caller MUST ensure size > partSize
 // (otherwise single PUT applies and pattern is irrelevant). Requires the S3
 // cluster to share multipart upload state across endpoints (UploadID issued
 // by init on one node must be valid on every other node).
+//
+// body is read sequentially part-by-part; exactly `size` bytes must be
+// available. Each part reads partLen bytes via io.LimitReader.
 //
 // On any per-step failure, AbortMultipartUpload is attempted on pattern[0]'s
 // endpoint (best-effort; abort errors are ignored) before returning the error.
@@ -175,8 +176,7 @@ func (u *S3Uploader) BucketExists(ctx context.Context, bucket string) (bool, err
 // with TrailingHeaders=true clients) makes minio-go emit aws-chunked +
 // x-amz-checksum-sha256 trailer for each part.
 // UploadObjectMultipart on S3Uploader is the real implementation; see below.
-func (u *S3Uploader) UploadObjectMultipart(ctx context.Context, bucket, key string, content []byte, partSize int64, pattern []int) error {
-	size := int64(len(content))
+func (u *S3Uploader) UploadObjectMultipart(ctx context.Context, bucket, key string, body io.Reader, size, partSize int64, pattern []int) error {
 	if size <= partSize {
 		return fmt.Errorf("UploadObjectMultipart called with size=%d <= partSize=%d (caller must use single PUT)", size, partSize)
 	}
@@ -200,19 +200,19 @@ func (u *S3Uploader) UploadObjectMultipart(ctx context.Context, bucket, key stri
 	}
 
 	parts := make([]minio.CompletePart, 0, nParts)
+	remaining := size
 	for i := 0; i < int(nParts); i++ {
-		start := int64(i) * partSize
-		end := start + partSize
-		if end > size {
-			end = size
+		partLen := partSize
+		if partLen > remaining {
+			partLen = remaining
 		}
-		partLen := end - start
+		remaining -= partLen
 		partCore, err := u.getCore(pattern[1+i])
 		if err != nil {
 			u.abortMultipart(ctx, pattern[0], bucket, key, uploadID)
 			return fmt.Errorf("part %d core: %w", i+1, err)
 		}
-		op, err := partCore.PutObjectPart(ctx, bucket, key, uploadID, i+1, bytes.NewReader(content[start:end]), partLen, minio.PutObjectPartOptions{})
+		op, err := partCore.PutObjectPart(ctx, bucket, key, uploadID, i+1, io.LimitReader(body, partLen), partLen, minio.PutObjectPartOptions{})
 		if err != nil {
 			u.abortMultipart(ctx, pattern[0], bucket, key, uploadID)
 			return fmt.Errorf("part %d: %w", i+1, err)

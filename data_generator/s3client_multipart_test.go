@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -120,7 +121,7 @@ func TestS3Uploader_MultipartPatternHappyPath(t *testing.T) {
 	partSize := int64(5 * 1024 * 1024)
 	pattern := []int{0, 0, 1, 0, 1}
 
-	if err := u.UploadObjectMultipart(context.Background(), "bkt", "k1", content, partSize, pattern); err != nil {
+	if err := u.UploadObjectMultipart(context.Background(), "bkt", "k1", bytes.NewReader(content), size, partSize, pattern); err != nil {
 		t.Fatalf("UploadObjectMultipart: %v", err)
 	}
 	wantOps := []struct {
@@ -170,7 +171,7 @@ func TestS3Uploader_MultipartFailureTriggersAbort(t *testing.T) {
 	content := make([]byte, 15*1024*1024)
 	pattern := []int{0, 0, 1, 0, 1}
 
-	err := u.UploadObjectMultipart(context.Background(), "bkt", "k1", content, 5*1024*1024, pattern)
+	err := u.UploadObjectMultipart(context.Background(), "bkt", "k1", bytes.NewReader(content), int64(len(content)), 5*1024*1024, pattern)
 	if err == nil {
 		t.Fatal("expected error from part 2 failure, got nil")
 	}
@@ -201,7 +202,7 @@ func TestS3Uploader_MultipartUseTrailerSetsChecksum(t *testing.T) {
 	content := make([]byte, 15*1024*1024)
 	pattern := []int{0, 0, 1, 0, 1}
 
-	if err := u.UploadObjectMultipart(context.Background(), "bkt", "k1", content, 5*1024*1024, pattern); err != nil {
+	if err := u.UploadObjectMultipart(context.Background(), "bkt", "k1", bytes.NewReader(content), int64(len(content)), 5*1024*1024, pattern); err != nil {
 		t.Fatalf("UploadObjectMultipart: %v", err)
 	}
 	if state.calls[0].checksum != minio.ChecksumSHA256 {
@@ -219,7 +220,7 @@ func TestS3Uploader_MultipartPatternLengthMismatch(t *testing.T) {
 
 	content := make([]byte, 15*1024*1024)
 	pattern := []int{0, 0, 1, 1}
-	err := u.UploadObjectMultipart(context.Background(), "bkt", "k1", content, 5*1024*1024, pattern)
+	err := u.UploadObjectMultipart(context.Background(), "bkt", "k1", bytes.NewReader(content), int64(len(content)), 5*1024*1024, pattern)
 	if err == nil {
 		t.Fatal("expected pattern length mismatch error, got nil")
 	}
