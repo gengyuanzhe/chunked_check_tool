@@ -38,7 +38,7 @@
 
 4. **扇形链结构**：每层 `l*` 桥目录下同层放 `files_per_dir` 个文件 + (width-1) 个叶子目录 `d*`（max depth 层 width 个）+ 桥嵌套下一层（非 max depth）。总文件数 = `(depth + (width-1)*(depth-1) + width) * files_per_dir`——其中 `depth * files_per_dir` 来自每层桥同层文件，`((width-1)*(depth-1) + width) * files_per_dir` 来自叶子目录。三个 segment 前缀（`lprefix`/`dprefix`/`fprefix`）默认 `l`/`d`/`file_`，由 `LoadConfig` 填默认值——`WalkTree` 直接用 `cfg.LPrefix`/`DPrefix`/`FPrefix`，**不**对空字符串兜底。改 `walkLayer` 时务必保留：a) 桥同层 emit 在叶子循环之前；b) 非 max depth 时叶子数 = width-1；c) max depth 时叶子数 = width；d) 桥名 `<lprefix><layer+1>` 嵌套在 `layerPath` 下。
 
-5. **multipart 判定**：`multipart_endpoint_pattern` 非空 → **强制走手动多段**（`UploadObjectMultipart`），不再比较 `size > partSize`。pattern 为空时由 minio-go 自动判定：`size > partSize` → multipart，否则单 PUT。**不**从 `UploadInfo.ETag` 反推 multipart 状态（脆弱，依赖 ETag 格式）。pattern 非空时 `LoadConfig` 强制 `object_size_min > part_size_max`，保证每个对象 size 恒 > partSize，手动多段一定可走（否则 S3 拒绝 part < 5MiB）。
+5. **multipart 判定**：`multipart_endpoint_pattern` 非空 → **强制走手动多段**（`UploadObjectMultipart`），不比较 `size > partSize`。pattern 为空时由 minio-go 自动判定：`size > partSize` → multipart，否则单 PUT。**不**从 `UploadInfo.ETag` 反推 multipart 状态（脆弱，依赖 ETag 格式）。手动多段允许 `size <= partSize`（N=1 单段 multipart，S3 允许最后/唯一一段 < 5MiB）；pattern 长度运行时校验 = `N+2`，不匹配立即返回 err。
 
 6. **part_size_min >= 5MiB**：S3 最小 part size 硬约束。`LoadConfig` 启动期校验失败即中止，避免运行到 multipart 调用时才报错。
 
@@ -54,7 +54,7 @@
 
 12. **use_trailer 走 minio-go TrailingHeaders + Checksum**：`UseTrailer=true` 时 `NewMinioClient` 设 `Options.TrailingHeaders=true`，`S3Uploader.UploadObject` 设 `opts.Checksum=minio.ChecksumSHA256`。minio-go 自动转 aws-chunked + `x-amz-checksum-sha256` trailer（**仅 multipart 上传**——单 PUT 只在请求头加 checksum，不发 chunked 编码）。要求 v4 签名（本工具始终用 `credentials.NewStaticV4`，满足）。**改 `NewMinioClient`/`NewS3Uploader`/`UploadObject` 时务必保留这条联动**——三者必须同时打开/关闭，否则 minio-go 会报 `Checksum requires Client with TrailingHeaders enabled`。本地 `md5.txt` 不受影响（仍写 content 的 MD5，与 S3 侧的 sha256 checksum 是两个独立量）。**手动 multipart 模式下 `UploadObjectMultipart` 同样遵循此联动**：`NewMinioCore` 也带 `TrailingHeaders`，init 与 complete 的 PutObjectOptions 带 `ChecksumSHA256`。
 
-13. **手动 multipart pattern 路由**：`MultipartEndpointPattern` 非空时**强制**走 `UploadObjectMultipart`（不再要求 `size > partSize`——由 `LoadConfig` 校验 `object_size_min > part_size_max` 保证 size 恒 > partSize），否则走 `UploadObject`。pattern 长度必须 = `N+2`（`N = ceil(size/partSize)`）——运行时校验不匹配立即返回 err（不调 init）。任一步失败 → `AbortMultipartUpload` (best-effort, pattern[0])。**前置条件：S3 集群跨节点共享 multipart upload 状态**（uploadID 全集群可见）——本工具不验证，用户保证。改 `UploadObjectMultipart` 时保留：a) size<=partSize 拒绝（防御性，config 已挡）；b) pattern 长度校验先于任何 S3 调用；c) 失败路径必走 abort。
+13. **手动 multipart pattern 路由**：`MultipartEndpointPattern` 非空时**强制**走 `UploadObjectMultipart`（不比较 `size > partSize`，允许 `size <= partSize` 的单段 multipart），否则走 `UploadObject`。pattern 长度必须 = `N+2`（`N = ceil(size/partSize)`）——运行时校验不匹配立即返回 err（不调 init）。任一步失败 → `AbortMultipartUpload` (best-effort, pattern[0])。**前置条件：S3 集群跨节点共享 multipart upload 状态**（uploadID 全集群可见）——本工具不验证，用户保证。改 `UploadObjectMultipart` 时保留：a) pattern 长度校验先于任何 S3 调用；b) 失败路径必走 abort。
 
 ## 5. CLI 与配置
 

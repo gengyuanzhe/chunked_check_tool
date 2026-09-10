@@ -88,7 +88,7 @@ SIGINT/SIGTERM 触发优雅退出。
 
 - **前置条件（手动模式）**：S3 集群必须跨节点共享 multipart upload 状态——某节点 init 拿到的 uploadID 在另一节点 PutObjectPart 必须可用。本工具不负责验证此特性，由用户保证集群支持。
 
-- **手动模式 size 约束**：`multipart_endpoint_pattern` 非空时，`object_size_min` 必须 > `part_size_max`——保证每个对象 size 恒 > partSize，手动多段一定可走（否则 S3 拒绝 part < 5MiB）。`LoadConfig` 启动期校验，违反即报错中止。
+- **手动模式 size 约束**：无。`size <= partSize` 时 N=1（单段 multipart，S3 允许最后/唯一一段 < 5MiB），pattern 长度 = 3。pattern 长度运行时校验 = `N+2`，不匹配立即报错。若对象 size 可变导致 N 不定，需固定 `object_size_min == object_size_max` + `part_size_min == part_size_max` 使 N 确定，pattern 长度才能匹配。
 
 - `part_size_min >= 5MiB` 是 S3 最小 part size 硬约束；minio-go 在 size > partSize 时按 partSize 拆段，最后一段可小于 5MiB。
 

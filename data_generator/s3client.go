@@ -160,8 +160,8 @@ func (u *S3Uploader) BucketExists(ctx context.Context, bucket string) (bool, err
 //	pattern[1..N]          → PutObjectPart endpoints (one per part)
 //	pattern[N+1]           → CompleteMultipartUpload endpoint
 //
-// where N = ceil(size/partSize). Caller MUST ensure size > partSize
-// (otherwise single PUT applies and pattern is irrelevant). Requires the S3
+// where N = ceil(size/partSize). size may be <= partSize (N=1, single-part
+// multipart — S3 allows the last/only part to be < 5MiB). Requires the S3
 // cluster to share multipart upload state across endpoints (UploadID issued
 // by init on one node must be valid on every other node).
 //
@@ -177,9 +177,6 @@ func (u *S3Uploader) BucketExists(ctx context.Context, bucket string) (bool, err
 // x-amz-checksum-sha256 trailer for each part.
 // UploadObjectMultipart on S3Uploader is the real implementation; see below.
 func (u *S3Uploader) UploadObjectMultipart(ctx context.Context, bucket, key string, body io.Reader, size, partSize int64, pattern []int) error {
-	if size <= partSize {
-		return fmt.Errorf("UploadObjectMultipart called with size=%d <= partSize=%d (caller must use single PUT)", size, partSize)
-	}
 	nParts := (size + partSize - 1) / partSize
 	if want := int(nParts) + 2; len(pattern) != want {
 		return fmt.Errorf("pattern length %d does not match expected %d (init + %d parts + complete) for size=%d partSize=%d", len(pattern), want, nParts, size, partSize)

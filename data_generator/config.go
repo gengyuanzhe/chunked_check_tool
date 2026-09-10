@@ -108,9 +108,6 @@ func LoadConfig(path string) (*Config, error) {
 				return nil, fmt.Errorf("multipart_endpoint_pattern[%d]=%d out of range [0, %d)", i, v, len(cfg.Endpoints))
 			}
 		}
-		if cfg.ObjectSizeMin <= cfg.PartSizeMax {
-			return nil, fmt.Errorf("object_size_min (%d) must be > part_size_max (%d) when multipart_endpoint_pattern is set (multipart requires size > partSize for every object)", cfg.ObjectSizeMin, cfg.PartSizeMax)
-		}
 	}
 	return &cfg, nil
 }
