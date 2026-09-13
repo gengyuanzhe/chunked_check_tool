@@ -75,6 +75,12 @@ is_multipart_success_log: false
 # （仅剩单节点时才在原节点重试），真死节点不会造成工作项丢失。
 node_isolate_threshold: 3
 
+# 隔离节点恢复探测间隔（秒）。后台每轮对被隔离节点做一次 HEAD bucket 探测，
+# 连续 2 次健康应答（任何正常 S3 响应；5xx/传输错误不算）即恢复进轮询池，
+# 同时清零该节点的故障计数。适合小时级长跑批：运维中途重启某节点进程后，
+# 工具能自动用回恢复的容量。设 0 禁用恢复（隔离在进程生命周期内永久）。
+node_recover_probe_interval: 60
+
 # stdout 进度打印阈值（约，性能优先，不要求精确）
 progress_interval: 5000
 

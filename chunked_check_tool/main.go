@@ -116,6 +116,7 @@ func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, start
 	fmt.Fprintf(w, "    multipart_segment_size: %d\n", cfg.MultipartSegmentSize)
 	fmt.Fprintf(w, "    is_multipart_success_log: %t\n", cfg.IsMultipartSuccessLog)
 	fmt.Fprintf(w, "    node_isolate_threshold: %d\n", cfg.NodeIsolateThreshold)
+	fmt.Fprintf(w, "    node_recover_probe_interval: %d\n", cfg.NodeRecoverProbeInterval)
 	fmt.Fprintf(w, "    progress_interval: %d\n", cfg.ProgressInterval)
 	fmt.Fprintf(w, "    obj_ch_capacity: %d\n", cfg.ObjChCapacity)
 	fmt.Fprintf(w, "    output_ch_capacity: %d\n", cfg.OutputChCapacity)
@@ -157,6 +158,7 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter, listFile,
 	}
 
 	pool := NewNodePool(cfg)
+	startNodeRecovery(ctx, pool, cfg, bucket)
 	out, err := NewOutput(cfg, bucket, listFile != "")
 	if err != nil {
 		return fmt.Errorf("output: %w", err)
@@ -386,6 +388,7 @@ func newWorker(pool *NodePool, workerIdx int, cfg *Config, bucket string, stats 
 // for the per-task routing.
 func runBackup(ctx context.Context, cfg *Config, bucket, backupFile string, stdout io.Writer) error {
 	pool := NewNodePool(cfg)
+	startNodeRecovery(ctx, pool, cfg, bucket)
 	out, err := NewBackupOutput(cfg, bucket)
 	if err != nil {
 		return fmt.Errorf("output: %w", err)

@@ -30,7 +30,8 @@
 |---|---|
 | `main.go` | flag 解析、`signal.NotifyContext`（SIGINT/SIGTERM）、`run` 编排、Mode 1 根列举分页、worker 启停、stats 写盘 |
 | `config.go` | `Config` 结构体 + `LoadConfig`（YAML，带默认值） |
-| `nodepool.go` | `NodePool`：轮询 `Assign`、`RecordFault`（累积故障计数，达 `node_isolate_threshold` 才 `MarkFailed` 隔离）、`URL`/`Endpoint`（隔离全局共享、进程内单向不恢复） |
+| `nodepool.go` | `NodePool`：轮询 `Assign`/`AssignOther`、`RecordFault`（累积故障计数，达 `node_isolate_threshold` 才 `MarkFailed` 隔离）、`Unmark`/`FailedNodes`（恢复探测用）、`URL`/`Endpoint`（隔离全局共享、进程内单向——除非开了恢复探测） |
+| `noderecovery.go` | 后台节点恢复：`startNodeRecovery`（`node_recover_probe_interval`>0 时每轮对隔离节点做 HEAD bucket 探测，连续 2 次健康 → `Unmark` 重返轮询池并清零故障计数；探测健康标准 = `!isNodeFaultErr`，即 2xx/404/403 都算活、5xx/传输错误不算）、`recoveryRound`/`probeNode`（可单测的轮次逻辑） |
 | `s3client.go` | `S3API` 接口、`S3Client`（`minioListAPI` 接口包装 minio.Core + minio.Client，按 `cfg.ListAPIVersion` 分派 V1/V2）、`FakeS3`/`scriptedS3`（测试用）、节点故障重试一次 |
 | `lister.go` | `Lister`（无 `s3` 字段；`Run`/`processPrefix` 接 `s3` 参数）、无界队列 BFS、`inflight` atomic 计数 |
 | `walker.go` | `runRecursiveWalk`：Mode 3 信号量递归列举，`sync.WaitGroup` 终止，不用 queue/inflight |
@@ -63,7 +64,7 @@
 
 9. **`-nextmarker` 仅 Mode 1 生效**：作为根列举的 start-after 参数。Mode 2/3 忽略（文档化限制）。
 
-10. **节点故障分类与阈值隔离**：`isNodeFaultErr` 的判定顺序**必须**是 ① `errors.As(err, &minio.ErrorResponse)` 按状态码裁决（5xx=节点故障；4xx=业务错误；**501/505 除外**——能力/协议缺口换节点无意义）→ ② `errors.Is(context.DeadlineExceeded)` → ③ 字符串特征串（`nodeFaultSigs`，仅兜底非 S3 协议的传输层错误）。顺序不可颠倒：4xx 的 Message 是服务端文案，可能含 "timeout"/"EOF" 等传输层词汇，字符串匹配放在前面会把业务拒绝误判成节点故障、错误隔离健康节点。隔离是**阈值化**的：每次 `isNodeFaultErr` 命中调 `pool.RecordFault`（进程级 per-node 累积计数，无衰减），达到 `node_isolate_threshold`（默认 3，1=旧即时隔离行为）才 `MarkFailed`。重试恰好一次，且**重试一律换节点**：已隔离（本 worker 触达阈值或他人已隔离）→ `Assign` 轮询跳过隔离节点；未达阈值 → `AssignOther` 跳过当前节点（仅剩自己时退化为同节点重试，全隔离返回 -1 不重试）——**绝不**在刚故障的节点上同节点重试：节点真死时同节点重试必失败，会把本可在健康节点完成的工作项写进 `list_failed`/`check_failed` 丢覆盖。再失败按业务错误处理。注意 minio-go 对 408/429/499/500/502/503/504/520 有**内部重试**（最多 10 次带退避）——工具侧的一次计数在 minio-go 内部已是多轮失败。流式调用（`PutObjectStream`/`UploadPart`）不可重放、不参与 failover。
+10. **节点故障分类与阈值隔离**：`isNodeFaultErr` 的判定顺序**必须**是 ① `errors.As(err, &minio.ErrorResponse)` 按状态码裁决（5xx=节点故障；4xx=业务错误；**501/505 除外**——能力/协议缺口换节点无意义）→ ② `errors.Is(context.DeadlineExceeded)` → ③ 字符串特征串（`nodeFaultSigs`，仅兜底非 S3 协议的传输层错误）。顺序不可颠倒：4xx 的 Message 是服务端文案，可能含 "timeout"/"EOF" 等传输层词汇，字符串匹配放在前面会把业务拒绝误判成节点故障、错误隔离健康节点。隔离是**阈值化**的：每次 `isNodeFaultErr` 命中调 `pool.RecordFault`（进程级 per-node 累积计数，无衰减），达到 `node_isolate_threshold`（默认 3，1=旧即时隔离行为）才 `MarkFailed`。重试恰好一次，且**重试一律换节点**：已隔离（本 worker 触达阈值或他人已隔离）→ `Assign` 轮询跳过隔离节点；未达阈值 → `AssignOther` 跳过当前节点（仅剩自己时退化为同节点重试，全隔离返回 -1 不重试）——**绝不**在刚故障的节点上同节点重试：节点真死时同节点重试必失败，会把本可在健康节点完成的工作项写进 `list_failed`/`check_failed` 丢覆盖。再失败按业务错误处理。注意 minio-go 对 408/429/499/500/502/503/504/520 有**内部重试**（最多 10 次带退避）——工具侧的一次计数在 minio-go 内部已是多轮失败。流式调用（`PutObjectStream`/`UploadPart`）不可重放、不参与 failover。**隔离默认可通过后台探测恢复**（`node_recover_probe_interval`，默认 60s，0=禁用恢复）：每轮对隔离节点 HEAD bucket，健康标准是 `!isNodeFaultErr`（与隔离标准互为镜像），**连续 2 次**健康才 `Unmark` 重返轮询池，同时**清零该节点故障计数**（否则恢复后再 1 次故障即再隔离，阈值名存实亡）；探测中失败即打断连续计数。探测走独立的一次性 client，不经过 `S3Client` 故障计数路径。
 
 11. **性能优先但可读**：HTTP keep-alive（minio-go 自带连接池，不要自建）、`bufio.Writer` 64KB、合理 channel 容量、避免 per-obj 分配。**但**任何"复杂难读"的优化（手写内存池、unsafe、lock-free 结构）需先向用户请求确认，不要直接写。见 `memory/performance-vs-readability.md`。
 
@@ -108,6 +109,7 @@
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
 | `is_multipart_success_log` | `false` | 是否记录干净的多段对象到 `<ownerID>/ok_mp.txt` |
 | `node_isolate_threshold` | `3` | 节点隔离阈值：进程级累积的节点故障数（连接错误/超时/5xx，4xx 业务错误不计）达到该值才隔离节点；`1`=旧的首次故障即隔离。计数无时间衰减，跨 worker 共享 |
+| `node_recover_probe_interval` | `60` | 隔离节点恢复探测间隔（秒）。后台 goroutine 每隔该值对隔离节点 HEAD bucket，连续 2 次健康（`!isNodeFaultErr`，即任何正常 S3 应答）→ 恢复进轮询池并清零故障计数；`0`=禁用恢复（隔离在进程内永久，旧行为） |
 | `progress_interval` | `5000` | 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；`0` 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；`0` 走默认 |

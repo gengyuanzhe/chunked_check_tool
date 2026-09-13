@@ -50,6 +50,7 @@ type Config struct {
 	MultipartSegmentSize   int64  `yaml:"multipart_segment_size"`
 	IsMultipartSuccessLog  bool   `yaml:"is_multipart_success_log"`
 	NodeIsolateThreshold   int64  `yaml:"node_isolate_threshold"`
+	NodeRecoverProbeInterval int64 `yaml:"node_recover_probe_interval"`
 	ProgressInterval        int    `yaml:"progress_interval"`
 	ObjChCapacity           int    `yaml:"obj_ch_capacity"`
 	OutputChCapacity        int    `yaml:"output_ch_capacity"`
@@ -136,6 +137,14 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.NodeIsolateThreshold < 0 {
 		return nil, fmt.Errorf("node_isolate_threshold must be >= 1 (got %d)", cfg.NodeIsolateThreshold)
+	}
+	// Node recovery probe interval in seconds; 0 disables recovery (isolation
+	// is then permanent for the process lifetime). Default 60.
+	if cfg.NodeRecoverProbeInterval == 0 {
+		cfg.NodeRecoverProbeInterval = 60
+	}
+	if cfg.NodeRecoverProbeInterval < 0 {
+		return nil, fmt.Errorf("node_recover_probe_interval must be >= 0 seconds (got %d)", cfg.NodeRecoverProbeInterval)
 	}
 	return &cfg, nil
 }

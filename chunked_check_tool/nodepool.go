@@ -98,6 +98,33 @@ func (p *NodePool) RecordFault(idx int) bool {
 	return false
 }
 
+// FailedNodes returns the indexes of all isolated nodes (snapshot; used by
+// the recovery prober).
+func (p *NodePool) FailedNodes() []int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	idxs := make([]int, 0, len(p.failed))
+	for idx := range p.failed {
+		idxs = append(idxs, idx)
+	}
+	return idxs
+}
+
+// Unmark readmits an isolated node into the rotation and resets its fault
+// count — the node must then accumulate a fresh threshold of faults to be
+// isolated again (pre-recovery counts must not make re-isolation easier).
+// No-op for non-isolated nodes. Called by the recovery prober after
+// consecutive healthy probes.
+func (p *NodePool) Unmark(idx int) {
+	p.mu.Lock()
+	if _, ok := p.failed[idx]; ok {
+		delete(p.failed, idx)
+		p.faultCounts[idx].Store(0)
+		log.Printf("[nodepool] node %d (%s) recovered after %d consecutive probes — readmitted", idx, p.endpoints[idx], nodeRecoverSuccesses)
+	}
+	p.mu.Unlock()
+}
+
 func (p *NodePool) MarkFailed(idx int) {
 	p.mu.Lock()
 	if _, ok := p.failed[idx]; !ok {
