@@ -197,12 +197,10 @@ func (c *S3Client) ListPage(ctx context.Context, prefix, startAfter, continuatio
 		delimiter = "/"
 	}
 	result, err := c.listPageOnce(prefix, startAfter, continuationToken, delimiter, maxKeys)
-	if err != nil && c.pool != nil && isNodeFaultErr(err) {
-		// Node-fault path: mark, rebuild on next alive node, retry once.
-		c.pool.MarkFailed(c.nodeIdx)
-		if c.rebuild() {
-			result, err = c.listPageOnce(prefix, startAfter, continuationToken, delimiter, maxKeys)
-		}
+	if err != nil && isNodeFaultErr(err) && c.handleNodeFault() {
+		// Node fault: retried on a new node when isolated, else on the same
+		// node (below the isolate threshold — transient blip).
+		result, err = c.listPageOnce(prefix, startAfter, continuationToken, delimiter, maxKeys)
 	}
 	if err != nil {
 		return nil, nil, "", err
@@ -300,6 +298,26 @@ func (c *S3Client) mpOffsetList() bool {
 	return c.cfg != nil && c.cfg.IsCheck && c.cfg.MultipartCheckMode == MultipartCheckModeOffset
 }
 
+// handleNodeFault is the shared node-fault leg of every S3 call: it records
+// the fault against the bound node and decides where the single retry goes.
+//
+//   - node reached the isolate threshold (or was already isolated by another
+//     worker) → rebind to a live node and retry there. False when no live
+//     node remains: callers skip the retry and propagate the original error.
+//   - below threshold → transient-fault hypothesis: retry on the SAME node
+//     (an immediate retry usually absorbs EOF/reset blips).
+//
+// Returns false when there is no pool (test-injected clients): no retry.
+func (c *S3Client) handleNodeFault() bool {
+	if c.pool == nil {
+		return false
+	}
+	if c.pool.RecordFault(c.nodeIdx) {
+		return c.rebuild()
+	}
+	return true
+}
+
 // rebuild swaps the bound minio client to the next alive node. Returns true
 // when a new node was assigned and the client was successfully rebuilt.
 func (c *S3Client) rebuild() bool {
@@ -332,11 +350,8 @@ func (c *S3Client) RangeGet(ctx context.Context, key string) ([]byte, error) {
 		}
 	}()
 	body, err := c.rangeGetOnce(ctx, key)
-	if err != nil && c.pool != nil && isNodeFaultErr(err) {
-		c.pool.MarkFailed(c.nodeIdx)
-		if c.rebuild() {
-			body, err = c.rangeGetOnce(ctx, key)
-		}
+	if err != nil && isNodeFaultErr(err) && c.handleNodeFault() {
+		body, err = c.rangeGetOnce(ctx, key)
 	}
 	return body, err
 }
@@ -372,11 +387,8 @@ func (c *S3Client) RangeGetAt(ctx context.Context, key string, offset, length in
 		}
 	}()
 	body, err := c.rangeGetAtOnce(ctx, key, offset, length)
-	if err != nil && c.pool != nil && isNodeFaultErr(err) {
-		c.pool.MarkFailed(c.nodeIdx)
-		if c.rebuild() {
-			body, err = c.rangeGetAtOnce(ctx, key, offset, length)
-		}
+	if err != nil && isNodeFaultErr(err) && c.handleNodeFault() {
+		body, err = c.rangeGetAtOnce(ctx, key, offset, length)
 	}
 	return body, err
 }
@@ -406,11 +418,8 @@ func (c *S3Client) rangeGetAtOnce(ctx context.Context, key string, offset, lengt
 // retry semantics as RangeGet.
 func (c *S3Client) HeadObject(ctx context.Context, key string) (string, int64, error) {
 	etag, size, err := c.headObjectOnce(ctx, key)
-	if err != nil && c.pool != nil && isNodeFaultErr(err) {
-		c.pool.MarkFailed(c.nodeIdx)
-		if c.rebuild() {
-			etag, size, err = c.headObjectOnce(ctx, key)
-		}
+	if err != nil && isNodeFaultErr(err) && c.handleNodeFault() {
+		etag, size, err = c.headObjectOnce(ctx, key)
 	}
 	if err != nil {
 		return "", 0, err
@@ -439,11 +448,8 @@ func (c *S3Client) DownloadRange(ctx context.Context, key string, start, length 
 		return io.NopCloser(strings.NewReader("")), nil
 	}
 	obj, err := c.downloadRangeOnce(ctx, key, start, length)
-	if err != nil && c.pool != nil && isNodeFaultErr(err) {
-		c.pool.MarkFailed(c.nodeIdx)
-		if c.rebuild() {
-			obj, err = c.downloadRangeOnce(ctx, key, start, length)
-		}
+	if err != nil && isNodeFaultErr(err) && c.handleNodeFault() {
+		obj, err = c.downloadRangeOnce(ctx, key, start, length)
 	}
 	if err != nil {
 		return nil, err
@@ -492,11 +498,8 @@ func (c *S3Client) PutObject(ctx context.Context, bucket, key string, r io.Reade
 		return "", fmt.Errorf("put %s/%s: short read: got %d bytes, want %d", bucket, key, len(body), size)
 	}
 	etag, err := c.putObjectOnce(ctx, bucket, key, bytes.NewReader(body), size)
-	if err != nil && c.pool != nil && isNodeFaultErr(err) {
-		c.pool.MarkFailed(c.nodeIdx)
-		if c.rebuild() {
-			etag, err = c.putObjectOnce(ctx, bucket, key, bytes.NewReader(body), size)
-		}
+	if err != nil && isNodeFaultErr(err) && c.handleNodeFault() {
+		etag, err = c.putObjectOnce(ctx, bucket, key, bytes.NewReader(body), size)
 	}
 	if err != nil {
 		return "", err
@@ -542,11 +545,8 @@ func (c *S3Client) PutObjectStream(ctx context.Context, bucket, key string, r io
 // upload ID.
 func (c *S3Client) CreateMultipart(ctx context.Context, bucket, key string) (string, error) {
 	uploadID, err := c.core.NewMultipartUpload(ctx, bucket, key, minio.PutObjectOptions{})
-	if err != nil && c.pool != nil && isNodeFaultErr(err) {
-		c.pool.MarkFailed(c.nodeIdx)
-		if c.rebuild() {
-			uploadID, err = c.core.NewMultipartUpload(ctx, bucket, key, minio.PutObjectOptions{})
-		}
+	if err != nil && isNodeFaultErr(err) && c.handleNodeFault() {
+		uploadID, err = c.core.NewMultipartUpload(ctx, bucket, key, minio.PutObjectOptions{})
 	}
 	return uploadID, err
 }
@@ -586,49 +586,78 @@ func (c *S3Client) AbortMultipart(ctx context.Context, bucket, key, uploadID str
 }
 
 // isNodeFaultErr reports whether err is a transient node-fault error that
-// should trigger failover: connection errors, timeouts, and HTTP 5xx
-// responses. Business-level 4xx errors (404 Not Found, 403 Forbidden,
-// 400 Bad Request) are NOT node faults and propagate to the caller.
+// should count toward isolating the bound node: connection-level failures,
+// timeouts, and server-trouble 5xx responses. Business-level rejections
+// (404 Not Found, 403 Forbidden, 400 Bad Request) are NOT node faults and
+// propagate to the caller unchanged.
+//
+// Classification order matters:
+//
+//  1. minio.ErrorResponse (S3 protocol error) FIRST, decided by status code
+//     alone. The type check must run before the substring heuristics — a
+//     4xx Message is server-written text and may contain transport-flavored
+//     words ("request body read timeout", "unexpected EOF"); letting string
+//     matching see it would misclassify a business rejection as a node
+//     fault and burn healthy nodes. 501/505 are excluded even though they
+//     are 5xx: they are capability/protocol gaps every node shares, so
+//     failover can never help.
+//  2. context.DeadlineExceeded (our 30s call timeouts).
+//  3. Substring heuristics over err.Error() — only reachable for non-S3
+//     errors, i.e. genuine transport-layer failures from the Go net stack.
 func isNodeFaultErr(err error) bool {
 	if err == nil {
 		return false
 	}
+	var er minio.ErrorResponse
+	if errors.As(err, &er) {
+		switch er.StatusCode {
+		case http.StatusNotImplemented, http.StatusHTTPVersionNotSupported:
+			return false
+		}
+		return er.StatusCode >= 500 && er.StatusCode < 600
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	// Connection-level errors from net/http surface as strings
-	// ("connection refused", "i/o timeout", "EOF", "no such host").
-	// minio-go wraps these in its own urlError wrapper; the underlying
-	// error string is still reachable via err.Error().
 	msg := err.Error()
 	for _, sig := range nodeFaultSigs {
 		if strings.Contains(msg, sig) {
 			return true
 		}
 	}
-	// minio ErrorResponse with a 5xx status code is a node fault.
-	var er minio.ErrorResponse
-	if errors.As(err, &er) {
-		if er.StatusCode >= 500 && er.StatusCode < 600 {
-			return true
-		}
-	}
 	return false
 }
 
-// nodeFaultSigs are the substring signatures of transient connection errors
-// produced by the Go net/http stack. These all indicate that the bound node
-// is unhealthy and failover is warranted.
+// nodeFaultSigs are the substring signatures of transport-layer (non-S3)
+// errors from the Go net stack. These only run for errors that are NOT a
+// minio.ErrorResponse, so their breadth cannot leak business errors into
+// the failover path. Real error shapes, per signature:
+//
+//   - dial-phase failures on every platform start with "dial tcp <addr>:"
+//     ("connect: connection refused", "connect: connection timed out",
+//     "connectex: ..." on Windows, "no route to host", ...).
+//   - established-connection failures: RST ("connection reset"), write on a
+//     closed socket ("broken pipe"), socket deadline ("i/o timeout").
+//   - "timeout" (lowercase) covers "net/http: TLS handshake timeout" and
+//     friends; the capital-T form ("Client.Timeout exceeded while awaiting
+//     headers") is wrapped in context.DeadlineExceeded and caught by the
+//     errors.Is check above.
+//   - "EOF" matches io.EOF ("EOF") and "unexpected EOF" — the peer closed
+//     the connection mid-stream (idle-timeout kills in front of the node).
+//   - "no such host" is DNS resolution failure.
+//   - "transport" covers http2 transport internals.
+//
+// "connect: " was dropped: every Go error containing it is a dial error
+// already caught by "dial tcp".
 var nodeFaultSigs = []string{
+	"dial tcp",
 	"connection refused",
+	"connection reset",
+	"broken pipe",
 	"i/o timeout",
 	"timeout",
 	"EOF",
 	"no such host",
-	"connection reset",
-	"broken pipe",
-	"dial tcp",
-	"connect: ",
 	"transport",
 }
 

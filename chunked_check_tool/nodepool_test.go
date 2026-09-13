@@ -64,3 +64,45 @@ func TestNodePoolEndpoint(t *testing.T) {
 		t.Errorf("Endpoint(1)=%q want 5.6.7.8:9000", got)
 	}
 }
+
+func TestNodePoolRecordFaultThreshold(t *testing.T) {
+	cfg := &Config{Endpoints: []string{"a:9000", "b:9000"}, Scheme: "http", NodeIsolateThreshold: 3}
+	pool := NewNodePool(cfg)
+
+	if pool.RecordFault(0) {
+		t.Error("first fault must not isolate (threshold 3)")
+	}
+	if pool.RecordFault(0) {
+		t.Error("second fault must not isolate (threshold 3)")
+	}
+	if pool.IsFailed(0) {
+		t.Error("node 0 isolated below threshold")
+	}
+	if !pool.RecordFault(0) {
+		t.Error("third fault must isolate")
+	}
+	if !pool.IsFailed(0) {
+		t.Error("node 0 should be failed after 3 faults")
+	}
+	// Faults past the threshold keep reporting isolated so callers rebind.
+	if !pool.RecordFault(0) {
+		t.Error("post-threshold fault must still report isolated")
+	}
+	// Other nodes are unaffected.
+	if pool.IsFailed(1) {
+		t.Error("node 1 must not be isolated by node 0's faults")
+	}
+}
+
+// TestNodePoolRecordFaultThresholdOne — threshold=1 restores the legacy
+// isolate-on-first-fault behavior.
+func TestNodePoolRecordFaultThresholdOne(t *testing.T) {
+	cfg := &Config{Endpoints: []string{"a:9000"}, Scheme: "http", NodeIsolateThreshold: 1}
+	pool := NewNodePool(cfg)
+	if !pool.RecordFault(0) {
+		t.Error("threshold 1 must isolate on first fault")
+	}
+	if !pool.IsFailed(0) {
+		t.Error("node 0 should be failed")
+	}
+}

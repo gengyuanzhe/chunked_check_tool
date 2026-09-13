@@ -30,7 +30,7 @@
 |---|---|
 | `main.go` | flag 解析、`signal.NotifyContext`（SIGINT/SIGTERM）、`run` 编排、Mode 1 根列举分页、worker 启停、stats 写盘 |
 | `config.go` | `Config` 结构体 + `LoadConfig`（YAML，带默认值） |
-| `nodepool.go` | `NodePool`：轮询 `Assign`、`MarkFailed`、`URL`、`Endpoint`（故障隔离，全局共享 failed 集） |
+| `nodepool.go` | `NodePool`：轮询 `Assign`、`RecordFault`（累积故障计数，达 `node_isolate_threshold` 才 `MarkFailed` 隔离）、`URL`/`Endpoint`（隔离全局共享、进程内单向不恢复） |
 | `s3client.go` | `S3API` 接口、`S3Client`（`minioListAPI` 接口包装 minio.Core + minio.Client，按 `cfg.ListAPIVersion` 分派 V1/V2）、`FakeS3`/`scriptedS3`（测试用）、节点故障重试一次 |
 | `lister.go` | `Lister`（无 `s3` 字段；`Run`/`processPrefix` 接 `s3` 参数）、无界队列 BFS、`inflight` atomic 计数 |
 | `walker.go` | `runRecursiveWalk`：Mode 3 信号量递归列举，`sync.WaitGroup` 终止，不用 queue/inflight |
@@ -63,7 +63,7 @@
 
 9. **`-nextmarker` 仅 Mode 1 生效**：作为根列举的 start-after 参数。Mode 2/3 忽略（文档化限制）。
 
-10. **节点故障重试一次**：`S3Client.ListPage`/`RangeGet`/`RangeGetAt` 在 `isNodeFaultErr`（连接拒绝、超时、5xx，**不含 4xx**）时 `pool.MarkFailed` → `pool.Assign` 找下一个存活节点 → 重建 client → 重试一次。再失败按业务错误处理（写 `list_failed`/`check_failed`/`mp_check_failed`）。普通 S3 业务错误（404/403）不触发重绑。
+10. **节点故障分类与阈值隔离**：`isNodeFaultErr` 的判定顺序**必须**是 ① `errors.As(err, &minio.ErrorResponse)` 按状态码裁决（5xx=节点故障；4xx=业务错误；**501/505 除外**——能力/协议缺口换节点无意义）→ ② `errors.Is(context.DeadlineExceeded)` → ③ 字符串特征串（`nodeFaultSigs`，仅兜底非 S3 协议的传输层错误）。顺序不可颠倒：4xx 的 Message 是服务端文案，可能含 "timeout"/"EOF" 等传输层词汇，字符串匹配放在前面会把业务拒绝误判成节点故障、错误隔离健康节点。隔离是**阈值化**的：每次 `isNodeFaultErr` 命中调 `pool.RecordFault`（进程级 per-node 累积计数，无衰减），达到 `node_isolate_threshold`（默认 3，1=旧即时隔离行为）才 `MarkFailed`。重试恰好一次，且**重试位置由隔离状态决定**：已隔离（本 worker 触达阈值或他人已隔离）→ `rebuild` 换存活节点重试；未达阈值 → **同节点**重试（瞬时抖动假设，EOF/reset 立即重试通常成功）。再失败按业务错误处理（写 `list_failed`/`check_failed`/`mp_check_failed`）。注意 minio-go 对 408/429/499/500/502/503/504/520 有**内部重试**（最多 10 次带退避）——工具侧的一次计数在 minio-go 内部已是多轮失败。流式调用（`PutObjectStream`/`UploadPart`）不可重放、不参与 failover。
 
 11. **性能优先但可读**：HTTP keep-alive（minio-go 自带连接池，不要自建）、`bufio.Writer` 64KB、合理 channel 容量、避免 per-obj 分配。**但**任何"复杂难读"的优化（手写内存池、unsafe、lock-free 结构）需先向用户请求确认，不要直接写。见 `memory/performance-vs-readability.md`。
 
@@ -107,6 +107,7 @@
 | `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 mp.txt 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，多段 ETag 返回 `<md5>-<partcnt>-<off0>\|<off1>\|...`，按真实 part 边界逐段检查；解析不出 offsets 回落 mp.txt。**优先级高于 mode=2**）；`2`=固定分段检查（旧模式待废弃，必须配 `multipart_segment_size > 0`）。非法值启动报错；配置里出现已废弃的 `is_multipart_segment_check` 字段也报错并提示迁移（防旧配置被静默当作 mode=0） |
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
 | `is_multipart_success_log` | `false` | 是否记录干净的多段对象到 `<ownerID>/ok_mp.txt` |
+| `node_isolate_threshold` | `3` | 节点隔离阈值：进程级累积的节点故障数（连接错误/超时/5xx，4xx 业务错误不计）达到该值才隔离节点；`1`=旧的首次故障即隔离。计数无时间衰减，跨 worker 共享 |
 | `progress_interval` | `5000` | 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；`0` 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；`0` 走默认 |

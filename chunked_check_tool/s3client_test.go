@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/minio/minio-go/v7"
@@ -88,24 +89,36 @@ func TestFakeS3FailNextRetry(t *testing.T) {
 
 func TestIsNodeFaultErr(t *testing.T) {
 	cases := []struct {
+		name string
 		err  error
 		want bool
 	}{
-		{nil, false},
-		{context.DeadlineExceeded, true},
-		{errors.New("Get \"http://1.2.3.4:9000/bucket\": dial tcp 1.2.3.4:9000: connect: connection refused"), true},
-		{errors.New("read tcp 10.0.0.1:1->10.0.0.2:9000: i/o timeout"), true},
-		{errors.New("no such host"), true},
-		{minio.ErrorResponse{Code: "InternalError", StatusCode: 500}, true},
-		{minio.ErrorResponse{Code: "SlowDown", StatusCode: 503}, true},
-		{minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}, false},
-		{minio.ErrorResponse{Code: "AccessDenied", StatusCode: 403}, false},
-		{errors.New("random business error"), false},
+		{"nil error", nil, false},
+		{"deadline exceeded", context.DeadlineExceeded, true},
+		{"dial refused", errors.New(`Get "http://1.2.3.4:9000/bucket": dial tcp 1.2.3.4:9000: connect: connection refused`), true},
+		{"io timeout", errors.New("read tcp 10.0.0.1:1->10.0.0.2:9000: i/o timeout"), true},
+		{"no such host", errors.New("no such host"), true},
+		{"conn reset", errors.New("read tcp 10.0.0.1:1->10.0.0.2:9000: connection reset by peer"), true},
+		{"EOF", errors.New("unexpected EOF"), true},
+		{"5xx InternalError", minio.ErrorResponse{Code: "InternalError", StatusCode: 500}, true},
+		{"5xx SlowDown", minio.ErrorResponse{Code: "SlowDown", StatusCode: 503}, true},
+		{"4xx NoSuchKey", minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}, false},
+		{"4xx AccessDenied", minio.ErrorResponse{Code: "AccessDenied", StatusCode: 403}, false},
+		// A 4xx whose server-written Message contains transport-flavored
+		// words must stay a business error: the ErrorResponse type check
+		// runs BEFORE the substring heuristics.
+		{"4xx message says timeout", minio.ErrorResponse{Code: "BadRequest", Message: "request body read timeout", StatusCode: 400}, false},
+		{"4xx message says EOF", minio.ErrorResponse{Code: "NoSuchKey", Message: "unexpected EOF while reading", StatusCode: 404}, false},
+		{"4xx message says transport", minio.ErrorResponse{Code: "BadRequest", Message: "transport layer rejected the request", StatusCode: 400}, false},
+		// 501/505 are capability/protocol gaps every node shares — never
+		// isolate on them.
+		{"501 NotImplemented", minio.ErrorResponse{Code: "NotImplemented", StatusCode: 501}, false},
+		{"505 VersionNotSupported", minio.ErrorResponse{Code: "HttpVersionNotSupported", StatusCode: 505}, false},
+		{"random business error", errors.New("random business error"), false},
 	}
 	for _, c := range cases {
-		got := isNodeFaultErr(c.err)
-		if got != c.want {
-			t.Errorf("isNodeFaultErr(%v)=%v want %v", c.err, got, c.want)
+		if got := isNodeFaultErr(c.err); got != c.want {
+			t.Errorf("isNodeFaultErr(%s: %v)=%v want %v", c.name, c.err, got, c.want)
 		}
 	}
 }
@@ -153,6 +166,119 @@ func TestListPagePopulatesOwnerID(t *testing.T) {
 		if objs[i].OwnerID != w {
 			t.Errorf("objs[%d].OwnerID = %q, want %q", i, objs[i].OwnerID, w)
 		}
+	}
+}
+
+// --- Node-fault failover (threshold isolation) ---
+
+// failoverSrv is a one-page S3 LIST stub: answers the ?location= probe and
+// serves one object per LIST. failList makes every (or the first N) LIST
+// calls fail with HTTP 507 — a 5xx code that minio-go does NOT internally
+// retry (its retryable set is 408/429/499/500/502/503/504/520), so each
+// ListPage surfaces exactly one fault to S3Client's failover logic.
+type failoverSrv struct {
+	srv       *httptest.Server
+	failFirst int64 // atomic: >0 → fail this many LIST calls, then serve
+	failAll   bool
+	listCalls int64
+}
+
+func newFailoverSrv(t *testing.T, failAll bool) *failoverSrv {
+	f := &failoverSrv{failAll: failAll}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery == "location=" {
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(`<LocationConstraint>us-east-1</LocationConstraint>`))
+			return
+		}
+		if f.failAll || atomic.AddInt64(&f.failFirst, -1) >= 0 {
+			atomic.AddInt64(&f.listCalls, 1)
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(507)
+			w.Write([]byte(`<Error><Code>InsufficientStorage</Code><Message>node is bad</Message></Error>`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>bkt</Name><Prefix></Prefix><KeyCount>1</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>
+<Contents><Key>k1</Key><LastModified>2026-09-13T00:00:00.000Z</LastModified><ETag>"0123456789abcdef0123456789abcdef"</ETag><Size>1</Size><StorageClass>STANDARD</StorageClass></Contents>
+</ListBucketResult>`))
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *failoverSrv) host() string {
+	return strings.TrimPrefix(f.srv.URL, "http://")
+}
+
+// TestS3ClientFailoverIsolateAfterThreshold — node A keeps failing; only the
+// process-wide fault count reaching the threshold isolates it and rebinds.
+func TestS3ClientFailoverIsolateAfterThreshold(t *testing.T) {
+	nodeA := newFailoverSrv(t, true)
+	nodeB := newFailoverSrv(t, false)
+	pool := NewNodePool(&Config{Endpoints: []string{nodeA.host(), nodeB.host()}, Scheme: "http", NodeIsolateThreshold: 2})
+	client, err := NewMinioClient(nodeA.host(), "ak", "sk", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewS3Client(client, "bkt", NewStats(), pool, 0, &Config{ListAPIVersion: 2})
+
+	// Below threshold: fault 1, retry on the SAME node also fails, error
+	// surfaces, node NOT isolated.
+	if _, _, _, err := c.ListPage(context.Background(), "p", "", "", false, 100); err == nil {
+		t.Fatal("expected error below threshold")
+	}
+	if pool.IsFailed(0) {
+		t.Error("node A must not be isolated below threshold")
+	}
+
+	// Fault 2 crosses the threshold: isolate, rebind to node B, retry
+	// succeeds there.
+	objs, _, _, err := c.ListPage(context.Background(), "p", "", "", false, 100)
+	if err != nil {
+		t.Fatalf("expected failover to node B: %v", err)
+	}
+	if len(objs) != 1 || objs[0].Key != "k1" {
+		t.Errorf("objs = %v, want k1 from node B", objs)
+	}
+	if !pool.IsFailed(0) {
+		t.Error("node A should be isolated at threshold")
+	}
+	if c.nodeIdx != 1 {
+		t.Errorf("client rebind = node %d, want 1", c.nodeIdx)
+	}
+}
+
+// TestS3ClientTransientFaultRetriesSameNode — a single fault below the
+// threshold retries on the SAME node (transient-blip hypothesis): the retry
+// succeeds, the node is not isolated, the binding stays.
+func TestS3ClientTransientFaultRetriesSameNode(t *testing.T) {
+	nodeA := newFailoverSrv(t, false)
+	atomic.StoreInt64(&nodeA.failFirst, 1) // first LIST fails, then healthy
+	pool := NewNodePool(&Config{Endpoints: []string{nodeA.host()}, Scheme: "http", NodeIsolateThreshold: 3})
+	client, err := NewMinioClient(nodeA.host(), "ak", "sk", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewS3Client(client, "bkt", NewStats(), pool, 0, &Config{ListAPIVersion: 2})
+
+	objs, _, _, err := c.ListPage(context.Background(), "p", "", "", false, 100)
+	if err != nil {
+		t.Fatalf("same-node retry should absorb the transient fault: %v", err)
+	}
+	if len(objs) != 1 || objs[0].Key != "k1" {
+		t.Errorf("objs = %v, want k1", objs)
+	}
+	if pool.IsFailed(0) {
+		t.Error("one transient fault must not isolate the node")
+	}
+	if c.nodeIdx != 0 {
+		t.Errorf("binding moved to node %d, want to stay on 0", c.nodeIdx)
+	}
+	if got := atomic.LoadInt64(&nodeA.listCalls); got != 1 {
+		t.Errorf("failed LIST calls = %d, want 1", got)
 	}
 }
 

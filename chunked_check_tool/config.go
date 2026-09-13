@@ -47,8 +47,9 @@ type Config struct {
 	IsCheck                 bool   `yaml:"is_check"`
 	IsSuccessLog            bool   `yaml:"is_success_log"`
 	MultipartCheckMode      int    `yaml:"multipart_check_mode"`
-	MultipartSegmentSize    int64  `yaml:"multipart_segment_size"`
-	IsMultipartSuccessLog   bool   `yaml:"is_multipart_success_log"`
+	MultipartSegmentSize   int64  `yaml:"multipart_segment_size"`
+	IsMultipartSuccessLog  bool   `yaml:"is_multipart_success_log"`
+	NodeIsolateThreshold   int64  `yaml:"node_isolate_threshold"`
 	ProgressInterval        int    `yaml:"progress_interval"`
 	ObjChCapacity           int    `yaml:"obj_ch_capacity"`
 	OutputChCapacity        int    `yaml:"output_ch_capacity"`
@@ -126,6 +127,15 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.MultipartCheckMode == MultipartCheckModeSegment && cfg.MultipartSegmentSize <= 0 {
 		return nil, fmt.Errorf("multipart_check_mode=2 (segment) requires multipart_segment_size > 0 (got %d)", cfg.MultipartSegmentSize)
+	}
+	// Node isolation threshold: how many process-wide node-fault errors a
+	// node must accumulate before it is isolated. 0 (absent) defaults to 3;
+	// 1 restores the legacy isolate-on-first-fault behavior.
+	if cfg.NodeIsolateThreshold == 0 {
+		cfg.NodeIsolateThreshold = 3
+	}
+	if cfg.NodeIsolateThreshold < 0 {
+		return nil, fmt.Errorf("node_isolate_threshold must be >= 1 (got %d)", cfg.NodeIsolateThreshold)
 	}
 	return &cfg, nil
 }

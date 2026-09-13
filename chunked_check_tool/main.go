@@ -115,6 +115,7 @@ func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, start
 	fmt.Fprintf(w, "    multipart_check_mode: %d\n", cfg.MultipartCheckMode)
 	fmt.Fprintf(w, "    multipart_segment_size: %d\n", cfg.MultipartSegmentSize)
 	fmt.Fprintf(w, "    is_multipart_success_log: %t\n", cfg.IsMultipartSuccessLog)
+	fmt.Fprintf(w, "    node_isolate_threshold: %d\n", cfg.NodeIsolateThreshold)
 	fmt.Fprintf(w, "    progress_interval: %d\n", cfg.ProgressInterval)
 	fmt.Fprintf(w, "    obj_ch_capacity: %d\n", cfg.ObjChCapacity)
 	fmt.Fprintf(w, "    output_ch_capacity: %d\n", cfg.OutputChCapacity)

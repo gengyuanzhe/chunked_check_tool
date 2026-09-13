@@ -170,6 +170,43 @@ func TestLoadConfig_MultipartCheckModeInvalid(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_NodeIsolateThreshold — absent → default 3; explicit values
+// preserved; negative rejected.
+func TestLoadConfig_NodeIsolateThreshold(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	if err := os.WriteFile(path, []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NodeIsolateThreshold != 3 {
+		t.Errorf("default node_isolate_threshold = %d, want 3", cfg.NodeIsolateThreshold)
+	}
+
+	path2 := filepath.Join(dir, "cfg1.yaml")
+	if err := os.WriteFile(path2, []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nnode_isolate_threshold: 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = LoadConfig(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NodeIsolateThreshold != 1 {
+		t.Errorf("explicit node_isolate_threshold = %d, want 1 (legacy immediate isolation)", cfg.NodeIsolateThreshold)
+	}
+
+	path3 := filepath.Join(dir, "cfg2.yaml")
+	if err := os.WriteFile(path3, []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nnode_isolate_threshold: -1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path3); err == nil {
+		t.Fatal("expected error for negative node_isolate_threshold")
+	}
+}
+
 // TestLoadConfig_LegacySegmentCheckField — the retired is_multipart_segment_check
 // field must not be silently ignored: an old config would then run with
 // mode=0 (off) and report every multipart as unverified. Fail loudly with a
