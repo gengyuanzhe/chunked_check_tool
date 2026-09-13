@@ -8,8 +8,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -229,7 +232,7 @@ func TestS3ClientFailoverIsolateAfterThreshold(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return NewS3Client(client, "bkt", NewStats(), pool, 0, &Config{ListAPIVersion: 2})
+		return NewS3Client(client, "bkt", NewStats(), pool, 0, &Config{ListAPIVersion: 2, AK: "ak", SK: "sk"})
 	}
 	w1, w2 := mk(), mk()
 
@@ -270,7 +273,7 @@ func TestS3ClientTransientFaultRetriesOnOtherNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := NewS3Client(client, "bkt", NewStats(), pool, 0, &Config{ListAPIVersion: 2})
+	c := NewS3Client(client, "bkt", NewStats(), pool, 0, &Config{ListAPIVersion: 2, AK: "ak", SK: "sk"})
 
 	objs, _, _, err := c.ListPage(context.Background(), "p", "", "", false, 100)
 	if err != nil {
@@ -300,7 +303,7 @@ func TestS3ClientTransientFaultSingleNodeSameNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := NewS3Client(client, "bkt", NewStats(), pool, 0, &Config{ListAPIVersion: 2})
+	c := NewS3Client(client, "bkt", NewStats(), pool, 0, &Config{ListAPIVersion: 2, AK: "ak", SK: "sk"})
 
 	if _, _, _, err := c.ListPage(context.Background(), "p", "", "", false, 100); err != nil {
 		t.Fatalf("sole-node fallback should retry on the same node: %v", err)
@@ -501,7 +504,7 @@ func TestS3ClientDownloadRangeContentLengthMismatch(t *testing.T) {
 	}
 }
 
-func TestS3ClientPutObject(t *testing.T) {
+func TestS3ClientPutObjectLocal(t *testing.T) {
 	var gotPath string
 	var gotBody bytes.Buffer
 	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -511,7 +514,11 @@ func TestS3ClientPutObject(t *testing.T) {
 		w.WriteHeader(200)
 	})
 	content := "mybucket|k1\nmybucket|k2|1|0\n"
-	etag, err := c.PutObject(context.Background(), "dstbucket", ".backup_lists/list.txt", strings.NewReader(content), int64(len(content)))
+	path := filepath.Join(t.TempDir(), "list.txt")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	etag, err := c.PutObjectLocal(context.Background(), "dstbucket", ".backup_lists/list.txt", path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,10 +526,97 @@ func TestS3ClientPutObject(t *testing.T) {
 		t.Errorf("path = %q, want /dstbucket/.backup_lists/list.txt", gotPath)
 	}
 	if decodeAwsChunked(gotBody.Bytes()) != content {
-		t.Errorf("body = %q, want %q", gotBody.String(), content)
+		t.Errorf("body = %q, want %q", decodeAwsChunked(gotBody.Bytes()), content)
 	}
 	if etag != "d41d8cd98f00b204e9800998ecf8427e" {
 		t.Errorf("etag = %q, want server-returned etag quotes stripped", etag)
+	}
+}
+
+func TestS3ClientPutObjectLocalError(t *testing.T) {
+	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+	})
+	path := filepath.Join(t.TempDir(), "list.txt")
+	if err := os.WriteFile(path, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.PutObjectLocal(context.Background(), "dstbucket", "k", path); err == nil {
+		t.Fatal("expected error for 403 put")
+	}
+}
+
+// TestS3ClientPutObjectLocalNodeFaultReopen — a node fault on the archive
+// PUT re-opens the file and retries: a local file is replayable from disk,
+// no in-memory buffering needed. The retried PUT must carry the FULL body.
+func TestS3ClientPutObjectLocalNodeFaultReopen(t *testing.T) {
+	var mu sync.Mutex
+	var putCalls int
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery == "location=" {
+			w.Write([]byte(`<LocationConstraint>us-east-1</LocationConstraint>`))
+			return
+		}
+		if r.Method != http.MethodPut {
+			w.WriteHeader(404)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		// Decode by Content-Encoding: a signed PUT over plain HTTP arrives
+		// aws-chunked framed (streaming SigV4); the conditional keeps the
+		// stub correct even if the request arrives unsigned/raw.
+		var content string
+		if r.Header.Get("Content-Encoding") == "aws-chunked" {
+			content = decodeAwsChunked(b)
+		} else {
+			content = string(b)
+		}
+		mu.Lock()
+		putCalls++
+		n := putCalls
+		bodies = append(bodies, content)
+		mu.Unlock()
+		if n == 1 {
+			// 507: a 5xx outside minio-go's internally-retried set, so the
+			// fault surfaces to S3Client's failover leg exactly once.
+			w.WriteHeader(507)
+			w.Write([]byte(`<Error><Code>InsufficientStorage</Code><Message>node is bad</Message></Error>`))
+			return
+		}
+		w.Header().Set("ETag", `"0123456789abcdef0123456789abcdef"`)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	pool := NewNodePool(&Config{Endpoints: []string{host}, Scheme: "http", NodeIsolateThreshold: 3})
+	client, err := NewMinioClient(host, "ak", "sk", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewS3Client(client, "srcbucket", NewStats(), pool, 0, &Config{AK: "ak", SK: "sk"})
+
+	content := strings.Repeat("mybucket|k|2|0|5242880\n", 1000)
+	path := filepath.Join(t.TempDir(), "list.txt")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	etag, err := c.PutObjectLocal(context.Background(), "dstbucket", ".backup_lists/list.txt", path)
+	if err != nil {
+		t.Fatalf("reopen retry should absorb the node fault: %v", err)
+	}
+	if etag != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("etag = %q", etag)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if putCalls != 2 {
+		t.Errorf("PUT calls = %d, want 2 (fault + reopened retry)", putCalls)
+	}
+	if len(bodies) != 2 || bodies[0] != content || bodies[1] != content {
+		t.Errorf("reopened retry must carry the full body; got %d bodies, b0=%dB b1=%dB want %dB",
+			len(bodies), len(bodies[0]), len(bodies[1]), len(content))
 	}
 }
 
@@ -563,7 +657,7 @@ func TestS3ClientPutObjectError(t *testing.T) {
 	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(403)
 	})
-	_, err := c.PutObject(context.Background(), "dstbucket", "k", strings.NewReader("x"), 1)
+	_, err := c.PutObjectStream(context.Background(), "dstbucket", "k", strings.NewReader("x"), 1)
 	if err == nil {
 		t.Fatal("expected error for 403 put")
 	}

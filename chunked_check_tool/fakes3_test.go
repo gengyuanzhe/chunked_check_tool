@@ -10,6 +10,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 )
@@ -57,8 +58,8 @@ type FakeS3 struct {
 	Completed   []FakeCompletedUpload
 	Aborted     []string
 
-	// PutErr, when non-nil, makes PutObject fail. Calls are recorded in
-	// Puts for assertion.
+	// PutErr, when non-nil, makes PutObjectStream/PutObjectLocal fail.
+	// Calls are recorded in Puts for assertion.
 	PutErr error
 	Puts   []PutCall
 }
@@ -78,7 +79,8 @@ type FakeCompletedUpload struct {
 	Parts  map[int][]byte
 }
 
-// PutCall records one FakeS3.PutObject invocation.
+// PutCall records one FakeS3 upload invocation (PutObjectStream or
+// PutObjectLocal).
 type PutCall struct {
 	Bucket  string
 	Key     string
@@ -144,7 +146,9 @@ func (f *FakeS3) DownloadRange(ctx context.Context, key string, start, length in
 	return io.NopCloser(bytes.NewReader(body[start:end])), nil
 }
 
-func (f *FakeS3) PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error) {
+// recordPut drains r, records the call, and returns the MD5 etag (or the
+// injected PutErr). Shared by PutObjectStream and PutObjectLocal.
+func (f *FakeS3) recordPut(bucket, key string, r io.Reader) (string, error) {
 	body, err := io.ReadAll(r)
 	if err != nil {
 		return "", err
@@ -157,7 +161,18 @@ func (f *FakeS3) PutObject(ctx context.Context, bucket, key string, r io.Reader,
 }
 
 func (f *FakeS3) PutObjectStream(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error) {
-	return f.PutObject(ctx, bucket, key, r, size)
+	return f.recordPut(bucket, key, r)
+}
+
+// PutObjectLocal reads the local file — a real disk read, matching what the
+// production method streams — and records it like a streamed put.
+func (f *FakeS3) PutObjectLocal(ctx context.Context, bucket, key, path string) (string, error) {
+	fh, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer fh.Close()
+	return f.recordPut(bucket, key, fh)
 }
 
 func (f *FakeS3) CreateMultipart(ctx context.Context, bucket, key string) (string, error) {
@@ -232,7 +247,5 @@ func multipartETag(parts map[int][]byte) string {
 	}
 	return fmt.Sprintf("%x-%d", h.Sum(nil), len(nums))
 }
-
-var _ S3API = (*FakeS3)(nil)
 
 var _ S3API = (*FakeS3)(nil)

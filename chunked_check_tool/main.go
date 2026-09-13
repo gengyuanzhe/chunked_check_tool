@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -460,18 +459,16 @@ func runBackup(ctx context.Context, cfg *Config, bucket, backupFile string, stdo
 }
 
 // uploadBackupList archives the input list file into the backup bucket under
-// .backup_lists/<basename>_<YYYYMMDD_HHMMSS>.txt.
+// .backup_lists/<basename>_<YYYYMMDD_HHMMSS>.txt. The file is STREAMED from
+// disk — the corrupted-objects list is the disaster artifact and can be
+// gigabytes, so it must never be fully buffered in memory.
 func uploadBackupList(ctx context.Context, pool *NodePool, cfg *Config, bucket, backupFile string) error {
-	data, err := os.ReadFile(backupFile)
-	if err != nil {
-		return fmt.Errorf("read backup list %q: %w", backupFile, err)
-	}
 	// Worker index past the backup worker pool (0..check_concurrency-1) so
 	// node assignment does not collide.
 	w := newWorker(pool, cfg.CheckConcurrency, cfg, bucket, NewStats())
 	base := strings.TrimSuffix(filepath.Base(backupFile), ".txt")
 	listKey := fmt.Sprintf(".backup_lists/%s_%s.txt", base, time.Now().Format("20060102_150405"))
-	if _, err := w.PutObject(ctx, cfg.BackupBucket, listKey, bytes.NewReader(data), int64(len(data))); err != nil {
+	if _, err := w.PutObjectLocal(ctx, cfg.BackupBucket, listKey, backupFile); err != nil {
 		return fmt.Errorf("upload backup list to %s/%s: %w", cfg.BackupBucket, listKey, err)
 	}
 	return nil

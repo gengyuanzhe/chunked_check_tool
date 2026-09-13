@@ -238,7 +238,7 @@ func (c *countingS3) DownloadRange(ctx context.Context, key string, start, lengt
 	return nil, nil
 }
 
-func (c *countingS3) PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error) {
+func (c *countingS3) PutObjectLocal(ctx context.Context, bucket, key, path string) (string, error) {
 	return "", nil
 }
 

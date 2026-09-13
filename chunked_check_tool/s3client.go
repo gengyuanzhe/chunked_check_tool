@@ -1,13 +1,13 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -72,15 +72,20 @@ func trimETagQuotes(s string) string {
 // once the reader is returned, a mid-read failure surfaces as a read error
 // from the relay (the stream cannot be replayed).
 //
-// PutObject uploads size bytes from r to bucket/key and returns the
-// destination ETag (quotes stripped) — the backup list archive and the
-// regular-object relay.
+// PutObjectLocal streams the local file at path into bucket/key and returns
+// the destination ETag (quotes stripped) — the backup list archive. Nothing
+// is buffered: the input list is the disaster-scenario artifact and can be
+// gigabytes, so memory stays bounded by one multipart part regardless of
+// file size. minio-go auto-splits into multipart past its part size (the
+// archive's ETag has no verifier, so the single-PUT pinning PutObjectStream
+// needs for ETag faithfulness does not apply). Node-fault retry re-opens
+// the file — a local file is replayable by re-reading it from disk.
 //
 // PutObjectStream is the relay variant for large bodies: it never buffers
-// r, so a node fault mid-upload is NOT retried (the stream cannot be
-// replayed) and surfaces as an error to the caller. DisableMultipart pins
-// it to a single PUT (multipart splitting would break the plain-MD5 ETag
-// verification).
+// r, so a node fault mid-upload is NOT retried (the live download stream
+// cannot be replayed — unlike PutObjectLocal's local file) and surfaces as
+// an error to the caller. DisableMultipart pins it to a single PUT
+// (multipart splitting would break the plain-MD5 ETag verification).
 //
 // CreateMultipart/UploadPart/CompleteMultipart/AbortMultipart are the
 // multipart lifecycle used by the multipart relay: parts are re-uploaded
@@ -92,7 +97,7 @@ type S3API interface {
 	RangeGetAt(ctx context.Context, key string, offset, length int64) ([]byte, error)
 	HeadObject(ctx context.Context, key string) (string, int64, error)
 	DownloadRange(ctx context.Context, key string, start, length int64) (io.ReadCloser, error)
-	PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error)
+	PutObjectLocal(ctx context.Context, bucket, key, path string) (string, error)
 	PutObjectStream(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error)
 	CreateMultipart(ctx context.Context, bucket, key string) (string, error)
 	UploadPart(ctx context.Context, bucket, key, uploadID string, partNum int, r io.Reader, size int64) (string, error)
@@ -496,44 +501,45 @@ func (c *S3Client) downloadRangeOnce(ctx context.Context, key string, start, len
 	return body, nil
 }
 
-// PutObject uploads size bytes from r to bucket/key and returns the
-// destination ETag (quotes stripped). The reader is fully drained into
-// memory once so the node-fault retry can replay it — used for the backup
-// list archive (a few MB). The regular-object relay also goes through
-// here; large relays stream via UploadPart instead, so the buffering is
-// bounded by design.
-func (c *S3Client) PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error) {
-	body, err := io.ReadAll(r)
+// PutObjectLocal streams the local file at path into bucket/key and returns
+// the destination ETag (quotes stripped). Nothing is buffered: the backup
+// list archive can be gigabytes (the corrupted-objects list IS the disaster
+// artifact), so memory stays bounded by one multipart part regardless of
+// file size. minio-go auto-splits into multipart past its part size — the
+// archive's ETag has no verifier, so the single-PUT pinning PutObjectStream
+// needs does not apply. Node-fault retry re-opens the file: a local file is
+// replayable by re-reading it from disk.
+func (c *S3Client) PutObjectLocal(ctx context.Context, bucket, key, path string) (string, error) {
+	fi, err := os.Stat(path)
 	if err != nil {
 		return "", err
 	}
-	if int64(len(body)) != size {
-		return "", fmt.Errorf("put %s/%s: short read: got %d bytes, want %d", bucket, key, len(body), size)
+	upload := func() (string, error) {
+		f, err := os.Open(path)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+		defer cancel()
+		info, err := c.client.PutObject(ctx, bucket, key, f, fi.Size(), minio.PutObjectOptions{})
+		if err != nil {
+			return "", err
+		}
+		return trimETagQuotes(info.ETag), nil
 	}
-	etag, err := c.putObjectOnce(ctx, bucket, key, bytes.NewReader(body), size)
+	etag, err := upload()
 	if err != nil && isNodeFaultErr(err) && c.handleNodeFault() {
-		etag, err = c.putObjectOnce(ctx, bucket, key, bytes.NewReader(body), size)
+		etag, err = upload()
 	}
-	if err != nil {
-		return "", err
-	}
-	return trimETagQuotes(etag), nil
-}
-
-func (c *S3Client) putObjectOnce(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-	defer cancel()
-	info, err := c.client.PutObject(ctx, bucket, key, r, size, minio.PutObjectOptions{})
-	if err != nil {
-		return "", err
-	}
-	return info.ETag, nil
+	return etag, err
 }
 
 // PutObjectStream uploads r to bucket/key without buffering it in memory.
-// Unlike PutObject there is no node-fault retry: the caller's reader is a
-// live download stream that cannot be replayed, so any failure (including
-// mid-upload node faults) is returned to the caller.
+// Unlike PutObjectLocal there is no node-fault retry: the caller's reader is
+// a live download stream that cannot be replayed (a local file can be
+// re-opened), so any failure (including mid-upload node faults) is returned
+// to the caller.
 //
 // DisableMultipart forces the single-PUT path: minio-go's PutObject
 // auto-splits into multipart when size exceeds the part size (16MiB by

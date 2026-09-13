@@ -130,7 +130,7 @@ mismatch，每条原因见 `mismatch.log`。
 
 流程：
 
-1. 启动时先把输入列表文件整体上传到 `backup_bucket` 的 `.backup_lists/<原名>_<YYYYMMDD_HHMMSS>.txt`（失败则中止，不处理任何对象）
+1. 启动时先把输入列表文件**流式**上传到 `backup_bucket` 的 `.backup_lists/<原名>_<YYYYMMDD_HHMMSS>.txt`（磁盘直读、不进内存——损坏清单可能有数 GB；失败则中止，不处理任何对象）
 2. 逐对象 HEAD，以 ETag 判型（32 位小写 hex = 普通，其余 = 多段）
 3. 输入类型校验（mismatch）：输入行声明的对象类型（2 字段=普通，带 partcnt=多段）与 HEAD 判型不一致（如行是 `bkt|key` 但对象实际为多段）→ 原始行写入 `mismatch.txt`，结构化诊断（`line_is_multipart`/`head_etag`/`head_size`/`reason`）写入 `mismatch.log`，跳过该对象。这是对**输入列表**的校验，发生在备份之前；与第 7 步中转完成后的 ETag 终验失败（走 `backup_failed.txt`，stage=etag）是两回事
 4. 普通行：直接下载中转（输入列表即上一轮校验的损坏结果，不重新探测）

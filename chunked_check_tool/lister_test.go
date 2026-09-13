@@ -176,7 +176,7 @@ func (s *scriptedS3) DownloadRange(ctx context.Context, key string, start, lengt
 	return nil, nil
 }
 
-func (s *scriptedS3) PutObject(ctx context.Context, bucket, key string, r io.Reader, size int64) (string, error) {
+func (s *scriptedS3) PutObjectLocal(ctx context.Context, bucket, key, path string) (string, error) {
 	return "", nil
 }
 
