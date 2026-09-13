@@ -106,3 +106,37 @@ func TestNodePoolRecordFaultThresholdOne(t *testing.T) {
 		t.Error("node 0 should be failed")
 	}
 }
+
+func TestNodePoolAssignOther(t *testing.T) {
+	cfg := &Config{Endpoints: []string{"a:9000", "b:9000", "c:9000"}, Scheme: "http"}
+	pool := NewNodePool(cfg)
+	if got := pool.AssignOther(0); got != 1 {
+		t.Errorf("AssignOther(0)=%d want 1", got)
+	}
+	if got := pool.AssignOther(1); got != 2 {
+		t.Errorf("AssignOther(1)=%d want 2", got)
+	}
+	if got := pool.AssignOther(2); got != 0 {
+		t.Errorf("AssignOther(2)=%d want 0 (wrap)", got)
+	}
+
+	pool.MarkFailed(1)
+	if got := pool.AssignOther(0); got != 2 {
+		t.Errorf("AssignOther(0) with 1 failed = %d want 2", got)
+	}
+	if got := pool.AssignOther(2); got != 0 {
+		t.Errorf("AssignOther(2) with 1 failed = %d want 0", got)
+	}
+
+	// Sole alive node: degrades to the excluded node itself.
+	pool.MarkFailed(0)
+	if got := pool.AssignOther(2); got != 2 {
+		t.Errorf("AssignOther(2) as sole survivor = %d want 2 (itself)", got)
+	}
+
+	// All failed: -1.
+	pool.MarkFailed(2)
+	if got := pool.AssignOther(0); got != -1 {
+		t.Errorf("AssignOther with all failed = %d want -1", got)
+	}
+}

@@ -90,7 +90,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 `mp.txt` 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，服务端返回 `<md5>-<partcnt>-<off0>\|<off1>\|...` 格式 ETag，按真实 part 边界逐段检查；解析不出 offsets 的对象回落 `mp.txt`）；`2`=固定分段检查（旧模式，未来废弃；必须配 `multipart_segment_size > 0`） |
 | `multipart_segment_size` | `0` | 模式 2 的段长度（字节），需与上传 part size 一致；仅 `multipart_check_mode: 2` 时必填 |
 | `is_multipart_success_log` | `false` | `true` 时把干净的多段对象 key 写入 `<ownerID>/ok_mp.txt` |
-| `node_isolate_threshold` | `3` | 节点隔离阈值：进程级累积节点故障数（连接错误/超时/5xx，4xx 不计）达到才隔离节点，跨 worker 共享、无时间衰减；`1` 恢复旧的首次故障即隔离；未达阈值的故障在原节点立即重试一次 |
+| `node_isolate_threshold` | `3` | 节点隔离阈值：进程级累积节点故障数（连接错误/超时/5xx，4xx 不计）达到才隔离节点，跨 worker 共享、无时间衰减；`1` 恢复旧的首次故障即隔离；故障后的重试一律换节点（仅剩单节点时同节点重试），真死节点不丢工作项 |
 | `progress_interval` | `5000` | stdout 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；0 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；0 走默认 |

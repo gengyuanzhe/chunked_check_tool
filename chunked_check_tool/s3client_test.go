@@ -213,48 +213,86 @@ func (f *failoverSrv) host() string {
 	return strings.TrimPrefix(f.srv.URL, "http://")
 }
 
-// TestS3ClientFailoverIsolateAfterThreshold — node A keeps failing; only the
-// process-wide fault count reaching the threshold isolates it and rebinds.
+// TestS3ClientFailoverIsolateAfterThreshold — node A hard-down, node B
+// healthy. Every retry moves off A (even below the threshold), so NO call
+// surfaces an error — no work item is lost to *_failed while the fault
+// count accumulates. Isolation happens only when the count crosses the
+// threshold.
 func TestS3ClientFailoverIsolateAfterThreshold(t *testing.T) {
 	nodeA := newFailoverSrv(t, true)
 	nodeB := newFailoverSrv(t, false)
 	pool := NewNodePool(&Config{Endpoints: []string{nodeA.host(), nodeB.host()}, Scheme: "http", NodeIsolateThreshold: 2})
+
+	// Two workers, both initially bound to node A.
+	mk := func() *S3Client {
+		client, err := NewMinioClient(nodeA.host(), "ak", "sk", false, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return NewS3Client(client, "bkt", NewStats(), pool, 0, &Config{ListAPIVersion: 2})
+	}
+	w1, w2 := mk(), mk()
+
+	// Worker 1: fault on A (count 1, below threshold) → retry rebinds to B
+	// and succeeds. No error, node A not isolated yet.
+	if _, _, _, err := w1.ListPage(context.Background(), "p", "", "", false, 100); err != nil {
+		t.Fatalf("below-threshold fault must retry on another node: %v", err)
+	}
+	if pool.IsFailed(0) {
+		t.Error("node A must not be isolated below threshold")
+	}
+	if w1.nodeIdx != 1 {
+		t.Errorf("worker 1 rebind = node %d, want 1", w1.nodeIdx)
+	}
+
+	// Worker 2 (still bound to A): fault crosses the threshold → A
+	// isolated, retry succeeds on B. Still no error surfaced.
+	if _, _, _, err := w2.ListPage(context.Background(), "p", "", "", false, 100); err != nil {
+		t.Fatalf("threshold-crossing fault must fail over: %v", err)
+	}
+	if !pool.IsFailed(0) {
+		t.Error("node A should be isolated at threshold")
+	}
+	if w2.nodeIdx != 1 {
+		t.Errorf("worker 2 rebind = node %d, want 1", w2.nodeIdx)
+	}
+}
+
+// TestS3ClientTransientFaultRetriesOnOtherNode — a single fault below the
+// threshold rebinds the retry to a DIFFERENT node: the retry succeeds there
+// while the flaky node keeps serving everyone else.
+func TestS3ClientTransientFaultRetriesOnOtherNode(t *testing.T) {
+	nodeA := newFailoverSrv(t, false)
+	atomic.StoreInt64(&nodeA.failFirst, 1) // first LIST on A fails, then A is healthy
+	nodeB := newFailoverSrv(t, false)
+	pool := NewNodePool(&Config{Endpoints: []string{nodeA.host(), nodeB.host()}, Scheme: "http", NodeIsolateThreshold: 3})
 	client, err := NewMinioClient(nodeA.host(), "ak", "sk", false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := NewS3Client(client, "bkt", NewStats(), pool, 0, &Config{ListAPIVersion: 2})
 
-	// Below threshold: fault 1, retry on the SAME node also fails, error
-	// surfaces, node NOT isolated.
-	if _, _, _, err := c.ListPage(context.Background(), "p", "", "", false, 100); err == nil {
-		t.Fatal("expected error below threshold")
-	}
-	if pool.IsFailed(0) {
-		t.Error("node A must not be isolated below threshold")
-	}
-
-	// Fault 2 crosses the threshold: isolate, rebind to node B, retry
-	// succeeds there.
 	objs, _, _, err := c.ListPage(context.Background(), "p", "", "", false, 100)
 	if err != nil {
-		t.Fatalf("expected failover to node B: %v", err)
+		t.Fatalf("cross-node retry should absorb the transient fault: %v", err)
 	}
 	if len(objs) != 1 || objs[0].Key != "k1" {
-		t.Errorf("objs = %v, want k1 from node B", objs)
+		t.Errorf("objs = %v, want k1", objs)
 	}
-	if !pool.IsFailed(0) {
-		t.Error("node A should be isolated at threshold")
+	if pool.IsFailed(0) {
+		t.Error("one transient fault must not isolate the node")
 	}
 	if c.nodeIdx != 1 {
-		t.Errorf("client rebind = node %d, want 1", c.nodeIdx)
+		t.Errorf("rebind = node %d, want 1 (retry moved off the faulting node)", c.nodeIdx)
+	}
+	if got := atomic.LoadInt64(&nodeA.listCalls); got != 1 {
+		t.Errorf("node A failed LIST calls = %d, want 1", got)
 	}
 }
 
-// TestS3ClientTransientFaultRetriesSameNode — a single fault below the
-// threshold retries on the SAME node (transient-blip hypothesis): the retry
-// succeeds, the node is not isolated, the binding stays.
-func TestS3ClientTransientFaultRetriesSameNode(t *testing.T) {
+// TestS3ClientTransientFaultSingleNodeSameNode — with a single endpoint
+// AssignOther degrades to the same node: the retry still runs.
+func TestS3ClientTransientFaultSingleNodeSameNode(t *testing.T) {
 	nodeA := newFailoverSrv(t, false)
 	atomic.StoreInt64(&nodeA.failFirst, 1) // first LIST fails, then healthy
 	pool := NewNodePool(&Config{Endpoints: []string{nodeA.host()}, Scheme: "http", NodeIsolateThreshold: 3})
@@ -264,21 +302,14 @@ func TestS3ClientTransientFaultRetriesSameNode(t *testing.T) {
 	}
 	c := NewS3Client(client, "bkt", NewStats(), pool, 0, &Config{ListAPIVersion: 2})
 
-	objs, _, _, err := c.ListPage(context.Background(), "p", "", "", false, 100)
-	if err != nil {
-		t.Fatalf("same-node retry should absorb the transient fault: %v", err)
-	}
-	if len(objs) != 1 || objs[0].Key != "k1" {
-		t.Errorf("objs = %v, want k1", objs)
+	if _, _, _, err := c.ListPage(context.Background(), "p", "", "", false, 100); err != nil {
+		t.Fatalf("sole-node fallback should retry on the same node: %v", err)
 	}
 	if pool.IsFailed(0) {
 		t.Error("one transient fault must not isolate the node")
 	}
 	if c.nodeIdx != 0 {
-		t.Errorf("binding moved to node %d, want to stay on 0", c.nodeIdx)
-	}
-	if got := atomic.LoadInt64(&nodeA.listCalls); got != 1 {
-		t.Errorf("failed LIST calls = %d, want 1", got)
+		t.Errorf("binding = node %d, want 0 (only node)", c.nodeIdx)
 	}
 }
 

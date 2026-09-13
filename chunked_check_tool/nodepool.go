@@ -60,6 +60,31 @@ func (p *NodePool) Assign(workerIdx int) int {
 	return -1
 }
 
+// AssignOther returns the first alive node in the rotation starting at
+// excludeIdx that is NOT excludeIdx — used to move a retry off a node that
+// faulted below the isolate threshold. Falls back to excludeIdx itself when
+// it is the only alive node (a same-node retry still beats none); -1 when
+// every node is isolated.
+func (p *NodePool) AssignOther(excludeIdx int) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	n := len(p.endpoints)
+	firstAlive := -1
+	for i := 0; i < n; i++ {
+		idx := (excludeIdx + i) % n
+		if _, fail := p.failed[idx]; fail {
+			continue
+		}
+		if firstAlive == -1 {
+			firstAlive = idx
+		}
+		if idx != excludeIdx {
+			return idx
+		}
+	}
+	return firstAlive
+}
+
 // RecordFault notes one node-fault-classified failure against the node and
 // isolates it once the process-wide count reaches the configured threshold.
 // Returns true when the node is (or just became) isolated — the signal for

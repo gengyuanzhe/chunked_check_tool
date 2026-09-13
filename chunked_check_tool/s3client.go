@@ -299,13 +299,19 @@ func (c *S3Client) mpOffsetList() bool {
 }
 
 // handleNodeFault is the shared node-fault leg of every S3 call: it records
-// the fault against the bound node and decides where the single retry goes.
+// the fault against the bound node and rebinds the client for the single
+// retry. The retry ALWAYS moves off the faulting node when another one is
+// available:
 //
 //   - node reached the isolate threshold (or was already isolated by another
-//     worker) → rebind to a live node and retry there. False when no live
-//     node remains: callers skip the retry and propagate the original error.
-//   - below threshold → transient-fault hypothesis: retry on the SAME node
-//     (an immediate retry usually absorbs EOF/reset blips).
+//     worker) → rebind via Assign (rotation skipping isolated nodes). False
+//     when no live node remains: callers skip the retry and propagate the
+//     original error.
+//   - below threshold → transient-fault hypothesis, but the retry still goes
+//     to a DIFFERENT node via AssignOther: if the node is actually down, a
+//     same-node retry would burn another retry round and surface a business
+//     failure for a work item a healthy node could have served. Falls back
+//     to the same node when it is the only one alive.
 //
 // Returns false when there is no pool (test-injected clients): no retry.
 func (c *S3Client) handleNodeFault() bool {
@@ -315,7 +321,11 @@ func (c *S3Client) handleNodeFault() bool {
 	if c.pool.RecordFault(c.nodeIdx) {
 		return c.rebuild()
 	}
-	return true
+	other := c.pool.AssignOther(c.nodeIdx)
+	if other < 0 {
+		return false
+	}
+	return c.rebuildOn(other)
 }
 
 // rebuild swaps the bound minio client to the next alive node. Returns true
@@ -328,6 +338,11 @@ func (c *S3Client) rebuild() bool {
 	if newIdx < 0 {
 		return false
 	}
+	return c.rebuildOn(newIdx)
+}
+
+// rebuildOn rebinds the client to the given node index.
+func (c *S3Client) rebuildOn(newIdx int) bool {
 	client, err := NewMinioClient(c.pool.Endpoint(newIdx), c.cfg.AK, c.cfg.SK, c.cfg.Scheme == "https", c.mpOffsetList())
 	if err != nil {
 		return false
