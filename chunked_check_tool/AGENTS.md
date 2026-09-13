@@ -8,7 +8,10 @@
 
 本工具**并发**列举并校验对象：
 - 普通对象（ETag 为 32 位小写 MD5 hex）→ Range GET 前 128 字节，匹配 chunk-signature 正则 → 命中即视为损坏。
-- 多段对象（任何非 `^[0-9a-f]{32}$` 的 ETag）→ 直接入 `mp.txt`，**不做 Range GET**。
+- 多段对象（任何非 `^[0-9a-f]{32}$` 的 ETag）→ 按 `multipart_check_mode` 处理：
+  - `0`（关闭）→ 直接入 `mp.txt`，不做 Range GET。
+  - `1`（offset 检查）→ LIST 带 `internal-list-mp-offset: true` header，服务端把多段 ETag 改写为 `<md5>-<partcnt>-<off0>|<off1>|...`；按真实 part 边界逐段探测；ETag 解析不出 offsets 的对象回落 `mp.txt`。
+  - `2`（固定分段，旧模式待废弃）→ 按 `multipart_segment_size` 合成 `[0, seg, 2*seg, ...]` 边界逐段探测。
 - 列举失败、校验失败分别落不同文件。
 - 支持几十亿对象规模，内存有界，背压自调节。
 
@@ -32,6 +35,7 @@
 | `lister.go` | `Lister`（无 `s3` 字段；`Run`/`processPrefix` 接 `s3` 参数）、无界队列 BFS、`inflight` atomic 计数 |
 | `walker.go` | `runRecursiveWalk`：Mode 3 信号量递归列举，`sync.WaitGroup` 终止，不用 queue/inflight |
 | `checker.go` | `Checker`、`isNormalETag`（严格 32 位小写 hex）、`chunkSigRe` |
+| `mpoffset.go` | offset-etag 检查的三个原语：`mpOffsetTransport`（仅对 LIST 请求注入 `internal-list-mp-offset: true`，签名后 transport 层注入，非 x-amz 名不参与 SigV2/V4 签名计算）、`isListRequest`（钉死 minio-go v7.3.0 的 V1/V2 LIST 请求形态）、`parseMultipartOffsetETag`（`<md5>-<partcnt>-<off0>\|...` 解析，规则对齐 parseListFileLine） |
 | `output.go` | 8 channel + writer goroutine（5 个按 OwnerID 分目录 fan-out，3 个根目录全局），`bufio.Writer` 64KB，append 模式，per-owner 文件按 `<ownerID>/<filename>` 路由（OwnerID 为空 → `_unknown/`） |
 | `queue.go` | 无界队列（slice + mutex + cond），ctx-aware 阻塞 Pop |
 | `stats.go` | atomic.Int64 计数器 + `StatsSnapshot` + `PrintSummary`（按 `RunMode` 分模式输出指标集；写入 stdout，被 `mwOut` tee 进 run.log） |
@@ -39,9 +43,11 @@
 
 ## 4. 关键不变量（改动前必须守住）
 
-1. **多段判定严格**：仅 `^[0-9a-f]{32}$`（32 位小写 MD5 hex）算普通对象。大写、长度不对、`<hex>-N`、空值一律按多段处理。**绝不把多段误判为普通对象**。`isNormalETag` 用逐字节循环实现（非正则），不要改成宽松匹配。
+1. **多段判定严格**：仅 `^[0-9a-f]{32}$`（32 位小写 MD5 hex）算普通对象。大写、长度不对、`<hex>-N`、`<hex>-N-<offsets>`、空值一律按多段处理。**绝不把多段误判为普通对象**。`isNormalETag` 用逐字节循环实现（非正则），不要改成宽松匹配。offset-etag 的 md5 前缀校验复用同款严格性（大写 → 解析失败 → 回落 mp.txt，不静默接受）。
 
-2. **多段对象跳过 Range GET**：直接写 `<ownerID>/mp.txt`。每行按 `result_line_format` 渲染（默认 `<bucket>|<key>`），不带 ETag。不要给多段对象发 Range GET（浪费请求 + 可能误判）。
+1a. **offset 模式的 header 注入与回落**：`multipart_check_mode=1` 且 `is_check=true` 时，所有 LIST 请求（V1/V2、failover 重建的 client）经 `mpOffsetTransport` 注入 `internal-list-mp-offset: true`。该 header 名**不得**改成 x-amz-/x-obs- 开头（服务端签名计算覆盖这些前缀，签名后注入会被拒；非 x-amz 名在 SigV2/V4 下均可不签）。ETag 解析不出 offsets（服务端未实现/未升级）→ Offsets=nil → mp.txt 回落，行为等同 mode=0（优雅降级，`list_mp - (ok_mp+corrupt_mp+mp_check_failed)` 即回落量）。**假设服务端只改多段对象的 ETag**——普通对象若也被改写会被判为多段（不漏检损坏，但 list_obj/list_mp 计数失真）。`isListRequest` 钉死 minio-go v7.3.0 请求形态（`TestMpOffsetTransportMinioList` 是回归钉），升级 minio-go 必须重验。
+
+2. **mode=0 时多段对象跳过 Range GET**：直接写 `<ownerID>/mp.txt`。每行按 `result_line_format` 渲染（默认 `<bucket>|<key>`），不带 ETag。mode=1/2 的多段对象按 offsets 逐段探测（见 14），**不是**无条件跳过 Range GET。
 
 3. **ETag 来源**：list 响应（统一），**不从 Range GET response header 取**。OwnerID 同样来自 list 响应（minio-go v7.3.0 默认 `fetchOwner=true`，无额外请求开销）。
 
@@ -65,9 +71,9 @@
 
 13. **V1/V2 分页协议对 caller 透明**：`S3Client.listPageOnce` 按 `cfg.ListAPIVersion` 分派 `Core.ListObjects`（V1，marker 游标）或 `Core.ListObjectsV2`（V2，continuation token）。两条路径都归一化进 `listResult{contents, commonPrefixes, next}`，`next` 作为下一次 `ListPage` 的 `continuationToken` 参数回传。V1 无 delimiter 且 `IsTruncated=true` 但 `NextMarker` 为空时，回退到最后一个 Contents key 作 marker；有 delimiter 时 S3 返回 `NextMarker`。caller（lister/walker/main 根分页）只需把 `next` 喂回 `continuationToken`，不感知 V1/V2 差异。`S3Client.core` 是 `minioListAPI` 接口（非 `*minio.Core`）以支持测试注入。
 
-14. **多段分段检查的失败分流**：分段 RangeGet 报错走 `mp_check_failed` 路径（`WriteMpCheckFailed` + `IncrMpCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）。
+14. **多段分段检查的失败分流**（mode=1/2 与 -list-file 共用路径）：分段 RangeGet 报错走 `mp_check_failed` 路径（`WriteMpCheckFailed` + `IncrMpCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）。**corrupted_mp.txt 行格式按模式**：mode=1 与 -list-file 模式写 `bkt|key|partcnt|off0|off1|...`（offsets 是真实 part 边界，文件可直喂 -backup-file/-list-file，**不套 result_line_format**）；mode=2 写 result_line_format 渲染行——固定分段的 [0,seg,2*seg,...] 是合成边界，**绝不能**当 part 边界写出（否则备份中转按错误边界分段，ETag 必 mismatch）。
 
-15. **统计字段命名**（display name / Go 字段）：`list_obj` (`ListedObjects`) / `list_mp` (`ListedMp`) / `list_all` (`ListedAll=list_obj+list_mp`) / `ok_obj` (`OkObjects`) / `corrupt_obj` (`CorruptedObjects`) / `ok_mp` (`OkMp`) / `corrupt_mp` (`CorruptedMp`) / `list_failed` (`ListFailed`) / `check_failed` (`CheckFailed`) / `mp_check_failed` (`MpCheckFailed`) / `read` (`ReadLines`，-list-file/-backup-file 的累计已读输入行数，每读一行 +1 含坏行；**不统计总行数**——预扫描整个输入文件不值得)。**关键语义**：`ok_mp` 只在 `is_multipart_segment_check=true` 且通过分段检查时 +1；switch off 时多段对象只计 `list_mp`，**不**计 `ok_mp`——未校验不能谎称干净。`is_check=false`（list-only）时 `ok_obj`/`corrupt_obj`/`ok_mp`/`corrupt_mp`/`check_failed`/`mp_check_failed` 全部为 0，summary 不输出这些字段。
+15. **统计字段命名**（display name / Go 字段）：`list_obj` (`ListedObjects`) / `list_mp` (`ListedMp`) / `list_all` (`ListedAll=list_obj+list_mp`) / `ok_obj` (`OkObjects`) / `corrupt_obj` (`CorruptedObjects`) / `ok_mp` (`OkMp`) / `corrupt_mp` (`CorruptedMp`) / `list_failed` (`ListFailed`) / `check_failed` (`CheckFailed`) / `mp_check_failed` (`MpCheckFailed`) / `read` (`ReadLines`，-list-file/-backup-file 的累计已读输入行数，每读一行 +1 含坏行；**不统计总行数**——预扫描整个输入文件不值得)。**关键语义**：`ok_mp` 只在 `multipart_check_mode!=0` 且通过分段检查时 +1；mode=0 时多段对象只计 `list_mp`，**不**计 `ok_mp`——未校验不能谎称干净（mode=1 的 mp.txt 回落对象同理只计 `list_mp`）。`is_check=false`（list-only）时 `ok_obj`/`corrupt_obj`/`ok_mp`/`corrupt_mp`/`check_failed`/`mp_check_failed` 全部为 0，summary 不输出这些字段。
 
 16. **进度行与 summary 按 `RunMode` 输出指标集**：`ModeListCheck`/`ModeListOnly` 用 list/check 全量字段；`ModeListFile`（-list-file）打 `read=X` + `ok_mp/corrupt_mp/mp_check_failed`；`ModeBackup`（-backup-file）打 `read=X` + `backup_ok/backup_failed/backup_mismatch/backup_skipped_clean`。后两种模式**不**输出 `list_all`/`list_calls`/`list_obj` 等 list 指标——无 S3 LIST，全是 0 噪声。`q=` 队列快照同理按模式裁剪（list-file 无 BFS 队列，backup 用 `BackupChannelSnapshot`）。
 
@@ -98,7 +104,7 @@
 | `backup_output_dir` | （无，必填） | `-backup-file` 模式专用输出目录；与 `output_dir` 分离以免 backup 结果与 list/check 结果混写。`NewBackupOutput` 用 `cfg.BackupOutputDir` 建 `MkdirAll` 并写所有 backup 文件；list/check 模式忽略该字段。`main` 启动时若 `-backup-file` 而 `BackupOutputDir==""` 直接 `os.Exit(2)`，同样受 `output_dir_timestamp` 控制并与 `output_dir` 共享同一时间戳成对生成 |
 | `is_check` | `true` | true=列举+校验；false=仅列举（不校验普通对象，不写对象文件，不创建 owner 目录，仅写 list_failed.*） |
 | `is_success_log` | `false` | 是否记录正常普通对象到 `<ownerID>/ok_objects.txt` |
-| `is_multipart_segment_check` | `false` | 是否按固定 part size（`multipart_segment_size`）对多段对象做分段损坏检查；`true` 时必须配 `multipart_segment_size > 0`，否则启动报错中止 |
+| `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 mp.txt 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，多段 ETag 返回 `<md5>-<partcnt>-<off0>\|<off1>\|...`，按真实 part 边界逐段检查；解析不出 offsets 回落 mp.txt。**优先级高于 mode=2**）；`2`=固定分段检查（旧模式待废弃，必须配 `multipart_segment_size > 0`）。非法值启动报错；配置里出现已废弃的 `is_multipart_segment_check` 字段也报错并提示迁移（防旧配置被静默当作 mode=0） |
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
 | `is_multipart_success_log` | `false` | 是否记录干净的多段对象到 `<ownerID>/ok_mp.txt` |
 | `progress_interval` | `5000` | 进度打印阈值（约） |
@@ -113,9 +119,9 @@
 | 文件 | 内容 | 何时写 |
 |---|---|---|
 | `corrupted_objects.txt` | 损坏普通对象 key | Range GET 命中 chunk-signature（`is_check=true`） |
-| `mp.txt` | 多段对象 key（仅 key） | `is_multipart_segment_check=false` 时所有多段对象 |
-| `corrupted_mp.txt` | 损坏多段对象 key | `is_multipart_segment_check=true` 时分段检查命中 |
-| `ok_mp.txt` | 干净多段对象 key | `is_multipart_segment_check=true` 且 `is_multipart_success_log=true` |
+| `mp.txt` | 多段对象 key（仅 key） | `multipart_check_mode=0` 时所有多段对象；`multipart_check_mode=1` 时为 ETag 解析失败的回落对象 |
+| `corrupted_mp.txt` | 损坏多段对象 key | `multipart_check_mode=1/2` 或 -list-file 模式分段检查命中。mode=1 与 -list-file 行为 `bkt\|key\|partcnt\|off0\|off1\|...`（真实 part 边界，可直喂 -backup-file，不套 result_line_format）；mode=2 行按 result_line_format |
+| `ok_mp.txt` | 干净多段对象 key | `multipart_check_mode=1/2`（或 -list-file）且 `is_multipart_success_log=true`，行按 result_line_format |
 | `ok_objects.txt` | 正常普通对象 key | `is_success_log=true` |
 
 ### 处理文件（全局，根目录 `<output_dir>/<filename>`）
@@ -126,10 +132,10 @@
 | `list_failed.log` | 列举失败结构化错误（slog text，req_id/prefix/http_code/s3_code/err） | 同上 |
 | `check_failed.txt` | 普通对象校验失败 key | checker 普通对象 RangeGet 失败 |
 | `check_failed.log` | 校验失败结构化错误（slog text，req_id/key/http_code/s3_code/err） | 同上 |
-| `mp_check_failed.txt` | 多段分段检查失败 key | `is_multipart_segment_check=true` 时分段 RangeGet 失败 |
+| `mp_check_failed.txt` | 多段分段检查失败 key | `multipart_check_mode=1/2`（或 -list-file）时分段 RangeGet 失败 |
 | `mp_check_failed.log` | 多段分段检查失败结构化错误（slog text） | 同上 |
 
-`is_check=false` 时不校验普通对象，不写任何对象文件，不创建 owner 目录，仅写 `list_failed.*`。`is_check=true && is_multipart_segment_check=false` 时 `corrupted_mp.txt` / `ok_mp.txt` / `mp_check_failed.*` 不创建。
+`is_check=false` 时不校验普通对象，不写任何对象文件，不创建 owner 目录，仅写 `list_failed.*`。`is_check=true && multipart_check_mode=0`（非 -list-file）时 `corrupted_mp.txt` / `ok_mp.txt` / `mp_check_failed.*` 不创建。
 
 ### 结果文件行格式
 
@@ -193,7 +199,7 @@ mkdir -p /tmp/chunked-e2e/mp-seed
 #    见 /tmp/chunked-e2e/mp-seed/main.go（仓库外 helper，用 minio-go v7）
 cd /tmp/chunked-e2e/mp-seed && go run .
 
-# 5. 写 cfg（is_check=true, is_multipart_segment_check=true, segment_size=5242880）
+# 5. 写 cfg（is_check=true, multipart_check_mode=2, segment_size=5242880）
 cat > /tmp/chunked-e2e/cfg.yaml <<'EOF'
 endpoints:
   - 127.0.0.1:9100
@@ -206,7 +212,7 @@ check_concurrency: 4
 output_dir: /tmp/chunked-e2e/out
 is_check: true
 is_success_log: true
-is_multipart_segment_check: true
+multipart_check_mode: 2
 multipart_segment_size: 5242880
 is_multipart_success_log: true
 progress_interval: 2
@@ -232,6 +238,8 @@ go build -o /tmp/chunked_check_tool .
 | `out/run.log` | 含配置快照（ak/sk `***`）+ 进度行 + summary |
 
 `out/minio/` 路径名里的 `minio` 是 LIST 响应 Owner 字段（root 用户 → OwnerID=`minio`）；空 OwnerID 会落到 `_unknown/`。
+
+**multipart_check_mode=1 负向验证**（本地 minio 不识别 `internal-list-mp-offset`，正好验证回落路径）：cfg 改 `multipart_check_mode: 1`（删 segment_size）重跑——minio 返回普通 `<md5>-<N>` ETag → 解析失败 → 两个多段对象都落 `out/minio/mp.txt`，summary `ok_mp: 0 corrupt_mp: 0`，corrupted_mp/ok_mp 文件为空或不创建。header 实际已发出（`TestMpOffsetTransportMinioList` 单测覆盖）。**正向路径**（offset 检查全链路）需服务端实现该 header 后在真实集群验证：corrupted_mp.txt 行 `bkt|key|partcnt|off0|...` 可直喂 `-backup-file`。
 
 **断点续跑**：`output_dir` 是 append 模式，重跑会累加。想干净跑就换 `output_dir`（`sed 's#out#out2#'`）。
 

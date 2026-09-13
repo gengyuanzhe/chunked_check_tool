@@ -162,7 +162,9 @@ func TestRunListFileMultipartResultsEndToEnd(t *testing.T) {
 		t.Fatalf("run returned err: %v", err)
 	}
 
-	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "srcbucket|mp1\n")
+	// corrupted_mp lines carry the input offsets (bkt|key|partcnt|offs...),
+	// shape-compatible with -backup-file input.
+	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "srcbucket|mp1|1|0\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "srcbucket|mpclean\n")
 	assertFileContent(t, dir, "list_failed.txt", "srcbucket|bad|1|100\n")
 

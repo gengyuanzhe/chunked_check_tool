@@ -111,7 +111,9 @@ type UploadedPart struct {
 // NewMinioClient constructs a minio.Client bound to a single endpoint.
 // When secure is true the transport skips TLS verification (typical for
 // internal nodes with self-signed certs); set secure=false for plain HTTP.
-func NewMinioClient(endpoint, ak, sk string, secure bool) (*minio.Client, error) {
+// mpOffsetList wraps the transport with mpOffsetTransport so every LIST
+// request carries internal-list-mp-offset: true (multipart_check_mode=1).
+func NewMinioClient(endpoint, ak, sk string, secure, mpOffsetList bool) (*minio.Client, error) {
 	tr := &http.Transport{
 		MaxIdleConnsPerHost: 32,
 		IdleConnTimeout:     90 * time.Second,
@@ -119,10 +121,14 @@ func NewMinioClient(endpoint, ak, sk string, secure bool) (*minio.Client, error)
 	if secure {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
+	var rt http.RoundTripper = tr
+	if mpOffsetList {
+		rt = &mpOffsetTransport{base: tr}
+	}
 	return minio.New(endpoint, &minio.Options{
 		Creds:        credentials.NewStaticV4(ak, sk, ""),
 		Secure:       secure,
-		Transport:    tr,
+		Transport:    rt,
 		BucketLookup: minio.BucketLookupAuto,
 	})
 }
@@ -286,6 +292,14 @@ func (c *S3Client) listPageOnce(prefix, startAfter, continuationToken, delimiter
 	}, nil
 }
 
+// mpOffsetList reports whether this client's LIST requests must carry the
+// internal-list-mp-offset header (multipart_check_mode=offset in check
+// mode). Backup/list-file modes never issue LISTs, so wrapping their
+// clients is harmless anyway.
+func (c *S3Client) mpOffsetList() bool {
+	return c.cfg != nil && c.cfg.IsCheck && c.cfg.MultipartCheckMode == MultipartCheckModeOffset
+}
+
 // rebuild swaps the bound minio client to the next alive node. Returns true
 // when a new node was assigned and the client was successfully rebuilt.
 func (c *S3Client) rebuild() bool {
@@ -296,7 +310,7 @@ func (c *S3Client) rebuild() bool {
 	if newIdx < 0 {
 		return false
 	}
-	client, err := NewMinioClient(c.pool.Endpoint(newIdx), c.cfg.AK, c.cfg.SK, c.cfg.Scheme == "https")
+	client, err := NewMinioClient(c.pool.Endpoint(newIdx), c.cfg.AK, c.cfg.SK, c.cfg.Scheme == "https", c.mpOffsetList())
 	if err != nil {
 		return false
 	}

@@ -159,7 +159,7 @@ func (c *Checker) probeAndRoute(task VerifyTask, off int64) bool {
 	}
 	if chunkSigRe.Match(body) {
 		if task.IsMultipart {
-			c.out.WriteCorruptedMultipart(task.OwnerID, task.Key)
+			c.out.WriteCorruptedMultipart(task.OwnerID, task.Key, task.Offsets)
 			c.stats.IncrCorruptedMp()
 		} else {
 			c.out.WriteCorrupted(task.OwnerID, task.Key)

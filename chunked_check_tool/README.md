@@ -117,8 +117,10 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
     bkt|key                          # 普通对象（即上一轮 <ownerID>/corrupted_objects.txt 的 err 列表）
     bkt|key|partcnt|offset0|offset1|...  # 多段对象（与 -list-file 同格式）
 
-注意：`<ownerID>/corrupted_mp.txt` 只含 `bkt|key`，多段对象喂给 `-backup-file` 前需自行补充
-partcnt/offsets（= 原上传 part 边界，即 check 时 `multipart_segment_size` 的整数倍序列
+注意：`<ownerID>/corrupted_mp.txt` 的行格式取决于检查模式——`multipart_check_mode: 1`（offset 检查）与
+`-list-file` 模式下每行为 `bkt|key|partcnt|offset0|offset1|...`（自带真实 part 边界），**可直接喂给
+`-backup-file`**；`multipart_check_mode: 2`（固定分段）与其他情况下每行只有 `bkt|key`，多段对象喂给
+`-backup-file` 前需自行补充 partcnt/offsets（固定分段模式下即 `multipart_segment_size` 的整数倍序列
 `0, seg, 2*seg, ...`）。直接喂 `bkt|key` 行会因输入类型校验（行声明普通、HEAD 判型多段）全部
 mismatch，每条原因见 `mismatch.log`。
 

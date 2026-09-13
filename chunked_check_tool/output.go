@@ -3,20 +3,28 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
 
 // ownerLine pairs the ownerID (drives per-owner output routing) with the
-// object key. The writer goroutine fans lines out by ownerID into
-// <dir>/<ownerID>/<filename>.
+// object key and, for corrupted_mp lines in offset/list-file mode, the
+// object's part offsets (nil → render via result_line_format).
 type ownerLine struct {
 	ownerID string
 	key     string
+	offsets []int64
 }
+
+// ownerRenderer renders one ownerLine to w. Per-owner result files pick
+// either the configured result_line_format or, for corrupted_mp in
+// offset/list-file mode, the offset-carrying bkt|key|partcnt|off0|... shape.
+type ownerRenderer func(w io.Writer, bucket string, ol ownerLine)
 
 type Output struct {
 	dir    string
@@ -85,6 +93,11 @@ func NewOutput(cfg *Config, bucket string, listFileMode bool) (*Output, error) {
 	}
 	isCheck := cfg.IsCheck
 	mpOutputs := cfg.MultipartCheckMode != MultipartCheckModeOff || listFileMode
+	// corrupted_mp lines carry partcnt+offsets when the offsets are real
+	// part boundaries: offset mode (etag-derived) and list-file mode (input
+	// file carries them). Segment mode offsets are synthetic [0, seg, 2*seg,
+	// ...] guesses and must NOT be written as if they were part boundaries.
+	mpOffsetLines := cfg.MultipartCheckMode == MultipartCheckModeOffset || listFileMode
 	format := cfg.ResultLineFormat
 	if format == "" {
 		format = "<bucket>|<key>"
@@ -106,7 +119,12 @@ func NewOutput(cfg *Config, bucket string, listFileMode bool) (*Output, error) {
 		checkFailedCh:             make(chan string, chCap),
 		mpCheckFailedCh:           make(chan string, chCap),
 		corruptedEnabled:          isCheck,
-		multipartAllEnabled:       isCheck && !mpOutputs,
+		// mp.txt: mode=off writes every multipart here; mode=offset writes
+		// the unparseable-ETag fallback here. Segment mode disables it
+		// (offsets always synthesized when Size>0). List-file mode has no
+		// fallback path (tasks always carry offsets), so it stays off to
+		// avoid creating an empty file.
+		multipartAllEnabled:       isCheck && !listFileMode && (!mpOutputs || cfg.MultipartCheckMode == MultipartCheckModeOffset),
 		corruptedMultipartEnabled: isCheck && mpOutputs,
 		multipartOkEnabled:        isCheck && mpOutputs && cfg.IsMultipartSuccessLog,
 		mpCheckFailedEnabled:      isCheck && mpOutputs,
@@ -124,27 +142,31 @@ func NewOutput(cfg *Config, bucket string, listFileMode bool) (*Output, error) {
 		return nil, err
 	}
 	if o.corruptedEnabled {
-		if err := o.openAndStartOwner("corrupted_objects.txt", o.corruptedCh); err != nil {
+		if err := o.openAndStartOwner("corrupted_objects.txt", o.corruptedCh, o.renderLineFmt); err != nil {
 			return nil, err
 		}
 	}
 	if o.multipartAllEnabled {
-		if err := o.openAndStartOwner("mp.txt", o.multipartAllCh); err != nil {
+		if err := o.openAndStartOwner("mp.txt", o.multipartAllCh, o.renderLineFmt); err != nil {
 			return nil, err
 		}
 	}
 	if o.corruptedMultipartEnabled {
-		if err := o.openAndStartOwner("corrupted_mp.txt", o.corruptedMultipartCh); err != nil {
+		render := o.renderLineFmt
+		if mpOffsetLines {
+			render = o.renderMultipartOffsets
+		}
+		if err := o.openAndStartOwner("corrupted_mp.txt", o.corruptedMultipartCh, render); err != nil {
 			return nil, err
 		}
 	}
 	if o.multipartOkEnabled {
-		if err := o.openAndStartOwner("ok_mp.txt", o.multipartOkCh); err != nil {
+		if err := o.openAndStartOwner("ok_mp.txt", o.multipartOkCh, o.renderLineFmt); err != nil {
 			return nil, err
 		}
 	}
 	if o.successEnabled {
-		if err := o.openAndStartOwner("ok_objects.txt", o.successCh); err != nil {
+		if err := o.openAndStartOwner("ok_objects.txt", o.successCh, o.renderLineFmt); err != nil {
 			return nil, err
 		}
 	}
@@ -262,12 +284,13 @@ func (o *Output) openAndStartRoot(name string, ch chan string) error {
 }
 
 // openAndStartOwner opens <dir>/<ownerID>/<name> lazily per ownerID and
-// starts a writer goroutine that fans lines out by ownerID. The goroutine
-// owns its own map[ownerID]*os.File + map[ownerID]*bufio.Writer; on Close
-// (channel close) it flushes+ closes every opened file. This way we pay one
-// goroutine per result file regardless of how many owners appear, instead
-// of one goroutine per owner.
-func (o *Output) openAndStartOwner(name string, ch chan ownerLine) error {
+// starts a writer goroutine that fans lines out by ownerID, rendering each
+// line with the given renderer. The goroutine owns its own
+// map[ownerID]*os.File + map[ownerID]*bufio.Writer; on Close (channel close)
+// it flushes + closes every opened file. This way we pay one goroutine per
+// result file regardless of how many owners appear, instead of one goroutine
+// per owner.
+func (o *Output) openAndStartOwner(name string, ch chan ownerLine, render ownerRenderer) error {
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
@@ -297,11 +320,40 @@ func (o *Output) openAndStartOwner(name string, ch chan ownerLine) error {
 				w = bufio.NewWriterSize(f, 64*1024)
 				writers[dirName] = w
 			}
-			o.lineFmt.writeTo(w, o.bucket, ol.ownerID, ol.key)
+			render(w, o.bucket, ol)
 			w.WriteByte('\n')
 		}
 	}()
 	return nil
+}
+
+// renderLineFmt renders via the configured result_line_format.
+func (o *Output) renderLineFmt(w io.Writer, bucket string, ol ownerLine) {
+	o.lineFmt.writeTo(w, bucket, ol.ownerID, ol.key)
+}
+
+// renderMultipartOffsets writes bucket|key|partcnt|off0|off1|... — the exact
+// -list-file / -backup-file input shape, so corrupted_mp.txt can be fed
+// straight back for re-check or backup. strconv.AppendInt into a per-call
+// stack buffer keeps it allocation-free apart from growth. Lines with no
+// offsets (should not happen — corrupted implies probed) fall back to the
+// plain format rather than emitting a malformed partcnt=0 line.
+func (o *Output) renderMultipartOffsets(w io.Writer, bucket string, ol ownerLine) {
+	if len(ol.offsets) == 0 {
+		o.renderLineFmt(w, bucket, ol)
+		return
+	}
+	sep := []byte{'|'}
+	w.Write([]byte(bucket))
+	w.Write(sep)
+	w.Write([]byte(ol.key))
+	var buf [20]byte
+	w.Write(sep)
+	w.Write(strconv.AppendInt(buf[:0], int64(len(ol.offsets)), 10))
+	for _, off := range ol.offsets {
+		w.Write(sep)
+		w.Write(strconv.AppendInt(buf[:0], off, 10))
+	}
 }
 
 // openListFailedLog opens list_failed.log at the root and wires it to a
@@ -389,27 +441,31 @@ func (o *Output) openMismatchLog() error {
 
 func (o *Output) WriteCorrupted(ownerID, key string) {
 	if o.corruptedEnabled {
-		o.corruptedCh <- ownerLine{ownerID, key}
+		o.corruptedCh <- ownerLine{ownerID, key, nil}
 	}
 }
-func (o *Output) WriteCorruptedMultipart(ownerID, key string) {
+// WriteCorruptedMultipart records a corrupted multipart object. offsets are
+// the part boundaries the probes ran at; the corrupted_mp renderer decides
+// whether they appear in the line (offset/list-file mode) or are ignored in
+// favor of result_line_format (segment mode — synthetic offsets).
+func (o *Output) WriteCorruptedMultipart(ownerID, key string, offsets []int64) {
 	if o.corruptedMultipartEnabled {
-		o.corruptedMultipartCh <- ownerLine{ownerID, key}
+		o.corruptedMultipartCh <- ownerLine{ownerID, key, offsets}
 	}
 }
 func (o *Output) WriteMultipartAll(ownerID, key string) {
 	if o.multipartAllEnabled {
-		o.multipartAllCh <- ownerLine{ownerID, key}
+		o.multipartAllCh <- ownerLine{ownerID, key, nil}
 	}
 }
 func (o *Output) WriteMultipartOk(ownerID, key string) {
 	if o.multipartOkEnabled {
-		o.multipartOkCh <- ownerLine{ownerID, key}
+		o.multipartOkCh <- ownerLine{ownerID, key, nil}
 	}
 }
 func (o *Output) WriteSuccess(ownerID, key string) {
 	if o.successEnabled {
-		o.successCh <- ownerLine{ownerID, key}
+		o.successCh <- ownerLine{ownerID, key, nil}
 	}
 }
 

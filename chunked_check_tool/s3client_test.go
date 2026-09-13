@@ -176,7 +176,7 @@ func newOpsTestClient(t *testing.T, h http.HandlerFunc) *S3Client {
 	}))
 	t.Cleanup(srv.Close)
 	host := strings.TrimPrefix(srv.URL, "http://")
-	client, err := NewMinioClient(host, "ak", "sk", false)
+	client, err := NewMinioClient(host, "ak", "sk", false, false)
 	if err != nil {
 		t.Fatalf("NewMinioClient: %v", err)
 	}

@@ -72,11 +72,89 @@ func TestOutputCorruptedMultipartPerOwner(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg, "test-bkt", false)
-	o.WriteCorruptedMultipart("owner-A", "mp/k1")
+	o.WriteCorruptedMultipart("owner-A", "mp/k1", nil)
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
 	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/k1" {
 		t.Errorf("corrupted_mp = %q, want %q", line, "test-bkt|mp/k1")
+	}
+}
+
+// TestOutputOffsetModeCorruptedMultipartCarriesOffsets — offset mode:
+// corrupted_mp.txt lines carry partcnt+offsets in the -list-file/
+// -backup-file input shape (bkt|key|partcnt|off0|off1|...) so the file can
+// be fed straight back into -backup-file. result_line_format does not apply
+// to this file in offset mode.
+func TestOutputOffsetModeCorruptedMultipartCarriesOffsets(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, ResultLineFormat: "<key>@<bucket>"}
+	o, _ := NewOutput(cfg, "test-bkt", false)
+	o.WriteCorruptedMultipart("owner-A", "mp/k1", []int64{0, 5242880, 10485760})
+	o.Close()
+	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/k1|3|0|5242880|10485760" {
+		t.Errorf("corrupted_mp = %q, want %q", line, "test-bkt|mp/k1|3|0|5242880|10485760")
+	}
+}
+
+// TestOutputSegmentModeCorruptedMultipartIgnoresOffsets — segment mode:
+// offsets are synthetic [0, seg, 2*seg, ...] guesses, NOT real part
+// boundaries, so corrupted_mp.txt must keep the result_line_format shape
+// even when offsets are passed.
+func TestOutputSegmentModeCorruptedMultipartIgnoresOffsets(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: 5 * 1024 * 1024}
+	o, _ := NewOutput(cfg, "test-bkt", false)
+	o.WriteCorruptedMultipart("owner-A", "mp/k1", []int64{0, 5242880})
+	o.Close()
+	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/k1" {
+		t.Errorf("corrupted_mp = %q, want %q (segment mode keeps line format)", line, "test-bkt|mp/k1")
+	}
+}
+
+// TestOutputOffsetModeMultipartAllFallback — offset mode: mp.txt stays
+// enabled as the fallback for multipart objects whose ETag did not parse
+// (server without the feature). Lines keep the result_line_format shape —
+// those objects have no offsets to write.
+func TestOutputOffsetModeMultipartAllFallback(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
+	o, _ := NewOutput(cfg, "test-bkt", false)
+	o.WriteMultipartAll("owner-A", "mp/nosupport")
+	o.Close()
+	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "mp.txt"))
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/nosupport" {
+		t.Errorf("mp.txt = %q, want %q", line, "test-bkt|mp/nosupport")
+	}
+}
+
+// TestOutputOffsetModeMpCheckFailedEnabled — offset mode: mp_check_failed
+// stays enabled (offset probes can fail just like segment probes).
+func TestOutputOffsetModeMpCheckFailedEnabled(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
+	o, _ := NewOutput(cfg, "test-bkt", false)
+	o.WriteMpCheckFailed("mp/k1")
+	o.Close()
+	data, _ := os.ReadFile(filepath.Join(dir, "mp_check_failed.txt"))
+	if line := strings.TrimSpace(string(data)); line != "mp/k1" {
+		t.Errorf("mp_check_failed.txt = %q, want %q", line, "mp/k1")
+	}
+}
+
+// TestOutputListFileModeCorruptedMultipartCarriesOffsets — list-file mode:
+// input lines carry real part boundaries, so corrupted_mp.txt preserves
+// them (list-file → backup-file loop without re-deriving offsets).
+func TestOutputListFileModeCorruptedMultipartCarriesOffsets(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOff}
+	o, _ := NewOutput(cfg, "test-bkt", true)
+	o.WriteCorruptedMultipart("owner-A", "mp/k1", []int64{0, 5242880})
+	o.Close()
+	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/k1|2|0|5242880" {
+		t.Errorf("corrupted_mp = %q, want %q", line, "test-bkt|mp/k1|2|0|5242880")
 	}
 }
 
@@ -311,14 +389,14 @@ func TestNewOutputListFileModeEnablesMultipartResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o.WriteCorruptedMultipart("", "mp-bad")
+	o.WriteCorruptedMultipart("", "mp-bad", []int64{0, 1024})
 	o.WriteMultipartOk("", "mp-ok")
 	o.WriteMpCheckFailed("mp-err")
 	o.WriteMultipartAll("", "mp-all") // catalog path — must stay gated OFF
 	if err := o.Close(); err != nil {
 		t.Fatal(err)
 	}
-	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "test-bkt|mp-bad\n")
+	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "test-bkt|mp-bad|2|0|1024\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "test-bkt|mp-ok\n")
 	assertFileContent(t, dir, "mp_check_failed.txt", "mp-err\n")
 	if _, err := os.Stat(filepath.Join(dir, "_unknown", "mp.txt")); !os.IsNotExist(err) {
@@ -337,11 +415,11 @@ func TestNewOutputListFileModeOkMpOptIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	o.WriteMultipartOk("", "mp-ok")
-	o.WriteCorruptedMultipart("", "mp-bad")
+	o.WriteCorruptedMultipart("", "mp-bad", []int64{0, 1024})
 	if err := o.Close(); err != nil {
 		t.Fatal(err)
 	}
-	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "test-bkt|mp-bad\n")
+	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "test-bkt|mp-bad|2|0|1024\n")
 	if _, err := os.Stat(filepath.Join(dir, "_unknown", "ok_mp.txt")); !os.IsNotExist(err) {
 		t.Errorf("ok_mp.txt should require is_multipart_success_log=true")
 	}

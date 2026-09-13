@@ -300,6 +300,70 @@ func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 	}
 }
 
+// TestCheckerOffsetModeCorruptedCarriesOffsets — offset mode: a corrupt
+// multipart lands in corrupted_mp.txt with the etag-derived partcnt+offsets
+// appended (bkt|key|partcnt|off0|off1|...), ready to feed -backup-file.
+// The probe at each part start reuses the same path as list-file mode.
+func TestCheckerOffsetModeCorruptedCarriesOffsets(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, IsMultipartSuccessLog: true}
+	out, _ := NewOutput(cfg, "test-bkt", false)
+	s := NewStats()
+	// First part clean, second part starts with a chunk-signature header.
+	worker := &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
+		if offset == 5242880 {
+			return chunkSigBody, nil
+		}
+		return []byte("clean part body, no signature"), nil
+	}}
+	c := NewChecker(worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5242880}})
+	if got := s.Snapshot().CorruptedMp; got != 1 {
+		t.Errorf("corrupted_mp=%d want 1", got)
+	}
+	if got := s.Snapshot().OkMp; got != 0 {
+		t.Errorf("ok_mp=%d want 0", got)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "corrupted_mp.txt"))
+	if err != nil {
+		t.Fatalf("read corrupted_mp: %v", err)
+	}
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|k|2|0|5242880" {
+		t.Errorf("corrupted_mp.txt = %q, want %q", line, "test-bkt|k|2|0|5242880")
+	}
+}
+
+// TestCheckerOffsetModeFallbackWritesMpAll — offset mode with nil offsets
+// (ETag did not parse): the object is unverified and lands in mp.txt.
+func TestCheckerOffsetModeFallbackWritesMpAll(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
+	out, _ := NewOutput(cfg, "test-bkt", false)
+	s := NewStats()
+	worker := &FakeS3{Body: chunkSigBody} // would match — but nothing is probed
+	c := NewChecker(worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: nil})
+	if got := s.Snapshot().CorruptedMp; got != 0 {
+		t.Errorf("corrupted_mp=%d want 0 (unverified, not probed)", got)
+	}
+	if got := s.Snapshot().OkMp; got != 0 {
+		t.Errorf("ok_mp=%d want 0 (unverified must not claim clean)", got)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "mp.txt"))
+	if err != nil {
+		t.Fatalf("read mp.txt: %v", err)
+	}
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|k" {
+		t.Errorf("mp.txt = %q, want %q", line, "test-bkt|k")
+	}
+}
+
 // TestCheckerMultipartSegmentCheckDisabled: switch off → all multipart go to
 // <owner>/mp.txt (key only, no etag).
 func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
