@@ -1,6 +1,8 @@
 .idea/
 .superpowers/
 *.out
+.DS_Store
 /chunked_check_tool/chunked_check_tool
 /list_only/list_only
 /data_generator/data_generator
+/verify_tool/
