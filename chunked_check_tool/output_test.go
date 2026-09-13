@@ -70,7 +70,7 @@ func TestOutputMultipartAllKeyOnly(t *testing.T) {
 // writes to <owner>/corrupted_mp.txt.
 func TestOutputCorruptedMultipartPerOwner(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: true, MultipartSegmentSize: 5 * 1024 * 1024}
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg, "test-bkt", false)
 	o.WriteCorruptedMultipart("owner-A", "mp/k1")
 	o.Close()
@@ -84,7 +84,7 @@ func TestOutputCorruptedMultipartPerOwner(t *testing.T) {
 // multipart writes to <owner>/ok_mp.txt.
 func TestOutputMultipartOkPerOwner(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: true, IsSuccessLog: true, IsMultipartSuccessLog: true, MultipartSegmentSize: 5 * 1024 * 1024}
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeSegment, IsSuccessLog: true, IsMultipartSuccessLog: true, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg, "test-bkt", false)
 	o.WriteMultipartOk("owner-A", "mp/clean")
 	o.Close()
@@ -98,7 +98,7 @@ func TestOutputMultipartOkPerOwner(t *testing.T) {
 // is_multipart_success_log off: ok_multipart file must not be created.
 func TestOutputMultipartOkSkippedWhenSuccessLogOff(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: true, IsSuccessLog: true, IsMultipartSuccessLog: false, MultipartSegmentSize: 5 * 1024 * 1024}
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeSegment, IsSuccessLog: true, IsMultipartSuccessLog: false, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg, "test-bkt", false)
 	o.WriteMultipartOk("owner-A", "mp/clean") // no-op
 	o.Close()
@@ -129,7 +129,7 @@ func TestOutputCheckFailedAtRoot(t *testing.T) {
 // at root (new process file for segment-check RangeGet errors).
 func TestOutputMpCheckFailedAtRoot(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: true, MultipartSegmentSize: 5 * 1024 * 1024}
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg, "test-bkt", false)
 	o.WriteMpCheckFailed("mp/k1")
 	o.Close()
@@ -143,7 +143,7 @@ func TestOutputMpCheckFailedAtRoot(t *testing.T) {
 // is never created (segment check doesn't run, no one writes here).
 func TestOutputMpCheckFailedSkippedWhenSwitchOff(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: false}
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOff}
 	o, _ := NewOutput(cfg, "test-bkt", false)
 	o.WriteMpCheckFailed("mp/k1") // no-op
 	o.Close()
@@ -274,7 +274,7 @@ func TestBackupOutputWritesFourFiles(t *testing.T) {
 // per-owner check-mode files; only the backup files + list_failed exist.
 func TestBackupOutputNoCheckModeFiles(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, BackupOutputDir: dir, IsCheck: true, IsSuccessLog: true, IsMultipartSegmentCheck: true, MultipartSegmentSize: 1024, IsMultipartSuccessLog: true}
+	cfg := &Config{OutputDir: dir, BackupOutputDir: dir, IsCheck: true, IsSuccessLog: true, MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: 1024, IsMultipartSuccessLog: true}
 	out, err := NewBackupOutput(cfg, "mybucket")
 	if err != nil {
 		t.Fatal(err)
@@ -302,8 +302,8 @@ func assertFileContent(t *testing.T, dir, name, want string) {
 
 // TestNewOutputListFileModeEnablesMultipartResults — list-file tasks always
 // carry explicit offsets, so verification results must route to the
-// multipart result files even when is_multipart_segment_check=false (that
-// flag only governs offset synthesis in bucket mode).
+// multipart result files even when multipart_check_mode=0 (that mode only
+// governs offset synthesis in bucket mode).
 func TestNewOutputListFileModeEnablesMultipartResults(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSuccessLog: true}

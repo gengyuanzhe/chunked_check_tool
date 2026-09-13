@@ -110,7 +110,71 @@ func TestLoadConfig_SchemeHttps(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_MultipartCheck(t *testing.T) {
+func TestLoadConfig_MultipartCheckMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte(`
+endpoints:
+  - 10.0.0.1:9000
+ak: x
+sk: y
+multipart_check_mode: 2
+multipart_segment_size: 5242880
+`)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MultipartCheckMode != MultipartCheckModeSegment {
+		t.Errorf("multipart_check_mode = %d, want %d (segment)", cfg.MultipartCheckMode, MultipartCheckModeSegment)
+	}
+	if cfg.MultipartSegmentSize != 5242880 {
+		t.Errorf("multipart_segment_size = %d, want 5242880", cfg.MultipartSegmentSize)
+	}
+}
+
+// TestLoadConfig_MultipartCheckModeDefault — an absent multipart_check_mode
+// must default to 0 (off): the yaml zero value IS the off value, so no
+// LoadConfig defaulting is needed (and none must be added).
+func TestLoadConfig_MultipartCheckModeDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\n")
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MultipartCheckMode != MultipartCheckModeOff {
+		t.Errorf("multipart_check_mode = %d, want %d (off)", cfg.MultipartCheckMode, MultipartCheckModeOff)
+	}
+}
+
+// TestLoadConfig_MultipartCheckModeInvalid — values outside 0/1/2 must fail
+// at startup: silently treating a typo like 3 as "off" would skip multipart
+// checking without the operator noticing.
+func TestLoadConfig_MultipartCheckModeInvalid(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmultipart_check_mode: 3\n")
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("expected error when multipart_check_mode=3")
+	}
+}
+
+// TestLoadConfig_LegacySegmentCheckField — the retired is_multipart_segment_check
+// field must not be silently ignored: an old config would then run with
+// mode=0 (off) and report every multipart as unverified. Fail loudly with a
+// migration hint instead.
+func TestLoadConfig_LegacySegmentCheckField(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
 	content := []byte(`
@@ -124,15 +188,12 @@ multipart_segment_size: 5242880
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadConfig(path)
-	if err != nil {
-		t.Fatal(err)
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for retired is_multipart_segment_check field")
 	}
-	if !cfg.IsMultipartSegmentCheck {
-		t.Errorf("is_multipart_segment_check = false, want true")
-	}
-	if cfg.MultipartSegmentSize != 5242880 {
-		t.Errorf("multipart_segment_size = %d, want 5242880", cfg.MultipartSegmentSize)
+	if !strings.Contains(err.Error(), "multipart_check_mode") {
+		t.Errorf("error should mention multipart_check_mode, got: %v", err)
 	}
 }
 
@@ -371,7 +432,7 @@ func TestLoadConfig_BackupOutputDirDefaultEmpty(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_SegmentCheckWithoutSize — is_multipart_segment_check=true
+// TestLoadConfig_SegmentCheckWithoutSize — multipart_check_mode=2 (segment)
 // with multipart_segment_size=0 is a contradictory config: the user asked for
 // segment check but provided no segment size. Fail fast at startup rather
 // than silently treating every multipart as clean (which would mask bugs).
@@ -383,7 +444,7 @@ endpoints:
   - 10.0.0.1:9000
 ak: x
 sk: y
-is_multipart_segment_check: true
+multipart_check_mode: 2
 multipart_segment_size: 0
 `)
 	if err := os.WriteFile(path, content, 0644); err != nil {
@@ -391,6 +452,6 @@ multipart_segment_size: 0
 	}
 	_, err := LoadConfig(path)
 	if err == nil {
-		t.Fatal("expected error when is_multipart_segment_check=true but multipart_segment_size=0")
+		t.Fatal("expected error when multipart_check_mode=2 but multipart_segment_size=0")
 	}
 }

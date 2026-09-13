@@ -201,7 +201,7 @@ func multipartCfg(dir string, segSize int64) *Config {
 	return &Config{
 		OutputDir:               dir,
 		IsCheck:                 true,
-		IsMultipartSegmentCheck: true,
+		MultipartCheckMode: MultipartCheckModeSegment,
 		IsSuccessLog:            true,
 		IsMultipartSuccessLog:   true,
 		MultipartSegmentSize:    segSize,
@@ -304,7 +304,7 @@ func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 // <owner>/mp.txt (key only, no etag).
 func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSegmentCheck: false, MultipartSegmentSize: 5 * 1024 * 1024}
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOff, MultipartSegmentSize: 5 * 1024 * 1024}
 	out, _ := NewOutput(cfg, "test-bkt", false)
 	s := NewStats()
 	worker := &FakeS3{Body: chunkSigBody} // would match if we checked — but we don't

@@ -4,8 +4,9 @@ package main
 // verify() interprets Offsets as follows:
 //   - IsMultipart=false, Offsets=nil → normal object: probe offset 0 once
 //     (no slice, no allocation — verify special-cases the single probe)
-//   - IsMultipart=true, Offsets=nil → multipart with segcheck off: do not
-//     probe, write to mp_all without claiming ok_mp
+//   - IsMultipart=true, Offsets=nil → multipart with check off (or offset
+//     mode with an unparseable ETag): do not probe, write to mp_all without
+//     claiming ok_mp
 //   - IsMultipart=true, Offsets=[...] → probe each offset (fixed-segment or
 //     list-file sources)
 //
@@ -21,9 +22,10 @@ type VerifyTask struct {
 
 // resolveOffsets builds a VerifyTask from an S3-listed object. Three cases:
 //   - normal ETag → IsMultipart=false, Offsets=nil (verify probes offset 0)
-//   - multipart ETag + segcheck on + Size>0 → IsMultipart=true, Offsets =
+//   - multipart ETag + mode=segment + Size>0 → IsMultipart=true, Offsets =
 //     [0, seg, 2*seg, ...] ceil(Size/seg) entries
-//   - multipart ETag + segcheck off (or Size==0) → IsMultipart=true, Offsets=nil
+//   - multipart ETag + mode=off (or mode=segment with Size==0) →
+//     IsMultipart=true, Offsets=nil
 func resolveOffsets(obj ObjectInfo, cfg *Config) VerifyTask {
 	if isNormalETag(obj.ETag) {
 		return VerifyTask{
@@ -43,7 +45,7 @@ func resolveOffsets(obj ObjectInfo, cfg *Config) VerifyTask {
 		Size:        obj.Size,
 		IsMultipart: true,
 	}
-	if cfg.IsMultipartSegmentCheck && cfg.MultipartSegmentSize > 0 && obj.Size > 0 {
+	if cfg.MultipartCheckMode == MultipartCheckModeSegment && cfg.MultipartSegmentSize > 0 && obj.Size > 0 {
 		seg := cfg.MultipartSegmentSize
 		numSegs := (obj.Size + seg - 1) / seg
 		offs := make([]int64, numSegs)

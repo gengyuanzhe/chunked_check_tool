@@ -9,6 +9,23 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Multipart check modes (multipart_check_mode): how multipart objects are
+// checked for chunked corruption in check mode.
+const (
+	// MultipartCheckModeOff writes every multipart object to mp.txt
+	// unverified — no probes.
+	MultipartCheckModeOff = 0
+	// MultipartCheckModeOffset asks the server for real part boundaries: LIST
+	// requests carry internal-list-mp-offset: true and multipart ETags come
+	// back as <md5>-<partcnt>-<off0>|<off1>|..., each part start is probed.
+	// ETags that don't parse (server without the feature) fall back to mp.txt.
+	MultipartCheckModeOffset = 1
+	// MultipartCheckModeSegment assumes uniform part size: offsets are
+	// synthesized as [0, seg, 2*seg, ...] from multipart_segment_size.
+	// Legacy mode, lowest priority, slated for removal.
+	MultipartCheckModeSegment = 2
+)
+
 type Config struct {
 	Endpoints               []string `yaml:"endpoints"`
 	Scheme                  string   `yaml:"scheme"`
@@ -26,17 +43,17 @@ type Config struct {
 	// running in backup mode (main.go enforces); ignored by list/check modes.
 	// When OutputDirTimestamp is true, a sibling-suffix stamp is applied to
 	// BackupOutputDir the same way it is to OutputDir.
-	BackupOutputDir         string   `yaml:"backup_output_dir"`
-	IsCheck                 bool     `yaml:"is_check"`
-	IsSuccessLog            bool     `yaml:"is_success_log"`
-	IsMultipartSegmentCheck bool     `yaml:"is_multipart_segment_check"`
-	MultipartSegmentSize    int64    `yaml:"multipart_segment_size"`
-	IsMultipartSuccessLog   bool     `yaml:"is_multipart_success_log"`
-	ProgressInterval        int      `yaml:"progress_interval"`
-	ObjChCapacity           int      `yaml:"obj_ch_capacity"`
-	OutputChCapacity        int      `yaml:"output_ch_capacity"`
-	ResultLineFormat        string   `yaml:"result_line_format"`
-	BackupBucket            string   `yaml:"backup_bucket"`
+	BackupOutputDir         string `yaml:"backup_output_dir"`
+	IsCheck                 bool   `yaml:"is_check"`
+	IsSuccessLog            bool   `yaml:"is_success_log"`
+	MultipartCheckMode      int    `yaml:"multipart_check_mode"`
+	MultipartSegmentSize    int64  `yaml:"multipart_segment_size"`
+	IsMultipartSuccessLog   bool   `yaml:"is_multipart_success_log"`
+	ProgressInterval        int    `yaml:"progress_interval"`
+	ObjChCapacity           int    `yaml:"obj_ch_capacity"`
+	OutputChCapacity        int    `yaml:"output_ch_capacity"`
+	ResultLineFormat        string `yaml:"result_line_format"`
+	BackupBucket            string `yaml:"backup_bucket"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -94,8 +111,21 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.ResultLineFormat == "" {
 		cfg.ResultLineFormat = "<bucket>|<key>"
 	}
-	if cfg.IsMultipartSegmentCheck && cfg.MultipartSegmentSize <= 0 {
-		return nil, fmt.Errorf("is_multipart_segment_check=true requires multipart_segment_size > 0 (got %d)", cfg.MultipartSegmentSize)
+	// Retired field guard: silently ignoring is_multipart_segment_check would
+	// run an old config with mode=0 (off) and report every multipart as
+	// unverified. Fail loudly so the operator migrates the config.
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if _, ok := raw["is_multipart_segment_check"]; ok {
+		return nil, fmt.Errorf("is_multipart_segment_check was replaced by multipart_check_mode (0=off, 1=offset, 2=segment): migrate the config (former true → multipart_check_mode: 2)")
+	}
+	if cfg.MultipartCheckMode < MultipartCheckModeOff || cfg.MultipartCheckMode > MultipartCheckModeSegment {
+		return nil, fmt.Errorf("multipart_check_mode must be 0 (off), 1 (offset), or 2 (segment), got %d", cfg.MultipartCheckMode)
+	}
+	if cfg.MultipartCheckMode == MultipartCheckModeSegment && cfg.MultipartSegmentSize <= 0 {
+		return nil, fmt.Errorf("multipart_check_mode=2 (segment) requires multipart_segment_size > 0 (got %d)", cfg.MultipartSegmentSize)
 	}
 	return &cfg, nil
 }

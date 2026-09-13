@@ -22,25 +22,25 @@ func TestResolveOffsets(t *testing.T) {
 		{
 			name: "multipart segcheck on builds ceil size/seg offsets",
 			obj:  ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, OwnerID: "o"},
-			cfg:  &Config{IsMultipartSegmentCheck: true, MultipartSegmentSize: seg},
+			cfg:  &Config{MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: seg},
 			want: VerifyTask{Key: "k", OwnerID: "o", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, IsMultipart: true, Offsets: []int64{0, seg}},
 		},
 		{
 			name: "multipart segcheck on size not multiple of seg",
 			obj:  ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-3", Size: 12*1024*1024 + 1, OwnerID: "o"},
-			cfg:  &Config{IsMultipartSegmentCheck: true, MultipartSegmentSize: seg},
+			cfg:  &Config{MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: seg},
 			want: VerifyTask{Key: "k", OwnerID: "o", ETag: "0123456789abcdef0123456789abcdef-3", Size: 12*1024*1024 + 1, IsMultipart: true, Offsets: []int64{0, seg, 2 * seg}},
 		},
 		{
 			name: "multipart segcheck off nil offsets",
 			obj:  ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 100, OwnerID: "o"},
-			cfg:  &Config{IsMultipartSegmentCheck: false, MultipartSegmentSize: 0},
+			cfg:  &Config{MultipartCheckMode: MultipartCheckModeOff, MultipartSegmentSize: 0},
 			want: VerifyTask{Key: "k", OwnerID: "o", ETag: "0123456789abcdef0123456789abcdef-2", Size: 100, IsMultipart: true, Offsets: nil},
 		},
 		{
 			name: "multipart segcheck on but size zero nil offsets",
 			obj:  ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 0, OwnerID: "o"},
-			cfg:  &Config{IsMultipartSegmentCheck: true, MultipartSegmentSize: seg},
+			cfg:  &Config{MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: seg},
 			want: VerifyTask{Key: "k", OwnerID: "o", ETag: "0123456789abcdef0123456789abcdef-2", Size: 0, IsMultipart: true, Offsets: nil},
 		},
 	}

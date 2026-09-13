@@ -62,8 +62,8 @@ output_dir: ./out                   # 输出目录
 output_dir_timestamp: true         # true=output_dir 追加 _YYYYMMDD_HHMMSS 后缀（./out → ./out_20260908_175201）隔离每次运行; false=固定用 output_dir
 is_check: true                      # true=列举+校验, false=仅列举
 is_success_log: false               # 是否记录正常普通对象到 <ownerID>/ok_objects.txt
-is_multipart_segment_check: false   # 是否按固定 part size 对多段对象做分段损坏检查
-multipart_segment_size: 0           # 多段分段检查的段长度(字节)，需与上传 part size 一致
+multipart_check_mode: 0             # 多段检查模式：0=关闭 1=offset 检查 2=固定分段
+multipart_segment_size: 0           # 模式 2 的段长度(字节)，需与上传 part size 一致
 is_multipart_success_log: false     # 是否记录干净的多段对象到 <ownerID>/ok_mp.txt
 progress_interval: 5000             # 进度记录间隔
 obj_ch_capacity: 0                  # lister→checker channel 容量；0=max(check_concurrency*4, 2000)
@@ -86,8 +86,8 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `backup_output_dir` | （无） | `-backup-file` 模式专用输出目录，与 `output_dir` 分离避免 backup 结果与 list/check 结果混写。仅 backup 模式必填，其他模式忽略；同样受 `output_dir_timestamp` 控制并共享同一时间戳成对生成 |
 | `is_check` | `true` | `false` 时只列举不校验，不写对象文件，仅写 `list_failed.*` |
 | `is_success_log` | `false` | `true` 时把正常普通对象 key 写入 `<ownerID>/ok_objects.txt` |
-| `is_multipart_segment_check` | `false` | `true` 时按固定 part size（`multipart_segment_size`）对多段对象做分段损坏检查；`true` 时必须配 `multipart_segment_size > 0`，否则启动报错 |
-| `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
+| `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 `mp.txt` 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，服务端返回 `<md5>-<partcnt>-<off0>\|<off1>\|...` 格式 ETag，按真实 part 边界逐段检查；解析不出 offsets 的对象回落 `mp.txt`）；`2`=固定分段检查（旧模式，未来废弃；必须配 `multipart_segment_size > 0`） |
+| `multipart_segment_size` | `0` | 模式 2 的段长度（字节），需与上传 part size 一致；仅 `multipart_check_mode: 2` 时必填 |
 | `is_multipart_success_log` | `false` | `true` 时把干净的多段对象 key 写入 `<ownerID>/ok_mp.txt` |
 | `progress_interval` | `5000` | stdout 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；0 走默认 |
@@ -106,9 +106,9 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 - 坏行（格式错误/bkt 不匹配）写入 `list_failed.txt` 并跳过
 - 必须 `is_check=true`（文件即列表，无需列举）
 - 此模式无 S3 LIST，进度行与汇总不显示 `list_*` 指标，改用输入消耗量：进度行 `[progress] read=X ok_mp=… corrupt_mp=… list_failed=… mp_check_failed=… get_calls=… get_avg_ms=… (checked=N) q=obj:… cor_mp:… ok_mp:… mcf:… lf:…`；汇总 `read: X` + `list_failed`（仅坏行）+ `get_calls` + `ok_mp/corrupt_mp/mp_check_failed`。`read` 为累计已读行数（每读一行 +1，含坏行；受 objCh 背压影响，反映流水线输入位置，不统计总行数）
-- 校验结果正常输出：损坏 → `<ownerID>/corrupted_mp.txt`，GET 失败 → `mp_check_failed.txt/.log`（无需配 `is_multipart_segment_check`）；全部干净 → `ok_mp.txt`（需配 `is_multipart_success_log: true`）。行内无 owner 信息，结果落在 `_unknown/` 子目录
+- 校验结果正常输出：损坏 → `<ownerID>/corrupted_mp.txt`，GET 失败 → `mp_check_failed.txt/.log`（无需配 `multipart_check_mode`）；全部干净 → `ok_mp.txt`（需配 `is_multipart_success_log: true`）。行内无 owner 信息，结果落在 `_unknown/` 子目录
 
-固定分段校验（`is_multipart_segment_check=true` + `multipart_segment_size`）是本模式的特殊情况：offsets 由 `[0, seg, 2*seg, ...]` 计算而来，本模式则显式给出。
+固定分段校验（`multipart_check_mode: 2` + `multipart_segment_size`）是本模式的特殊情况：offsets 由 `[0, seg, 2*seg, ...]` 计算而来，本模式则显式给出。
 
 ## backup-file 模式
 
@@ -156,7 +156,7 @@ mismatch，每条原因见 `mismatch.log`。
 ├── list_failed.log             # 列举失败结构化错误
 ├── check_failed.txt            # 普通对象 RangeGet 失败 key
 ├── check_failed.log            # 普通对象 RangeGet 失败结构化错误
-├── mp_check_failed.txt         # 多段分段 RangeGet 失败 key（is_multipart_segment_check=true 时）
+├── mp_check_failed.txt         # 多段分段 RangeGet 失败 key（multipart_check_mode!=0 时）
 ├── mp_check_failed.log         # 多段分段 RangeGet 失败结构化错误
 ├── backup_ok.txt               # 备份成功的原始输入行（-backup-file 模式）
 ├── backup_failed.txt           # 备份失败的原始输入行（-backup-file 模式）
@@ -167,7 +167,7 @@ mismatch，每条原因见 `mismatch.log`。
 └── <ownerID>/                  # OwnerID 为空时落到 _unknown/
     ├── corrupted_objects.txt   # 损坏普通对象 key（Range GET 命中 chunk-signature）
     ├── ok_objects.txt          # 正常普通对象 key（is_success_log=true 时）
-    ├── mp.txt                  # 多段对象 key（is_multipart_segment_check=false 时）
+    ├── mp.txt                  # 多段对象 key（multipart_check_mode=0 时全部多段；=1 时为 ETag 解析失败的回落）
     ├── corrupted_mp.txt        # 损坏多段对象 key（分段检查命中 chunk-signature）
-    └── ok_mp.txt               # 干净多段对象 key（is_multipart_segment_check=true && is_multipart_success_log=true 时）
+    └── ok_mp.txt               # 干净多段对象 key（multipart_check_mode!=0 && is_multipart_success_log=true 时）
 ```

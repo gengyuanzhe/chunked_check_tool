@@ -57,10 +57,10 @@ type Output struct {
 
 	// enable flags — each gates one writer goroutine + file
 	corruptedEnabled          bool // is_check
-	multipartAllEnabled       bool // is_check && !is_multipart_segment_check
-	corruptedMultipartEnabled bool // is_check && is_multipart_segment_check
-	multipartOkEnabled        bool // is_check && is_multipart_segment_check && is_success_log
-	mpCheckFailedEnabled      bool // is_check && is_multipart_segment_check
+	multipartAllEnabled       bool // is_check && (mode=off || mode=offset)
+	corruptedMultipartEnabled bool // is_check && (mode!=off || list-file)
+	multipartOkEnabled        bool // is_check && (mode!=off || list-file) && is_success_log
+	mpCheckFailedEnabled      bool // is_check && (mode!=off || list-file)
 	checkEnabled              bool // is_check
 	successEnabled            bool // is_check && is_success_log
 	backupEnabled             bool // backup mode: the four backup files
@@ -71,10 +71,10 @@ type Output struct {
 
 // NewOutput builds the Output for list/check modes. listFileMode enables
 // the multipart result routing (corrupted_mp/mp_check_failed/ok_mp) that is
-// otherwise keyed on is_multipart_segment_check: list-file tasks always
+// otherwise keyed on multipart_check_mode != off: list-file tasks always
 // carry explicit offsets, so their verification results must land in those
-// files even when the segment-check flag is off (it only governs offset
-// synthesis in bucket mode and is meaningless for list files).
+// files even when the mode is off (it only governs offset synthesis in
+// bucket mode and is meaningless for list files).
 func NewOutput(cfg *Config, bucket string, listFileMode bool) (*Output, error) {
 	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
 		return nil, fmt.Errorf("mkdir output: %w", err)
@@ -84,7 +84,7 @@ func NewOutput(cfg *Config, bucket string, listFileMode bool) (*Output, error) {
 		chCap = 1024
 	}
 	isCheck := cfg.IsCheck
-	mpOutputs := cfg.IsMultipartSegmentCheck || listFileMode
+	mpOutputs := cfg.MultipartCheckMode != MultipartCheckModeOff || listFileMode
 	format := cfg.ResultLineFormat
 	if format == "" {
 		format = "<bucket>|<key>"

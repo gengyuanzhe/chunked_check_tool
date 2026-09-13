@@ -102,7 +102,8 @@ func (c *Checker) Handle(task VerifyTask) {
 }
 
 // verify routes task to probe-and-route. Multipart + nil Offsets is the
-// "segcheck off" path → write to mp_all without claiming ok_mp. Normal
+// "multipart check off / unparseable offset etag" path → write to mp_all
+// without claiming ok_mp. Normal
 // objects (IsMultipart=false, Offsets=nil) get a single probe at offset 0 —
 // no slice, no loop, no allocation. Multipart objects iterate Offsets.
 // If any probe settles (corrupted or failed) the task is done; otherwise

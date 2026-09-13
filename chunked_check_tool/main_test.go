@@ -129,7 +129,7 @@ func TestRunListFileDispatch(t *testing.T) {
 
 // TestRunListFileMultipartResultsEndToEnd — list-file mode must land
 // verification results in the multipart result files even with
-// is_multipart_segment_check=false (offsets come from the list file).
+// multipart_check_mode=0 (offsets come from the list file).
 // OwnerID is empty for list-file tasks, so results route to _unknown/.
 func TestRunListFileMultipartResultsEndToEnd(t *testing.T) {
 	f := newFakeBackupS3Server(t)
