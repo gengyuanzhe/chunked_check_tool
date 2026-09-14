@@ -56,6 +56,12 @@ func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyT
 	if bkt != expectedBucket {
 		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: fmt.Sprintf("bucket mismatch: got %q want %q", bkt, expectedBucket)}
 	}
+	// TrimSpace matches minio-go's CheckValidObjectName: whitespace-only keys
+	// would fail per-call anyway — reject them here with a resolvable line
+	// number (list_failed) instead of per-object failure entries.
+	if strings.TrimSpace(key) == "" {
+		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: "empty key"}
+	}
 	partcnt, err := strconv.Atoi(partcntStr)
 	if err != nil {
 		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: fmt.Sprintf("partcnt not an integer: %q", partcntStr)}

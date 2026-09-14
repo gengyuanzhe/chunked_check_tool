@@ -43,7 +43,9 @@ func parseBackupFileLine(line string, expectedBucket string, lineNum int) (Backu
 		return BackupTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: fmt.Sprintf("bucket mismatch: got %q want %q", parts[0], expectedBucket)}
 	}
 	if len(parts) == 2 {
-		if parts[1] == "" {
+		// Same TrimSpace rule as parseListFileLine (minio-go rejects
+		// whitespace-only names per call; parse time is the better place).
+		if strings.TrimSpace(parts[1]) == "" {
 			return BackupTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: "empty key"}
 		}
 		return BackupTask{Key: parts[1], RawLine: line, IsMultipart: false}, nil

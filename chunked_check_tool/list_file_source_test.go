@@ -37,6 +37,19 @@ func TestParseListFileLine(t *testing.T) {
 			wantErr: "bucket mismatch",
 		},
 		{
+			name:    "empty key",
+			line:    "mybucket||1|0",
+			wantErr: "empty key",
+		},
+		{
+			// Whitespace-only keys are rejected by minio-go's own
+			// CheckValidObjectName, so reject them at parse time with a
+			// resolvable line number instead of a per-call failure entry.
+			name:    "whitespace-only key",
+			line:    "mybucket| |1|0",
+			wantErr: "empty key",
+		},
+		{
 			name:    "too few fields",
 			line:    "mybucket|k",
 			wantErr: "too few fields",
