@@ -4,16 +4,43 @@
 
 ## 1. 项目意图
 
-自研 S3 存储系统曾因未正确解析 `X-Amz-Content-Sha256` header，把 `aws-chunked` PUT 请求的 `length;chunk-signature=…` / `x-amz-checksum-**` / `x-amz-trailer-signature` 等格式化内容当作原始 body 写入存储。
+### 1.1 故障背景（最重要的前提，所有后续设计都基于此）
+
+自研 S3 存储系统存在 BUG：PUT 请求处理未正确解析 `X-Amz-Content-Sha256` header，因此**未识别** aws-chunked transfer-encoding，把以下三类 streaming 上传的**分帧格式 + trailer + 签名**全部当作原始 body 字节流落盘：
+
+- `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` —— 每段格式 `<hexlen>;chunk-signature=<64hex>\r\n<data>\r\n`
+- `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` —— 段格式同上，末尾追加 `0\r\n<x-amz-checksum-**:...>\r\nx-amz-trailer-signature:...\r\n\r\n`
+- `STREAMING-UNSIGNED-PAYLOAD-TRAILER` —— 段格式简化为 `<hexlen>\r\n<data>\r\n`（无 chunk-signature），末尾追加 `0\r\nx-amz-checksum-**:...\r\n\r\n`
+
+例如 `"hello world"` 走 unsigned-trailer 上传，落盘的实际字节是：
+```
+b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
+```
+而非 11 字节的 `hello world`。
+
+**关键推论**（直接决定校验逻辑）：
+
+1. **ETag 是物理字节的 MD5**：存储侧根本没意识到是 aws-chunked，按普通对象计算 MD5。因此 LIST 返回的 ETag 反映**实际落盘字节**，而非用户上传的逻辑 payload。
+2. **Size 是物理存储大小**：LIST 返回的 Size 含分帧/trailer 字节数，大于逻辑 payload。
+3. **多段对象的 ETag 在 mode=1 下携带物理 part 边界**：`internal-list-mp-offset: true` 让服务端把多段 ETag 改写为 `<md5>-<partcnt>-<off0>|<off1>|...`，其中 `off_i` 是**物理字节偏移**（每段 part 的起始物理偏移），不是逻辑 payload 偏移。配合 Size（物理大小）可推出每段 `[off_i, off_{i+1})` 或末段 `[off_{N-1}, Size)` 的物理边界。
+4. **损坏的概率性**：BUG 不是确定性触发——同一个客户端既上传正常对象、也上传损坏对象；同一个多段对象的**每个 part 独立**可能损坏或正常。因此：
+   - 普通对象（ETag 32 位 hex）也可能是损坏的（含 chunked 帧残留）。
+   - 多段对象的某些 part 可能损坏、其它 part 正常——必须逐段探测，不能整体跳过。
+5. **三类损坏特征分布在 part 的不同位置**：
+   - `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` 和 `-TRAILER`：段首是 `<hexlen>;chunk-signature=<64hex>\r\n`（当前 `chunkSigRe` 抓这个，强特征）。
+   - `STREAMING-UNSIGNED-PAYLOAD-TRAILER`：段首是 `<hexlen>\r\n`（弱特征，误报风险高，**不能**单独作判据）；段尾/对象尾是 `0\r\nx-amz-checksum-(sha256|crc32|crc32c|sha1):...\r\n\r\n`（强特征）。
+   - trailer 类的段首特征太弱，必须靠段尾 trailer marker 抓。
+
+### 1.2 工具职责
 
 本工具**并发**列举并校验对象：
-- 普通对象（ETag 为 32 位小写 MD5 hex）→ Range GET 前 128 字节，匹配 chunk-signature 正则 → 命中即视为损坏。
+- 普通对象（ETag 为 32 位小写 MD5 hex）→ 小对象（`Size <= whole_object_probe_threshold`）单次 Range GET 全读；大对象 head@0 + tail@Size-128 两次。body 同时匹配 `chunkSigRe`（段首 chunk-signature）OR `trailerRe`（段尾/对象尾 x-amz-checksum marker）→ 任一命中即视为损坏。
 - 多段对象（任何非 `^[0-9a-f]{32}$` 的 ETag）→ 按 `multipart_check_mode` 处理：
   - `0`（关闭）→ 直接入 `mp.txt`，不做 Range GET。
-  - `1`（offset 检查）→ LIST 带 `internal-list-mp-offset: true` header，服务端把多段 ETag 改写为 `<md5>-<partcnt>-<off0>|<off1>|...`；按真实 part 边界逐段探测；ETag 解析不出 offsets 的对象回落 `mp.txt`。
-  - `2`（固定分段，旧模式待废弃）→ 按 `multipart_segment_size` 合成 `[0, seg, 2*seg, ...]` 边界逐段探测。
+  - `1`（offset 检查）→ LIST 带 `internal-list-mp-offset: true` header，服务端把多段 ETag 改写为 `<md5>-<partcnt>-<off0>|<off1>|...`（物理字节偏移）；按 head@0 + (N-1) 边界探测 + tail@Size-128 探测，边界 256B 窗口同时覆盖上一段尾 trailer 与下一段首 chunk-signature；ETag 解析不出 offsets 的对象回落 `mp.txt`。
+  - `2`（固定分段，旧模式待废弃）→ 按 `multipart_segment_size` 合成 `[0, seg, 2*seg, ...]` 边界，探测矩阵同 mode=1。
 - 列举失败、校验失败分别落不同文件。
-- 支持几十亿对象规模，内存有界，背压自调节。
+- 支持几十亿对象规模，内存有界，背压自调节。探测矩阵与双 regex 细则见 §4.17。
 
 **不在本工具范围**：修复损坏对象（另行处理）。
 
@@ -78,6 +105,8 @@
 
 16. **进度行与 summary 按 `RunMode` 输出指标集**：`ModeListCheck`/`ModeListOnly` 用 list/check 全量字段；`ModeListFile`（-list-file）打 `read=X` + `ok_mp/corrupt_mp/mp_check_failed`；`ModeBackup`（-backup-file）打 `read=X` + `backup_ok/backup_failed/backup_mismatch/backup_skipped_clean`。后两种模式**不**输出 `list_all`/`list_calls`/`list_obj` 等 list 指标——无 S3 LIST，全是 0 噪声。`q=` 队列快照同理按模式裁剪（list-file 无 BFS 队列，backup 用 `BackupChannelSnapshot`）。
 
+17. **探测矩阵与双 regex**（见 §1.1 故障背景的三类 streaming 类型）：`chunkSigRe` 已去 `^` 锚（边界探测中下一段 chunk-signature 落在 256B slice 的 byte 128，锚定会漏）；新增 `trailerRe` = `x-amz-checksum-(sha256|crc32|crc32c|sha1|crc64):` 抓 STREAMING-UNSIGNED-PAYLOAD-TRAILER 的段尾/对象尾 trailer marker（unsigned 变体段首是弱特征 `<hexlen>\r\n`，不可用，**只能**靠 trailerRe）。`probeAndRoute` 对同一 body 用 `chunkSigRe.Match(body) || trailerRe.Match(body)` 一次判定，不算两次 probe。`buildProbes` 按 task 形状产出探测计划：(a) `Size==0` 在 `Handle` 短路（不请求）；`0<Size<=whole_object_probe_threshold` → 单次 `RangeGetAt(0, thr)` 全读，匹配双 regex，1 请求；(b) 普通对象 `Size>thr` → head@0(128B) + tail@Size-128(128B) = 2 请求；(c) 多段 N part `Size>thr` → head@0 + (N-1) 个边界探测 `[off_i-128, off_i+128]`(256B，覆盖上一段尾 trailer + 下一段首 chunk-sig) + tail@Size-128 = N+1 请求。边界/tail 的 start/length 按 Size clamp（`max(0, off_i-128)`、`min(Size, off_i+128)`、Size<128 时 tail 读全对象）。任一探测命中即 early-exit 判 corrupted（普通→`corrupted_objects.txt`，多段→`corrupted_mp.txt` 带 offsets），不变量 14 的失败分流与行格式不受影响。`whole_object_probe_threshold=0` 禁用快路径恒走多探测。
+
 ## 5. CLI 与配置
 
 ### CLI flags
@@ -107,6 +136,7 @@
 | `is_success_log` | `false` | 是否记录正常普通对象到 `<ownerID>/ok_objects.txt` |
 | `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 mp.txt 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，多段 ETag 返回 `<md5>-<partcnt>-<off0>\|<off1>\|...`，按真实 part 边界逐段检查；解析不出 offsets 回落 mp.txt。**优先级高于 mode=2**）；`2`=固定分段检查（旧模式待废弃，必须配 `multipart_segment_size > 0`）。非法值启动报错；配置里出现已废弃的 `is_multipart_segment_check` 字段也报错并提示迁移（防旧配置被静默当作 mode=0） |
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
+| `whole_object_probe_threshold` | `1024` | 小对象全读阈值（字节）。`0<Size<=该值` 时走快路径：单次 `RangeGetAt(0, thr)` 读全对象，body 同时匹配 `chunkSigRe`（去 `^` 锚）OR `trailerRe`（`x-amz-checksum-(sha256\|crc32\|crc32c\|sha1\|crc64):`），1 请求覆盖段首+段尾两种损坏；超过该值走 head@0+tail@Size-128（普通）/head@0+(N-1)边界+tail@Size-128（多段）多探测。`0`=禁用快路径恒走多探测。负值启动报错 |
 | `is_multipart_success_log` | `false` | 是否记录干净的多段对象到 `<ownerID>/ok_mp.txt` |
 | `node_isolate_threshold` | `3` | 节点隔离阈值：进程级累积的节点故障数（连接错误/超时/5xx，4xx 业务错误不计）达到该值才隔离节点；`1`=旧的首次故障即隔离。计数无时间衰减，跨 worker 共享 |
 | `node_recover_probe_interval` | `60` | 隔离节点恢复探测间隔（秒）。后台 goroutine 每隔该值对隔离节点 HEAD bucket，连续 2 次健康（`!isNodeFaultErr`，即任何正常 S3 应答）→ 恢复进轮询池并清零故障计数；`0`=禁用恢复（隔离在进程内永久，旧行为） |

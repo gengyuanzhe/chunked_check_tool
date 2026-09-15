@@ -90,6 +90,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `is_success_log` | `false` | `true` 时把正常普通对象 key 写入 `<ownerID>/ok_objects.txt` |
 | `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 `mp.txt` 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，服务端返回 `<md5>-<partcnt>-<off0>\|<off1>\|...` 格式 ETag，按真实 part 边界逐段检查；解析不出 offsets 的对象回落 `mp.txt`）；`2`=固定分段检查（旧模式，未来废弃；必须配 `multipart_segment_size > 0`） |
 | `multipart_segment_size` | `0` | 模式 2 的段长度（字节），需与上传 part size 一致；仅 `multipart_check_mode: 2` 时必填 |
+| `whole_object_probe_threshold` | `1024` | 小对象全读阈值（字节）。`0 < Size <= 该值` 时走快路径：单次 RangeGet 读全对象，body 同时匹配 chunk-signature 与 trailer 正则（`x-amz-checksum-(sha256\|crc32\|crc32c\|sha1\|crc64):`），1 请求覆盖段首+段尾两种损坏；超过该值走 head@0+tail@Size-128（普通对象 2 请求）/head@0+(N-1) 边界+tail@Size-128（多段 N+1 请求）多探测。`0` 禁用快路径恒走多探测；负值启动报错 |
 | `is_multipart_success_log` | `false` | `true` 时把干净的多段对象 key 写入 `<ownerID>/ok_mp.txt` |
 | `node_isolate_threshold` | `3` | 节点隔离阈值：进程级累积节点故障数（连接错误/超时/5xx，4xx 不计）达到才隔离节点，跨 worker 共享、无时间衰减；`1` 恢复旧的首次故障即隔离；故障后的重试一律换节点（仅剩单节点时同节点重试），真死节点不丢工作项 |
 | `node_recover_probe_interval` | `60` | 隔离节点恢复探测间隔（秒）：后台每轮 HEAD bucket，连续 2 次健康应答 → 恢复进轮询池并清零故障计数；`0` 禁用恢复（隔离进程内永久） |

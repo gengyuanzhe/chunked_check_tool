@@ -42,6 +42,9 @@ func TestChunkSigRegex(t *testing.T) {
 		{"1000;chunk-signature=short\n", false}, // signature not 64
 		{";chunk-signature=abcdef\n", false},    // empty chunk size
 		{"1000;notchunk-signature=abc\n", false},
+		// De-anchored: matches mid-body, not just at byte 0. Boundary probes
+		// read [off-128, off+128] where the next part's head lands at byte 128.
+		{"garbage prefix 1000;chunk-signature=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\r\n", true},
 	}
 	for _, c := range cases {
 		got := chunkSigRe.Match([]byte(c.body))
@@ -303,21 +306,24 @@ func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 // TestCheckerOffsetModeCorruptedCarriesOffsets — offset mode: a corrupt
 // multipart lands in corrupted_mp.txt with the etag-derived partcnt+offsets
 // appended (bkt|key|partcnt|off0|off1|...), ready to feed -backup-file.
-// The probe at each part start reuses the same path as list-file mode.
+// The boundary probe at [off-128, off+128] straddles part 0's tail and
+// part 1's head; the handler returns a chunkSig body for that boundary
+// window and clean bytes otherwise.
 func TestCheckerOffsetModeCorruptedCarriesOffsets(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, IsMultipartSuccessLog: true}
 	out, _ := NewOutput(cfg, "test-bkt", false)
 	s := NewStats()
-	// First part clean, second part starts with a chunk-signature header.
+	partBoundary := int64(5242880)
 	worker := &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
-		if offset == 5242880 {
+		// Boundary probe centered on partBoundary: start = partBoundary-128.
+		if offset <= partBoundary && offset+length > partBoundary {
 			return chunkSigBody, nil
 		}
 		return []byte("clean part body, no signature"), nil
 	}}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5242880}})
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5242880}})
 	if got := s.Snapshot().CorruptedMp; got != 1 {
 		t.Errorf("corrupted_mp=%d want 1", got)
 	}
@@ -427,4 +433,196 @@ type callTrackingS3 struct {
 func (c *callTrackingS3) RangeGet(ctx context.Context, key string) ([]byte, error) {
 	*c.called = true
 	return c.FakeS3.RangeGet(ctx, key)
+}
+
+// rangeGetCountingS3 wraps FakeS3 and counts RangeGetAt calls. Used to
+// assert the small-object fast-path issues exactly 1 probe and the
+// large-normal head+tail path issues exactly 2.
+type rangeGetCountingS3 struct {
+	*FakeS3
+	count *int
+}
+
+func (c *rangeGetCountingS3) RangeGetAt(ctx context.Context, key string, offset, length int64) ([]byte, error) {
+	*c.count++
+	return c.FakeS3.RangeGetAt(ctx, key, offset, length)
+}
+
+// trailerBody is a body that matches trailerRe but NOT chunkSigRe — the
+// unsigned-payload-trailer variant. Models the "hello world" example from
+// AGENTS.md §1.1: b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
+var trailerBody = []byte("b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n\r\n")
+
+func TestTrailerRegex(t *testing.T) {
+	cases := []struct {
+		body  string
+		match bool
+	}{
+		{"x-amz-checksum-sha256:abc=", true},
+		{"x-amz-checksum-crc32c:abc=", true},
+		{"x-amz-checksum-crc64:abc=", true},
+		{"x-amz-checksum-sha1:abc=", true},
+		{"x-amz-checksum-crc32:abc=", true},
+		{"prefix 0\r\nx-amz-checksum-sha256:abc=\r\n\r\n", true}, // mid-body
+		{"not-a-checksum:abc", false},
+		{"x-amz-checksum-foo:abc", false}, // unknown algo
+		{"hello world", false},
+	}
+	for _, c := range cases {
+		got := trailerRe.Match([]byte(c.body))
+		if got != c.match {
+			t.Errorf("trailerRe.Match(%q)=%v want %v", c.body, got, c.match)
+		}
+	}
+}
+
+func TestCheckerSmallObjectFastPathClean(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, IsSuccessLog: true, WholeObjectProbeThreshold: 1024}
+	out, _ := NewOutput(cfg, "test-bkt", false)
+	defer out.Close()
+	s := NewStats()
+	count := 0
+	worker := &rangeGetCountingS3{FakeS3: &FakeS3{Body: []byte("normal small object content")}, count: &count}
+	c := NewChecker(worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", Size: 50, IsMultipart: false, Offsets: nil})
+	if got := s.Snapshot().CorruptedObjects; got != 0 {
+		t.Errorf("corrupted=%d want 0", got)
+	}
+	if got := s.Snapshot().OkObjects; got != 1 {
+		t.Errorf("ok_obj=%d want 1", got)
+	}
+	if count != 1 {
+		t.Errorf("RangeGetAt calls=%d want 1 (small-object fast-path)", count)
+	}
+}
+
+func TestCheckerSmallObjectFastPathCorruptedChunkSig(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, WholeObjectProbeThreshold: 1024}
+	out, _ := NewOutput(cfg, "test-bkt", false)
+	defer out.Close()
+	s := NewStats()
+	count := 0
+	worker := &rangeGetCountingS3{FakeS3: &FakeS3{Body: chunkSigBody}, count: &count}
+	c := NewChecker(worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", Size: 50, IsMultipart: false, Offsets: nil})
+	if got := s.Snapshot().CorruptedObjects; got != 1 {
+		t.Errorf("corrupted=%d want 1", got)
+	}
+	if count != 1 {
+		t.Errorf("RangeGetAt calls=%d want 1 (small-object fast-path)", count)
+	}
+}
+
+func TestCheckerSmallObjectFastPathCorruptedTrailer(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, WholeObjectProbeThreshold: 1024}
+	out, _ := NewOutput(cfg, "test-bkt", false)
+	defer out.Close()
+	s := NewStats()
+	count := 0
+	// trailerBody has no ;chunk-signature= — previously MISSED by the
+	// head-only probe. The fast-path reads the whole body and trailerRe
+	// now catches it.
+	worker := &rangeGetCountingS3{FakeS3: &FakeS3{Body: trailerBody}, count: &count}
+	c := NewChecker(worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", Size: int64(len(trailerBody)), IsMultipart: false, Offsets: nil})
+	if got := s.Snapshot().CorruptedObjects; got != 1 {
+		t.Errorf("corrupted=%d want 1 (trailer marker should be caught)", got)
+	}
+	if count != 1 {
+		t.Errorf("RangeGetAt calls=%d want 1 (small-object fast-path)", count)
+	}
+}
+
+func TestCheckerLargeNormalObjectHeadTail(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, WholeObjectProbeThreshold: 1024}
+	out, _ := NewOutput(cfg, "test-bkt", false)
+	defer out.Close()
+	s := NewStats()
+	const size int64 = 4096
+	// Body of 4096 bytes: clean head, trailer marker in the last 128 bytes
+	// (the tail probe window [3968, 4096)). Head probe reads clean bytes
+	// (no match) so the tail probe must run and catch the trailer.
+	tail := []byte("\r\n0\r\nx-amz-checksum-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n\r\n")
+	body := make([]byte, size)
+	for i := range body {
+		body[i] = 'x'
+	}
+	copy(body[size-int64(len(tail)):], tail)
+	count := 0
+	// RangeGetHandler slices the body by [offset, offset+length) so the
+	// head probe (offset 0, 128 bytes) sees only clean 'x' bytes and the
+	// tail probe (offset 3968, 128 bytes) sees the trailer marker.
+	worker := &rangeGetCountingS3{
+		FakeS3: &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
+			end := offset + length
+			if end > size {
+				end = size
+			}
+			if offset >= size {
+				return nil, nil
+			}
+			return body[offset:end], nil
+		}},
+		count: &count,
+	}
+	c := NewChecker(worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", Size: size, IsMultipart: false, Offsets: nil})
+	if got := s.Snapshot().CorruptedObjects; got != 1 {
+		t.Errorf("corrupted=%d want 1 (tail probe should catch trailer)", got)
+	}
+	if count != 2 {
+		t.Errorf("RangeGetAt calls=%d want 2 (head + tail)", count)
+	}
+}
+
+func TestCheckerMultipartBoundaryProbeCatchesTrailerInPartTail(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
+	out, _ := NewOutput(cfg, "test-bkt", false)
+	defer out.Close()
+	s := NewStats()
+	// 2 parts, boundary at 5MiB. Boundary probe reads [5242752, 5253008].
+	// Return a body that contains a trailer marker in that window (prev
+	// part tail ending the trailer + clean next part head). The head@0
+	// probe and tail@10MiB probe get clean bytes.
+	boundary := int64(5242880)
+	worker := &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
+		if offset <= boundary && offset+length > boundary {
+			return trailerBody, nil
+		}
+		return []byte("clean part body, no signature"), nil
+	}}
+	c := NewChecker(worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5242880}})
+	if got := s.Snapshot().CorruptedMp; got != 1 {
+		t.Errorf("corrupted_mp=%d want 1 (boundary probe should catch trailer)", got)
+	}
+}
+
+func TestCheckerMultipartBoundaryProbeCatchesChunkSigInNextPartHead(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
+	out, _ := NewOutput(cfg, "test-bkt", false)
+	defer out.Close()
+	s := NewStats()
+	// 2 parts, boundary at 5MiB. Boundary probe reads [5242752, 5253008]
+	// where byte 128 of the 256-byte slice is the next part's head. The
+	// de-anchored chunkSigRe must match at byte 128 — fails without the
+	// de-anchor (regression guard).
+	boundary := int64(5242880)
+	worker := &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
+		if offset <= boundary && offset+length > boundary {
+			return chunkSigBody, nil
+		}
+		return []byte("clean part body, no signature"), nil
+	}}
+	c := NewChecker(worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5242880}})
+	if got := s.Snapshot().CorruptedMp; got != 1 {
+		t.Errorf("corrupted_mp=%d want 1 (de-anchored regex should match next part head)", got)
+	}
 }

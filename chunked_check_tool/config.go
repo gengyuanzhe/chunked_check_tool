@@ -49,6 +49,13 @@ type Config struct {
 	MultipartCheckMode      int    `yaml:"multipart_check_mode"`
 	MultipartSegmentSize   int64  `yaml:"multipart_segment_size"`
 	IsMultipartSuccessLog  bool   `yaml:"is_multipart_success_log"`
+	// WholeObjectProbeThreshold is the byte cutoff for the small-object
+	// fast-path: when 0 < task.Size <= threshold, verify() issues one
+	// RangeGetAt(0, threshold) reading the whole object and matches both
+	// chunkSigRe and trailerRe against that single body. Objects larger
+	// than threshold fall back to the multi-probe matrix (head + boundary
+	// + tail). 0 disables the fast-path entirely (always multi-probe).
+	WholeObjectProbeThreshold int  `yaml:"whole_object_probe_threshold"`
 	NodeIsolateThreshold   int64  `yaml:"node_isolate_threshold"`
 	NodeRecoverProbeInterval int64 `yaml:"node_recover_probe_interval"`
 	ProgressInterval        int    `yaml:"progress_interval"`
@@ -104,6 +111,12 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.ProgressInterval <= 0 {
 		cfg.ProgressInterval = 5000
 	}
+	// Small-object fast-path threshold. 0 in YAML disables the fast-path;
+	// absent (also 0 after unmarshal) falls back to the default. Negative
+	// values are rejected below.
+	if cfg.WholeObjectProbeThreshold == 0 {
+		cfg.WholeObjectProbeThreshold = 1024
+	}
 	if cfg.ListType == 0 {
 		cfg.ListType = 2
 	}
@@ -128,6 +141,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.MultipartCheckMode == MultipartCheckModeSegment && cfg.MultipartSegmentSize <= 0 {
 		return nil, fmt.Errorf("multipart_check_mode=2 (segment) requires multipart_segment_size > 0 (got %d)", cfg.MultipartSegmentSize)
+	}
+	if cfg.WholeObjectProbeThreshold < 0 {
+		return nil, fmt.Errorf("whole_object_probe_threshold must be >= 0 (got %d)", cfg.WholeObjectProbeThreshold)
 	}
 	// Node isolation threshold: how many process-wide node-fault errors a
 	// node must accumulate before it is isolated. 0 (absent) defaults to 3;
