@@ -626,3 +626,53 @@ func TestCheckerMultipartBoundaryProbeCatchesChunkSigInNextPartHead(t *testing.T
 		t.Errorf("corrupted_mp=%d want 1 (de-anchored regex should match next part head)", got)
 	}
 }
+
+// TestRunProbesThreeStates — runProbes returns probeClean / probeCorrupted
+// / probeFailed directly so list-check / -list-file / -backup-file all share
+// the same detection. This test pins the three return paths independently of
+// any routing.
+func TestRunProbesThreeStates(t *testing.T) {
+	t.Run("clean", func(t *testing.T) {
+		f := &FakeS3{Body: []byte("nothing signature-like in here")}
+		task := VerifyTask{Key: "k", Size: 40, IsMultipart: false}
+		result, err := runProbes(f, task, 1024)
+		if err != nil {
+			t.Errorf("err = %v, want nil", err)
+		}
+		if result != probeClean {
+			t.Errorf("result = %v, want probeClean", result)
+		}
+	})
+	t.Run("corrupted by chunkSigRe", func(t *testing.T) {
+		f := &FakeS3{Body: []byte(corruptBody)}
+		task := VerifyTask{Key: "k", Size: int64(len(corruptBody)), IsMultipart: false}
+		result, _ := runProbes(f, task, 1024)
+		if result != probeCorrupted {
+			t.Errorf("result = %v, want probeCorrupted", result)
+		}
+	})
+	t.Run("corrupted by trailerRe", func(t *testing.T) {
+		f := &FakeS3{Body: trailerBody}
+		task := VerifyTask{Key: "k", Size: int64(len(trailerBody)), IsMultipart: false}
+		result, _ := runProbes(f, task, 1024)
+		if result != probeCorrupted {
+			t.Errorf("result = %v, want probeCorrupted (unsigned-trailer has no chunk-signature, only trailer marker)", result)
+		}
+	})
+	t.Run("failed on GET error", func(t *testing.T) {
+		f := &FakeS3{Err: context.DeadlineExceeded}
+		task := VerifyTask{Key: "k", Size: 40, IsMultipart: false}
+		result, err := runProbes(f, task, 1024)
+		if result != probeFailed {
+			t.Errorf("result = %v, want probeFailed", result)
+		}
+		if err == nil {
+			t.Errorf("err = nil, want the RangeGet error")
+		}
+	})
+}
+
+// corruptBody matches chunkSigRe (64-hex signature + CRLF). Defined in
+// backup_test.go but referenced here so runProbes tests cover the signed
+// variant without duplicating the constant.
+var _ = corruptBody

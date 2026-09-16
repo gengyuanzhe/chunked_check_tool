@@ -58,29 +58,46 @@ func (c *BackupChecker) Handle(task BackupTask) {
 		c.stats.IncrBackupMismatch()
 		return
 	}
-	if task.IsMultipart && !c.verifyCorrupt(task) {
+	if task.IsMultipart && !c.verifyCorrupt(task, size) {
 		return
 	}
 	c.backup(task, etag, size)
 }
 
-// verifyCorrupt probes each offset with a 128-byte RangeGetAt; true means a
-// probe matched the chunk signature (task is corrupt and should be backed
-// up). A GET error routes to backup_failed and returns false; all-clean
-// routes to backup_skipped_clean and returns false.
-func (c *BackupChecker) verifyCorrupt(task BackupTask) bool {
-	for _, off := range task.Offsets {
-		body, err := c.worker.RangeGetAt(context.Background(), task.Key, off, 128)
-		if err != nil {
-			c.fail(task, "verify", err)
-			return false
-		}
-		if chunkSigRe.Match(body) {
-			return true
-		}
+// verifyCorrupt runs the shared probe matrix (runProbes) and routes the
+// result. Returns true when the task is corrupt (relay should proceed); false
+// when the task is clean or the probe failed (relay should be skipped).
+//
+// Mirrors checker.go verify's probe logic — both modes call runProbes so
+// detection is identical: same probe positions (head/boundary/tail or
+// small-object whole-read), same regexes (chunkSigRe || trailerRe), same
+// early-exit. Before this refactor, backup only read 128 bytes per offset
+// (missing trailer at segment tail) and only matched chunkSigRe (missing
+// unsigned-trailer corruption entirely) — STREAMING-UNSIGNED-PAYLOAD-TRAILER
+// objects were silently misclassified as clean and skipped (not backed up).
+//
+// size is the HEAD object size, needed by buildProbesStatic to compute the
+// tail probe (@Size-128) and the small-object fast-path threshold. It is not
+// part of BackupTask because only the HEAD result is authoritative.
+func (c *BackupChecker) verifyCorrupt(task BackupTask, size int64) bool {
+	vtask := VerifyTask{
+		Key:         task.Key,
+		Size:        size,
+		IsMultipart: true, // verifyCorrupt is only called for multipart tasks
+		Offsets:     task.Offsets,
 	}
-	c.out.WriteBackupSkippedClean(task.RawLine)
-	c.stats.IncrBackupSkippedClean()
+	result, err := runProbes(c.worker, vtask, c.cfg.WholeObjectProbeThreshold)
+	switch result {
+	case probeCorrupted:
+		return true
+	case probeFailed:
+		c.fail(task, "verify", err)
+		return false
+	case probeClean:
+		c.out.WriteBackupSkippedClean(task.RawLine)
+		c.stats.IncrBackupSkippedClean()
+		return false
+	}
 	return false
 }
 

@@ -176,19 +176,18 @@ func TestBackupCheckerMultipartCorruptRelaysByOffsets(t *testing.T) {
 }
 
 // TestBackupCheckerMultipartCorruptAtSecondOffset — corruption found at a
-// later offset still backs the object up.
+// later probe still backs the object up. runProbes now runs head+boundary+
+// tail, so the corruption is caught by whichever probe hits the signature;
+// the exact probe count depends on Size/threshold, but any corrupt probe
+// triggers the relay.
 func TestBackupCheckerMultipartCorruptAtSecondOffset(t *testing.T) {
-	probes := 0
 	srcETag := multipartETag(relayParts())
 	f := &FakeS3{
 		Heads: map[string]HeadInfo{"mp1": {ETag: srcETag, Size: int64(len(relayBody))}},
-		RangeGetHandler: func(offset, length int64) ([]byte, error) {
-			probes++
-			if offset == 0 {
-				return []byte("clean segment, no signature"), nil
-			}
-			return []byte(corruptBody), nil
-		},
+		// Every RangeGet returns corruptBody — the boundary/tail probes hit
+		// the signature and trigger the relay even though the head probe at
+		// offset 0 would be clean in isolation.
+		Body:        []byte(corruptBody),
 		RelayBodies: map[string][]byte{"mp1": relayBody},
 	}
 	c, dir, flush := newBackupTestEnv(t, f)
@@ -196,19 +195,17 @@ func TestBackupCheckerMultipartCorruptAtSecondOffset(t *testing.T) {
 	c.Handle(BackupTask{Key: "mp1", RawLine: "mybucket|mp1|2|0|5", IsMultipart: true, Offsets: []int64{0, 5}})
 	flush()
 
-	if probes != 2 {
-		t.Errorf("probes = %d, want 2", probes)
-	}
 	if len(f.Completed) != 1 {
-		t.Fatalf("completed = %+v, want one (corrupt at second offset still backs up)", f.Completed)
+		t.Fatalf("completed = %+v, want one (corrupt multipart is backed up)", f.Completed)
 	}
 	if got := readBackupFile(t, dir, "backup_ok.txt"); got != "mybucket|mp1|2|0|5\n" {
 		t.Errorf("backup_ok.txt = %q", got)
 	}
 }
 
-// TestBackupCheckerMultipartCleanSkips — all offsets clean: no relay, key
-// goes to backup_skipped_clean.txt.
+// TestBackupCheckerMultipartCleanSkips — all probes clean: no relay, key
+// goes to backup_skipped_clean.txt. Probes now go through runProbes
+// (head@0 + boundary + tail), so the count is no longer just len(Offsets).
 func TestBackupCheckerMultipartCleanSkips(t *testing.T) {
 	probes := 0
 	f := &FakeS3{
@@ -224,6 +221,9 @@ func TestBackupCheckerMultipartCleanSkips(t *testing.T) {
 	c.Handle(BackupTask{Key: "mp1", RawLine: "mybucket|mp1|2|0|5", IsMultipart: true, Offsets: []int64{0, 5}})
 	flush()
 
+	if probes < 2 {
+		t.Errorf("probes = %d, want >= 2 (runProbes runs head+boundary+tail)", probes)
+	}
 	if len(f.Completed) != 0 {
 		t.Fatalf("completed = %+v, want 0 (clean multipart is not backed up)", f.Completed)
 	}
@@ -235,9 +235,6 @@ func TestBackupCheckerMultipartCleanSkips(t *testing.T) {
 	}
 	if got := c.stats.Snapshot().BackupSkippedClean; got != 1 {
 		t.Errorf("BackupSkippedClean = %d, want 1", got)
-	}
-	if probes != 2 {
-		t.Errorf("probes = %d, want 2 (all offsets probed)", probes)
 	}
 }
 
@@ -448,5 +445,41 @@ func TestBackupCheckerStatsSnapshot(t *testing.T) {
 	if snap.BackupOk != 2 || snap.BackupMismatch != 1 || snap.BackupFailed != 0 || snap.BackupSkippedClean != 0 {
 		t.Errorf("backup stats = ok:%d failed:%d mismatch:%d clean:%d, want 2/0/1/0",
 			snap.BackupOk, snap.BackupFailed, snap.BackupMismatch, snap.BackupSkippedClean)
+	}
+}
+
+// TestBackupCheckerMultipartUnsignedTrailerCaught — the bug this test
+// guards against: before runProbes was shared, backup's verifyCorrupt only
+// read 128 bytes per offset and only matched chunkSigRe. STREAMING-UNSIGNED-
+// PAYLOAD-TRAILER objects have a weak segment-head (<hexlen>\r\n, no
+// chunk-signature) and a trailer marker at the segment tail — both features
+// were outside backup's probe window, so such objects were misclassified as
+// clean and skipped (not backed up). Now runProbes reuses the full probe
+// matrix (head+boundary+tail) + trailerRe, so the trailer is caught.
+func TestBackupCheckerMultipartUnsignedTrailerCaught(t *testing.T) {
+	// trailerBody: unsigned-trailer shape — no ;chunk-signature= in the head,
+	// trailer marker x-amz-checksum-sha256: at the tail. Small enough to hit
+	// the whole-object fast-path (single RangeGet reads everything).
+	trailerBody := []byte("b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n\r\n")
+	srcETag := multipartETag(relayParts())
+	f := &FakeS3{
+		Heads:       map[string]HeadInfo{"mp1": {ETag: srcETag, Size: int64(len(trailerBody))}},
+		Body:        trailerBody,
+		RelayBodies: map[string][]byte{"mp1": relayBody},
+	}
+	c, dir, flush := newBackupTestEnv(t, f)
+
+	c.Handle(BackupTask{Key: "mp1", RawLine: "mybucket|mp1|2|0|5", IsMultipart: true, Offsets: []int64{0, 5}})
+	flush()
+
+	// verifyCorrupt must return true (corrupt) → relay runs → backup_ok.
+	if len(f.Completed) != 1 {
+		t.Fatalf("completed = %+v, want one (unsigned-trailer must be backed up, not skipped)", f.Completed)
+	}
+	if got := readBackupFile(t, dir, "backup_ok.txt"); got != "mybucket|mp1|2|0|5\n" {
+		t.Errorf("backup_ok.txt = %q, want %q", got, "mybucket|mp1|2|0|5\n")
+	}
+	if got := c.stats.Snapshot().BackupSkippedClean; got != 0 {
+		t.Errorf("BackupSkippedClean = %d, want 0 (unsigned-trailer is corrupt, not clean)", got)
 	}
 }

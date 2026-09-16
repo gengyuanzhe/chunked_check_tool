@@ -131,27 +131,80 @@ func (c *Checker) verify(task VerifyTask) {
 		c.out.WriteMultipartAll(task.OwnerID, task.Key)
 		return
 	}
-	settled := false
-	for _, p := range c.buildProbes(task) {
-		if c.probeAndRoute(task, p.start, p.length) {
-			settled = true
-			break
+	result, err := runProbes(c.worker, task, c.cfg.WholeObjectProbeThreshold)
+	switch result {
+	case probeCorrupted:
+		if task.IsMultipart {
+			c.out.WriteCorruptedMultipart(task.OwnerID, task.Key, task.Offsets)
+			c.stats.IncrCorruptedMp()
+		} else {
+			c.out.WriteCorrupted(task.OwnerID, task.Key)
+			c.stats.IncrCorruptedObjects()
+		}
+	case probeFailed:
+		if task.IsMultipart {
+			c.out.WriteMpCheckFailed(task.Key, task.Offsets)
+			c.out.WriteMpCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
+			c.stats.IncrMpCheckFailed()
+		} else {
+			c.out.WriteCheckFailed(task.Key)
+			c.out.WriteCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
+			c.stats.IncrCheckFailed()
+		}
+	case probeClean:
+		if task.IsMultipart {
+			if c.cfg.IsMultipartSuccessLog {
+				c.out.WriteMultipartOk(task.OwnerID, task.Key)
+			}
+			c.stats.IncrOkMp()
+		} else {
+			if c.cfg.IsSuccessLog {
+				c.out.WriteSuccess(task.OwnerID, task.Key)
+			}
+			c.stats.IncrOkObjects()
 		}
 	}
-	if settled {
-		return
-	}
-	if task.IsMultipart {
-		if c.cfg.IsMultipartSuccessLog {
-			c.out.WriteMultipartOk(task.OwnerID, task.Key)
+}
+
+// probeResult is the outcome of running a VerifyTask's probe matrix.
+type probeResult int
+
+const (
+	// probeClean: every probe succeeded and none matched chunkSigRe or
+	// trailerRe. The object is not corrupted (by this tool's detection).
+	probeClean probeResult = iota
+	// probeCorrupted: at least one probe matched chunkSigRe or trailerRe.
+	// The object is corrupted.
+	probeCorrupted
+	// probeFailed: a RangeGet returned an error before any probe matched.
+	// err is the RangeGet error; the caller routes to check_failed /
+	// mp_check_failed / backup_failed(stage=verify).
+	probeFailed
+)
+
+// runProbes runs the probe matrix for task (head/boundary/tail or
+// small-object whole-read) and returns the first non-clean result. All
+// probes clean → probeClean. Any RangeGet error → probeFailed (err set, no
+// further probes run — matches the early-exit behavior of the old per-probe
+// loop). Any probe matching chunkSigRe OR trailerRe → probeCorrupted.
+//
+// Shared between list-check / -list-file (checker.go verify) and -backup-file
+// (backup.go verifyCorrupt) so the three modes detect corruption identically:
+// same probe positions (buildProbesStatic), same regexes (chunkSigRe ||
+// trailerRe), same early-exit on first settled result. threshold is
+// WholeObjectProbeThreshold from cfg (caller passes it in so runProbes has no
+// cfg dependency).
+func runProbes(worker S3API, task VerifyTask, threshold int) (probeResult, error) {
+	for _, p := range buildProbesStatic(task, threshold) {
+		body, err := worker.RangeGetAt(context.Background(), task.Key, p.start, p.length)
+		if err != nil {
+			return probeFailed, err
 		}
-		c.stats.IncrOkMp()
-	} else {
-		if c.cfg.IsSuccessLog {
-			c.out.WriteSuccess(task.OwnerID, task.Key)
+		if chunkSigRe.Match(body) || trailerRe.Match(body) {
+			return probeCorrupted, nil
 		}
-		c.stats.IncrOkObjects()
 	}
+	return probeClean, nil
 }
 
 // probeSpec is one RangeGet probe in a VerifyTask's plan.
@@ -179,7 +232,15 @@ const probeWindow int64 = 128
 // handles tiny objects, but Size can still be < probeWindow in the normal
 // branch (e.g. Size=200, threshold=1024: 2 probes, second reads [72,200)).
 func (c *Checker) buildProbes(task VerifyTask) []probeSpec {
-	thr := int64(c.cfg.WholeObjectProbeThreshold)
+	return buildProbesStatic(task, c.cfg.WholeObjectProbeThreshold)
+}
+
+// buildProbesStatic is the package-level probe planner shared by list-check /
+// -list-file (checker.go) and -backup-file (backup.go) so both modes run the
+// same probe matrix. threshold is WholeObjectProbeThreshold (0 disables the
+// small-object fast-path).
+func buildProbesStatic(task VerifyTask, threshold int) []probeSpec {
+	thr := int64(threshold)
 	if task.Size > 0 && thr > 0 && task.Size <= thr {
 		return []probeSpec{{0, thr}}
 	}
@@ -223,35 +284,7 @@ func headTail(size, probe int64) []probeSpec {
 	return []probeSpec{{0, probe}, {tailStart, tailLen}}
 }
 
-// probeAndRoute does one RangeGetAt at [start, start+length) and routes
-// the result by IsMultipart. Returns true when the task is settled
-// (corrupted or failed) so the caller stops further probes. Normal and
-// multipart share this path; routing depends on IsMultipart only, not
-// probe position. chunkSigRe and trailerRe both match against the same
-// body — one match decision, not two probes.
-func (c *Checker) probeAndRoute(task VerifyTask, start, length int64) bool {
-	body, err := c.worker.RangeGetAt(context.Background(), task.Key, start, length)
-	if err != nil {
-		if task.IsMultipart {
-			c.out.WriteMpCheckFailed(task.Key, task.Offsets)
-			c.out.WriteMpCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
-			c.stats.IncrMpCheckFailed()
-		} else {
-			c.out.WriteCheckFailed(task.Key)
-			c.out.WriteCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
-			c.stats.IncrCheckFailed()
-		}
-		return true
-	}
-	if chunkSigRe.Match(body) || trailerRe.Match(body) {
-		if task.IsMultipart {
-			c.out.WriteCorruptedMultipart(task.OwnerID, task.Key, task.Offsets)
-			c.stats.IncrCorruptedMp()
-		} else {
-			c.out.WriteCorrupted(task.OwnerID, task.Key)
-			c.stats.IncrCorruptedObjects()
-		}
-		return true
-	}
-	return false
-}
+// probeAndRoute removed: runProbes + verify's switch replaced it. The old
+// per-probe early-exit loop (probeAndRoute returning bool to break) is now
+// inside runProbes, which returns the first non-clean result and lets the
+// caller (verify / verifyCorrupt) do mode-specific routing.
