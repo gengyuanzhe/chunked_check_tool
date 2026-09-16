@@ -267,7 +267,7 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, &buf); err != nil {
+	if err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 
@@ -292,7 +292,7 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 		"srcbucket|reg1\n"+fmt.Sprintf("srcbucket|mp1|2|0|%d\n", len(corruptBody)))
 	assertFileContent(t, cfg.OutputDir, "backup_skipped_clean.txt", "srcbucket|mpclean|1|0\n")
 	assertFileContent(t, cfg.OutputDir, "mismatch.txt", "srcbucket|mm1\n")
-	assertFileContent(t, cfg.OutputDir, "list_failed.txt", "srcbucket|bad|1|100\n")
+	assertFileContent(t, cfg.OutputDir, "parse_failed.txt", "srcbucket|bad|1|100\n")
 
 	// Remote side: the list archive landed under .backup_lists/ with a
 	// timestamp suffix.
@@ -349,7 +349,7 @@ func TestRunBackupFileETagMismatchEndToEnd(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, &buf); err != nil {
+	if err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 
@@ -390,7 +390,7 @@ func TestRunBackupListUploadFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, &buf)
+	err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", &buf)
 	if err == nil || !strings.Contains(err.Error(), "upload backup list") {
 		t.Fatalf("run err = %v, want upload backup list failure", err)
 	}
@@ -424,7 +424,7 @@ func TestRunBackupProgressLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, &buf); err != nil {
+	if err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 	out := buf.String()

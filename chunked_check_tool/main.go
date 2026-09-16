@@ -22,12 +22,14 @@ func main() {
 	startAfter := flag.String("nextmarker", "", "start-after key (Mode 1 root pagination only)")
 	listFile := flag.String("list-file", "", "list file path: lines of bkt|key|partcnt|offset0|offset1|... (bypasses S3 listing; requires is_check=true)")
 	backupFile := flag.String("backup-file", "", "backup list file path: mixed lines of bkt|key (regular) or bkt|key|partcnt|offset0|... (multipart); heads each object, verifies multipart corruption, and copies corrupt objects into backup_bucket")
+	resumeList := flag.String("resume-list", "", "resume file path: lines of prefix|token (or prefix) from a prior run's list_failed.txt; re-enumerates from each failed page's cursor. Mode 2 only; mutually exclusive with -list-file / -backup-file")
 	flag.Parse()
 
 	if *cfgPath == "" || *bucket == "" {
 		fmt.Fprintln(os.Stderr, "usage: -c config.yaml -bkt <bucket> [-prefix p] [-nextmarker key]")
 		fmt.Fprintln(os.Stderr, "       -c config.yaml -bkt <bucket> -list-file <path>")
 		fmt.Fprintln(os.Stderr, "       -c config.yaml -bkt <bucket> -backup-file <path>   (requires backup_bucket in config)")
+		fmt.Fprintln(os.Stderr, "       -c config.yaml -bkt <bucket> -resume-list <path>   (Mode 2 only; resumes from list_failed.txt)")
 		os.Exit(2)
 	}
 
@@ -43,6 +45,21 @@ func main() {
 	if *listFile != "" && *backupFile != "" {
 		fmt.Fprintln(os.Stderr, "usage: -list-file and -backup-file are mutually exclusive")
 		os.Exit(2)
+	}
+	// -resume-list is a third exclusive mode: it reads list_failed.txt from
+	// a prior run and continues enumeration from each failed prefix's saved
+	// continuation token. Only valid with Mode 2 BFS — Modes 1/3 have
+	// different pagination shapes (Mode 1 root pagination via -nextmarker;
+	// Mode 3 recursive walk has no per-prefix cursor exposed).
+	if *resumeList != "" {
+		if *listFile != "" || *backupFile != "" {
+			fmt.Fprintln(os.Stderr, "usage: -resume-list is mutually exclusive with -list-file / -backup-file")
+			os.Exit(2)
+		}
+		if cfg.ListType != 2 {
+			fmt.Fprintln(os.Stderr, "usage: -resume-list requires list_type=2 (BFS)")
+			os.Exit(2)
+		}
 	}
 	if *backupFile != "" && cfg.BackupBucket == "" {
 		fmt.Fprintln(os.Stderr, "usage: -backup-file requires -c config with backup_bucket=<name>")
@@ -75,12 +92,12 @@ func main() {
 	mwErr := io.MultiWriter(os.Stderr, runLog)
 	log.SetOutput(mwErr)
 
-	printConfig(mwOut, *cfgPath, cfg, *bucket, *prefix, *startAfter, *listFile, *backupFile, runLogPath)
+	printConfig(mwOut, *cfgPath, cfg, *bucket, *prefix, *startAfter, *listFile, *backupFile, *resumeList, runLogPath)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := run(ctx, cfg, *bucket, *prefix, *startAfter, *listFile, *backupFile, mwOut); err != nil {
+	if err := run(ctx, cfg, *bucket, *prefix, *startAfter, *listFile, *backupFile, *resumeList, mwOut); err != nil {
 		log.Fatalf("run: %v", err)
 	}
 }
@@ -89,7 +106,7 @@ func main() {
 // run.log (which persists) doesn't leak the secret; ak is shown in clear.
 // Each line is indented 4 spaces for readability against the progress/summary
 // lines that surround it in run.log.
-func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, startAfter, listFile, backupFile, runLogPath string) {
+func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, startAfter, listFile, backupFile, resumeList, runLogPath string) {
 	fmt.Fprintf(w, "=== config ===\n")
 	fmt.Fprintf(w, "    config: %s\n", cfgPath)
 	fmt.Fprintf(w, "    bucket: %s\n", bucket)
@@ -97,6 +114,7 @@ func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, start
 	fmt.Fprintf(w, "    nextmarker: %s\n", orEmpty(startAfter))
 	fmt.Fprintf(w, "    list_file: %s\n", orEmpty(listFile))
 	fmt.Fprintf(w, "    backup_file: %s\n", orEmpty(backupFile))
+	fmt.Fprintf(w, "    resume_list: %s\n", orEmpty(resumeList))
 	fmt.Fprintf(w, "    backup_bucket: %s\n", orEmpty(cfg.BackupBucket))
 	fmt.Fprintf(w, "    endpoints: %s\n", strings.Join(cfg.Endpoints, ", "))
 	fmt.Fprintf(w, "    scheme: %s\n", cfg.Scheme)
@@ -149,7 +167,7 @@ func orEmpty(s string) string {
 // which unblocks check workers. If nothing was seeded (e.g. Mode 1 root
 // pagination returned no sub-prefixes), the queue is closed explicitly so
 // list workers exit immediately.
-func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter, listFile, backupFile string, stdout io.Writer) error {
+func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter, listFile, backupFile, resumeList string, stdout io.Writer) error {
 	// Backup mode: an entirely separate pipeline (HEAD + verify + copy);
 	// see runBackup. Dispatched before any list/check wiring.
 	if backupFile != "" {
@@ -273,13 +291,18 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter, listFile,
 		for {
 			objs, subprefixes, next, err := seedWorker.ListPage(ctx, prefix, sa, continuationToken, true, 1000)
 			if err != nil {
-				out.WriteListFailed(prefix)
+				out.WriteListFailed(prefix, continuationToken)
 				out.WriteListFailedLog(prefix, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
 				stats.IncrListFailed()
 				break
 			}
 			sa = "" // continuation tokens take over after the first page
 			for _, o := range objs {
+				if strings.Contains(o.Key, "|") {
+					out.WriteInvalidKey(o.Key)
+					stats.IncrInvalidKeys()
+					continue
+				}
 				if cfg.IsCheck {
 					select {
 					case objCh <- resolveOffsets(o, cfg):
@@ -324,6 +347,20 @@ func run(ctx context.Context, cfg *Config, bucket, prefix, startAfter, listFile,
 			stats.SetListDuration(time.Since(listStart))
 		}()
 		seeded = true
+	} else if resumeList != "" {
+		// Mode 2 + -resume-list: read list_failed.txt lines of "prefix|token"
+		// (or "prefix" when the first page failed), seed each (prefix, token)
+		// into the BFS queue. Lister.processPrefix resumes listing from the
+		// token, so previously successful pages are not re-listed.
+		entries, err := readResumeList(resumeList, out, stats)
+		if err != nil {
+			seedErr = err
+		} else {
+			for _, e := range entries {
+				lister.SeedWithToken(e.prefix, e.token)
+				seeded = true
+			}
+		}
 	} else {
 		// Mode 2: ignore -nextmarker (documented limitation).
 		lister.Seed(prefix)

@@ -139,7 +139,7 @@ func TestBackupRelayRealS3(t *testing.T) {
 		ProgressInterval: 100,
 	}
 	var buf bytes.Buffer
-	if err := run(ctx, cfg, srcBkt, "", "", "", backupPath, &buf); err != nil {
+	if err := run(ctx, cfg, srcBkt, "", "", "", backupPath, "", &buf); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 

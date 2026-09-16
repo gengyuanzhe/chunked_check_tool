@@ -233,7 +233,7 @@ func (c *Checker) probeAndRoute(task VerifyTask, start, length int64) bool {
 	body, err := c.worker.RangeGetAt(context.Background(), task.Key, start, length)
 	if err != nil {
 		if task.IsMultipart {
-			c.out.WriteMpCheckFailed(task.Key)
+			c.out.WriteMpCheckFailed(task.Key, task.Offsets)
 			c.out.WriteMpCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
 			c.stats.IncrMpCheckFailed()
 		} else {

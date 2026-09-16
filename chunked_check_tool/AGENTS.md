@@ -62,6 +62,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 | `s3client.go` | `S3API` 接口、`S3Client`（`minioCoreAPI` 接口包装 minio.Core + minio.Client，按 `cfg.ListAPIVersion` 分派 V1/V2）、`PutObjectLocal`（归档流式上传）/`PutObjectStream`（中转流式上传）的双流式设计（**任何路径不整文件缓冲**）、节点故障 failover。测试替身在各自 _test.go：`FakeS3`（fakes3_test.go）、`scriptedS3`（lister_test.go）、`countingS3`（walker_test.go） |
 | `lister.go` | `Lister`（无 `s3` 字段；`Run`/`processPrefix` 接 `s3` 参数）、无界队列 BFS、`inflight` atomic 计数 |
 | `walker.go` | `runRecursiveWalk`：Mode 3 信号量递归列举，`sync.WaitGroup` 终止，不用 queue/inflight |
+| `resume_list.go` | `-resume-list` 模式：`parseResumeListLine` 解析 `prefix\|token` 行（SplitN，契约是 prefix 不含 `\|`）、`readResumeList` 逐行解析+违约分流（空行→parse_failed，prefix 含 `\|`→invalid_keys，正常→entries） |
 | `checker.go` | `Checker`、`isNormalETag`（严格 32 位小写 hex）、`chunkSigRe` |
 | `mpoffset.go` | offset-etag 检查的三个原语：`mpOffsetTransport`（仅对 LIST 请求注入 `internal-list-mp-offset: true`，签名后 transport 层注入，非 x-amz 名不参与 SigV2/V4 签名计算）、`isListRequest`（钉死 minio-go v7.3.0 的 V1/V2 LIST 请求形态）、`parseMultipartOffsetETag`（`<md5>-<partcnt>-<off0>\|...` 解析，规则对齐 parseListFileLine） |
 | `output.go` | 8 channel + writer goroutine（5 个按 OwnerID 分目录 fan-out，3 个根目录全局），`bufio.Writer` 64KB，append 模式，per-owner 文件按 `<ownerID>/<filename>` 路由（OwnerID 为空 → `_unknown/`） |
@@ -79,7 +80,14 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 3. **ETag 来源**：list 响应（统一），**不从 Range GET response header 取**。OwnerID 同样来自 list 响应（minio-go v7.3.0 默认 `fetchOwner=true`，无额外请求开销）。
 
-4. **结果文件按 OwnerID 分目录，处理文件全局**：`corrupted_objects`/`mp`/`corrupted_mp`/`ok_mp`/`ok_objects` 这五类结果文件按 `<ownerID>/<filename>` 路由（OwnerID 为空 → `_unknown/`）；`list_failed`/`check_failed`/`mp_check_failed`/`stats` 留根目录全局。理由：结果文件数量大且天然按 owner 分桶有意义；处理文件全局方便运维统一排查；stats 全局一份避免 owner 分桶后还要汇总。ownerDirName 折叠空/`.`/`..`/含路径分隔符的 OwnerID 到 `_unknown`，防止路径穿越。
+4. **结果文件按 OwnerID 分目录，处理文件全局**：`corrupted_objects`/`mp`/`corrupted_mp`/`ok_mp`/`ok_objects` 这五类结果文件按 `<ownerID>/<filename>` 路由（OwnerID 为空 → `_unknown/`）；`list_failed`/`parse_failed`/`invalid_keys`/`check_failed`/`mp_check_failed`/`stats` 留根目录全局。理由：结果文件数量大且天然按 owner 分桶有意义；处理文件全局方便运维统一排查；stats 全局一份避免 owner 分桶后还要汇总。ownerDirName 折叠空/`.`/`..`/含路径分隔符的 OwnerID 到 `_unknown`，防止路径穿越。
+
+4a. **失败分类三文件**（list_failed / parse_failed / invalid_keys 职责分离）：
+  - `list_failed.txt` — S3 LIST 调用失败（节点故障/5xx/超时）。行格式 `prefix|token`：token 是失败页的 continuationToken（V1=上一页最后 key，V2=服务端不透明 token），第一页失败时为单字段 `prefix`。**可自动补跑**：`-resume-list <list_failed.txt>` 读这些行，把 `(prefix, token)` seed 进 BFS 队列，`processPrefix` 从 token 续页。
+  - `parse_failed.txt` — `-list-file`/`-backup-file`/`-resume-list` 输入解析失败（坏行/bkt 不匹配/空行）。写入整行原始内容。**不可自动补跑**，需人工修输入文件。
+  - `invalid_keys.txt` — S3 key/prefix 含 `|`（违反字段分隔契约）。lister 在 LIST 拿到对象后检查 key，违规则跳过该对象（不进 objCh）落此文件；WriteListFailed 检查 prefix，违规则不写 list_failed 改写此文件。**不可自动补跑**，需人工修数据。
+  - **契约**：整个工具的行格式都基于 `|` 分隔（`bkt|key|partcnt|off...` / `prefix|token` / `bkt|key`），契约是 key/prefix **不含** `|`。违约的 key/prefix 在源头拒绝（落 invalid_keys.txt），不静默错切。`parse_failed.txt` 和 `invalid_keys.txt` 都写原始字节（不套任何格式），因为它们本身就是"无法被工具格式化的字节"。
+  - **stats 新增**：`ParseFailed`（输入解析失败计数）、`InvalidKeys`（key 含 `|` 计数）。summary 中 ModeListCheck 打 `invalid_keys`，ModeListFile/ModeBackup 打 `parse_failed` + `invalid_keys`，ModeListOnly 打 `invalid_keys`。
 
 5. **checker goroutine 绝不退出**：任何错误写 `check_failed`（普通对象）/ `mp_check_failed`（多段分段）后继续。若 checker 退出，`objCh` 无人消费，list worker 永久阻塞。
 
@@ -99,7 +107,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 13. **V1/V2 分页协议对 caller 透明**：`S3Client.listPageOnce` 按 `cfg.ListAPIVersion` 分派 `Core.ListObjects`（V1，marker 游标）或 `Core.ListObjectsV2`（V2，continuation token）。两条路径都归一化进 `listResult{contents, commonPrefixes, next}`，`next` 作为下一次 `ListPage` 的 `continuationToken` 参数回传。V1 无 delimiter 且 `IsTruncated=true` 但 `NextMarker` 为空时，回退到最后一个 Contents key 作 marker；有 delimiter 时 S3 返回 `NextMarker`。caller（lister/walker/main 根分页）只需把 `next` 喂回 `continuationToken`，不感知 V1/V2 差异。`S3Client.core` 是 `minioListAPI` 接口（非 `*minio.Core`）以支持测试注入。
 
-14. **多段分段检查的失败分流**（mode=1/2 与 -list-file 共用路径）：分段 RangeGet 报错走 `mp_check_failed` 路径（`WriteMpCheckFailed` + `IncrMpCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）。**corrupted_mp.txt 行格式按模式**：mode=1 与 -list-file 模式写 `bkt|key|partcnt|off0|off1|...`（offsets 是真实 part 边界，文件可直喂 -backup-file/-list-file，**不套 result_line_format**）；mode=2 写 result_line_format 渲染行——固定分段的 [0,seg,2*seg,...] 是合成边界，**绝不能**当 part 边界写出（否则备份中转按错误边界分段，ETag 必 mismatch）。
+14. **多段分段检查的失败分流**（mode=1/2 与 -list-file 共用路径）：分段 RangeGet 报错走 `mp_check_failed` 路径（`WriteMpCheckFailed` + `IncrMpCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）。**corrupted_mp.txt 行格式按模式**：mode=1 与 -list-file 模式写 `bkt|key|partcnt|off0|off1|...`（offsets 是真实 part 边界，文件可直喂 -backup-file/-list-file，**不套 result_line_format**）；mode=2 写 result_line_format 渲染行——固定分段的 [0,seg,2*seg,...] 是合成边界，**绝不能**当 part 边界写出（否则备份中转按错误边界分段，ETag 必 mismatch）。**mp_check_failed.txt 行格式对齐 corrupted_mp.txt**：mode=1 与 -list-file 模式写 `bkt|key|partcnt|off0|...`（`WriteMpCheckFailed(key, offsets)` 接收 task.Offsets），同样可直喂 -backup-file/-list-file 补跑。**check_failed.txt 行格式 `bkt|key`**（`WriteCheckFailed(key)` 内部拼 `o.bucket + "|" + key`），对齐 -backup-file 普通对象 2 字段输入，可直喂 -backup-file 补跑（不需要 ETag/Size：中转会 HEAD 重取）。**owner 不写入** check_failed/mp_check_failed（-backup-file 不读 owner，输出走全局 root 不按 owner 分桶）。
 
 15. **统计字段命名**（display name / Go 字段）：`list_obj` (`ListedObjects`) / `list_mp` (`ListedMp`) / `list_all` (`ListedAll=list_obj+list_mp`) / `ok_obj` (`OkObjects`) / `corrupt_obj` (`CorruptedObjects`) / `ok_mp` (`OkMp`) / `corrupt_mp` (`CorruptedMp`) / `list_failed` (`ListFailed`) / `check_failed` (`CheckFailed`) / `mp_check_failed` (`MpCheckFailed`) / `read` (`ReadLines`，-list-file/-backup-file 的累计已读输入行数，每读一行 +1 含坏行；**不统计总行数**——预扫描整个输入文件不值得)。**关键语义**：`ok_mp` 只在 `multipart_check_mode!=0` 且通过分段检查时 +1；mode=0 时多段对象只计 `list_mp`，**不**计 `ok_mp`——未校验不能谎称干净（mode=1 的 mp.txt 回落对象同理只计 `list_mp`）。`is_check=false`（list-only）时 `ok_obj`/`corrupt_obj`/`ok_mp`/`corrupt_mp`/`check_failed`/`mp_check_failed` 全部为 0，summary 不输出这些字段。
 
@@ -115,8 +123,9 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 -bkt <bucket>      # 桶名，必填
 -prefix <prefix>   # 列举前缀，可选，默认空
 -nextmarker <key>  # start-after key，可选；仅 Mode 1 根分页使用
--list-file <path>  # 列表文件，可选；跳过 S3 LIST 按行校验（与 -backup-file 互斥，需 is_check=true）
--backup-file <path># 备份列表文件，可选；HEAD+校验+中转（与 -list-file 互斥，需配置 backup_bucket）
+-list-file <path>  # 列表文件，可选；跳过 S3 LIST 按行校验（与 -backup-file / -resume-list 互斥，需 is_check=true）
+-backup-file <path># 备份列表文件，可选；HEAD+校验+中转（与 -list-file / -resume-list 互斥，需配置 backup_bucket）
+-resume-list <path># 断点续跑文件，可选；读 list_failed.txt 格式 `prefix|token` 把 (prefix, token) seed 进 BFS（与 -list-file / -backup-file 互斥，仅 list_type=2 生效）
 ```
 
 ### config.yaml 字段
@@ -161,18 +170,26 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 | 文件 | 内容 | 何时写 |
 |---|---|---|
-| `list_failed.txt` | 列举失败 prefix | list worker 调用失败（list-only 模式也写） |
+| `list_failed.txt` | 列举失败 `prefix\|token`（token 为失败页 continuationToken，第一页失败时为单字段 prefix） | list worker 调用失败（list-only 模式也写）；可直喂 `-resume-list` 补跑 |
 | `list_failed.log` | 列举失败结构化错误（slog text，req_id/prefix/http_code/s3_code/err） | 同上 |
-| `check_failed.txt` | 普通对象校验失败 key | checker 普通对象 RangeGet 失败 |
+| `parse_failed.txt` | 输入解析失败的原始行（-list-file / -backup-file / -resume-list 坏行、bkt 不匹配、空行） | `listFileSource`/`backupSource`/`readResumeList` 解析失败时写；不可自动补跑，需人工修输入 |
+| `invalid_keys.txt` | 违反 `\|` 字段分隔契约的 key/prefix（原始字节，不套格式） | lister LIST 拿到 key 含 `\|`（跳过对象不进 objCh）；`WriteListFailed` prefix 含 `\|`（不写 list_failed 改写此文件） |
+| `check_failed.txt` | 普通对象校验失败 `bkt\|key` | checker 普通对象 RangeGet 失败；可直喂 `-backup-file` 普通对象输入补跑 |
 | `check_failed.log` | 校验失败结构化错误（slog text，req_id/key/http_code/s3_code/err） | 同上 |
-| `mp_check_failed.txt` | 多段分段检查失败 key | `multipart_check_mode=1/2`（或 -list-file）时分段 RangeGet 失败 |
+| `mp_check_failed.txt` | 多段分段检查失败 `bkt\|key\|partcnt\|off0\|...` | `multipart_check_mode=1/2`（或 -list-file）时分段 RangeGet 失败；mode=1/-list-file 可直喂 -backup-file/-list-file 补跑 |
 | `mp_check_failed.log` | 多段分段检查失败结构化错误（slog text） | 同上 |
 
 `is_check=false` 时不校验普通对象，不写任何对象文件，不创建 owner 目录，仅写 `list_failed.*`。`is_check=true && multipart_check_mode=0`（非 -list-file）时 `corrupted_mp.txt` / `ok_mp.txt` / `mp_check_failed.*` 不创建。
 
 ### 结果文件行格式
 
-per-owner 结果文件每行按 `result_line_format` 配置渲染（默认 `<bucket>|<key>`），启动时在配置快照里打印实际生效值。解析在 `NewOutput` 完成（`parseLineFormat`），未知占位符 / 未闭合 `<` 报错并中止启动。处理文件（`list_failed`/`check_failed`/`mp_check_failed` 的 .txt 与 .log）**不**套用此格式，始终只写 key/prefix（.log 已含 `bucket` 字段）。
+per-owner 结果文件每行按 `result_line_format` 配置渲染（默认 `<bucket>|<key>`），启动时在配置快照里打印实际生效值。解析在 `NewOutput` 完成（`parseLineFormat`），未知占位符 / 未闭合 `<` 报错并中止启动。处理文件（`list_failed`/`parse_failed`/`invalid_keys`/`check_failed`/`mp_check_failed` 的 .txt 与 .log）**不**套用此格式，而是按各自补跑链路需要的格式写入：
+- `list_failed.txt` = `prefix|token`（token 为空时单字段 prefix）— `-resume-list` 解析此格式
+- `parse_failed.txt` = 原始输入行（整行，不切分）
+- `invalid_keys.txt` = 原始 key/prefix（整行，不切分）
+- `check_failed.txt` = `bkt|key` — 对齐 `-backup-file` 普通对象 2 字段输入
+- `mp_check_failed.txt` = `bkt|key|partcnt|off0|...` — 对齐 `-backup-file`/`-list-file` 多段输入
+- `.log` 文件用 slog text handler，结构化字段（req_id/bucket/key/http_code/s3_code/err）
 
 ### 启动输出 / run.log
 

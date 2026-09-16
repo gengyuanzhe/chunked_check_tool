@@ -44,6 +44,8 @@ type Output struct {
 
 	// root-level channels (global, no ownerID)
 	listFailedCh         chan string
+	parseFailedCh        chan string
+	invalidKeysCh       chan string
 	checkFailedCh        chan string
 	mpCheckFailedCh      chan string
 	backupOkCh           chan string
@@ -116,6 +118,8 @@ func NewOutput(cfg *Config, bucket string, listFileMode bool) (*Output, error) {
 		multipartOkCh:             make(chan ownerLine, chCap),
 		successCh:                 make(chan ownerLine, chCap),
 		listFailedCh:              make(chan string, chCap),
+		parseFailedCh:             make(chan string, chCap),
+		invalidKeysCh:             make(chan string, chCap),
 		checkFailedCh:             make(chan string, chCap),
 		mpCheckFailedCh:           make(chan string, chCap),
 		corruptedEnabled:          isCheck,
@@ -136,6 +140,12 @@ func NewOutput(cfg *Config, bucket string, listFileMode bool) (*Output, error) {
 	// list-only mode the checker never runs and no one writes to those
 	// channels, so we don't create empty files.
 	if err := o.openAndStartRoot("list_failed.txt", o.listFailedCh); err != nil {
+		return nil, err
+	}
+	if err := o.openAndStartRoot("parse_failed.txt", o.parseFailedCh); err != nil {
+		return nil, err
+	}
+	if err := o.openAndStartRoot("invalid_keys.txt", o.invalidKeysCh); err != nil {
 		return nil, err
 	}
 	if err := o.openListFailedLog(); err != nil {
@@ -214,6 +224,8 @@ func NewBackupOutput(cfg *Config, bucket string) (*Output, error) {
 		bucket:               bucket,
 		lineFmt:              lineFmt,
 		listFailedCh:         make(chan string, chCap),
+		parseFailedCh:        make(chan string, chCap),
+		invalidKeysCh:       make(chan string, chCap),
 		backupOkCh:           make(chan string, chCap),
 		backupFailedCh:       make(chan string, chCap),
 		mismatchCh:           make(chan string, chCap),
@@ -221,6 +233,12 @@ func NewBackupOutput(cfg *Config, bucket string) (*Output, error) {
 		backupEnabled:        true,
 	}
 	if err := o.openAndStartRoot("list_failed.txt", o.listFailedCh); err != nil {
+		return nil, err
+	}
+	if err := o.openAndStartRoot("parse_failed.txt", o.parseFailedCh); err != nil {
+		return nil, err
+	}
+	if err := o.openAndStartRoot("invalid_keys.txt", o.invalidKeysCh); err != nil {
 		return nil, err
 	}
 	if err := o.openListFailedLog(); err != nil {
@@ -479,7 +497,35 @@ func orDash(s string) string {
 	return s
 }
 
-func (o *Output) WriteListFailed(prefix string) { o.listFailedCh <- prefix }
+// WriteListFailed records a failed listing of `prefix` starting from
+// `continuationToken`. Token is the cursor of the FAILED page (i.e. the `next`
+// returned by the previous successful page) — empty when the first page failed
+// or when the caller has no resumption cursor (Mode 1 root pagination, legacy
+// callers). Line format `prefix|token`; when token=="" the line is just
+// `prefix`. -resume-list parses these lines and feeds (prefix, token) back
+// into the BFS queue to continue enumeration from the failed page.
+//
+// If prefix contains '|', the contract (key/prefix contains no '|') is
+// violated — the line would be unparseable by -resume-list. Such prefixes
+// are written to invalid_keys.txt instead and the structured reason goes to
+// list_failed.log; they cannot be auto-resumed and need manual handling.
+func (o *Output) WriteListFailed(prefix, continuationToken string) {
+	if strings.Contains(prefix, "|") {
+		o.invalidKeysCh <- prefix
+		if o.listLogger != nil {
+			o.listLogger.Error("invalid prefix contains separator",
+				slog.String("bucket", orDash(o.bucket)),
+				slog.String("prefix", prefix),
+				slog.String("reason", "prefix contains '|', cannot be written to list_failed.txt for -resume-list"))
+		}
+		return
+	}
+	if continuationToken == "" {
+		o.listFailedCh <- prefix
+	} else {
+		o.listFailedCh <- prefix + "|" + continuationToken
+	}
+}
 func (o *Output) WriteListFailedLog(prefix string, statusCode int, s3Code, reqID string, err error) {
 	if o.listLogger == nil {
 		return
@@ -497,9 +543,29 @@ func (o *Output) WriteListFailedLog(prefix string, statusCode int, s3Code, reqID
 	attrs = append(attrs, slog.Any("err", err))
 	o.listLogger.Error("list failed", attrs...)
 }
+
+// WriteParseFailed records a malformed input line from -list-file / -backup-file
+// (e.g. too few fields, bucket mismatch, non-integer partcnt). Lines go to
+// parse_failed.txt — distinct from list_failed.txt (which is for S3 LIST
+// failures and is -resume-list compatible). parse_failed lines are not
+// auto-resumable; they signal a bad input file needing manual fixing.
+func (o *Output) WriteParseFailed(line string) { o.parseFailedCh <- line }
+
+// WriteInvalidKey records a key or prefix that violates the "no '|'"
+// contract — the byte stream cannot be safely split into fields. Routed to
+// invalid_keys.txt for manual handling. Called from the lister when a LIST
+// response returns a key containing '|', and from WriteListFailed when the
+// failed prefix contains '|'.
+func (o *Output) WriteInvalidKey(key string) { o.invalidKeysCh <- key }
+
+// WriteCheckFailed records a failed RangeGet on a regular object. Line format
+// `bkt|key` — aligned with -backup-file's regular-object input, so the file
+// can be fed straight back for backup retry. ETag/Size are NOT included:
+// backup retry HEADs the object to re-obtain them, and including them would
+// break -backup-file's 2-field regular-object shape.
 func (o *Output) WriteCheckFailed(key string) {
 	if o.checkEnabled {
-		o.checkFailedCh <- key
+		o.checkFailedCh <- o.bucket + "|" + key
 	}
 }
 func (o *Output) WriteCheckFailedLog(key string, statusCode int, s3Code, reqID string, err error) {
@@ -519,10 +585,25 @@ func (o *Output) WriteCheckFailedLog(key string, statusCode int, s3Code, reqID s
 	attrs = append(attrs, slog.Any("err", err))
 	o.checkLogger.Error("check failed", attrs...)
 }
-func (o *Output) WriteMpCheckFailed(key string) {
-	if o.mpCheckFailedEnabled {
-		o.mpCheckFailedCh <- key
+// WriteMpCheckFailed records a failed RangeGet on a multipart object's probe.
+// Line format `bkt|key|partcnt|off0|off1|...` — aligned with corrupted_mp.txt
+// (mode=1 offset / list-file mode) and -backup-file/-list-file multipart
+// input, so the file can be fed straight back for backup or re-check.
+func (o *Output) WriteMpCheckFailed(key string, offsets []int64) {
+	if !o.mpCheckFailedEnabled {
+		return
 	}
+	var b []byte
+	b = append(b, o.bucket...)
+	b = append(b, '|')
+	b = append(b, key...)
+	b = append(b, '|')
+	b = strconv.AppendInt(b, int64(len(offsets)), 10)
+	for _, off := range offsets {
+		b = append(b, '|')
+		b = strconv.AppendInt(b, off, 10)
+	}
+	o.mpCheckFailedCh <- string(b)
 }
 
 // WriteBackupOk records the raw input line of a successfully backed-up
@@ -670,10 +751,13 @@ func (o *Output) BackupChannelSnapshot() (listFailed, backupOk, backupFailed, mi
 }
 
 func (o *Output) Close() error {
-	// list_failed always has a consumer. The other channels only have a
-	// consumer when their file was opened (gated on the enable flags in
-	// NewOutput). Closing a channel with no goroutine consuming it is safe.
+	// list_failed / parse_failed / invalid_keys always have consumers (opened
+	// unconditionally in both NewOutput and NewBackupOutput). The other
+	// channels only have a consumer when their file was opened. Closing a
+	// channel with no goroutine consuming it is safe.
 	close(o.listFailedCh)
+	close(o.parseFailedCh)
+	close(o.invalidKeysCh)
 	if o.corruptedEnabled {
 		close(o.corruptedCh)
 	}

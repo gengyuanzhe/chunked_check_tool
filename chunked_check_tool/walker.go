@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"sync"
 )
 
@@ -50,12 +51,17 @@ func runRecursiveWalk(ctx context.Context, s3 S3API, prefix string, objCh chan<-
 		for {
 			objs, prefixes, next, err := s3.ListPage(ctx, prefix, "", continuationToken, true, 1000)
 			if err != nil {
-				out.WriteListFailed(prefix)
+				out.WriteListFailed(prefix, continuationToken)
 				out.WriteListFailedLog(prefix, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
 				stats.IncrListFailed()
 				return
 			}
 			for _, o := range objs {
+				if strings.Contains(o.Key, "|") {
+					out.WriteInvalidKey(o.Key)
+					stats.IncrInvalidKeys()
+					continue
+				}
 				if cfg.IsCheck {
 					task := resolveOffsets(o, cfg)
 					if task.IsMultipart {

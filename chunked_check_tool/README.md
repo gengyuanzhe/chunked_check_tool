@@ -29,6 +29,7 @@ GOOS=linux GOARCH=arm64 go build -o chunked_check_tool-linux-arm64 .
 ./chunked_check_tool -c config.yaml -bkt mybucket -prefix data/2026/ -nextmarker data/2026/file_005
 ./chunked_check_tool -c config.yaml -bkt mybucket -list-file list.txt   # 跳过 S3 列举，按行校验
 ./chunked_check_tool -c config.yaml -bkt mybucket -backup-file list.txt # 损坏对象备份（见 ## backup-file 模式）
+./chunked_check_tool -c config.yaml -bkt mybucket -resume-list <list_failed.txt>  # 从上次列举失败的断点续跑（仅 Mode 2）
 ```
 
 
@@ -42,6 +43,7 @@ GOOS=linux GOARCH=arm64 go build -o chunked_check_tool-linux-arm64 .
 | `-nextmarker` | 否 | start-after key，跳过该 key 之前的对象；**仅 list_type 为1时生效** |
 | `-list-file` | 否 | 列表文件路径；设置后跳过 S3 列举，直接读文件按行校验（见 `## list-file 模式`） |
 | `-backup-file` | 否 | 备份列表文件路径；与 `-list-file` 互斥，需配置 `backup_bucket`（见 `## backup-file 模式`） |
+| `-resume-list` | 否 | 断点续跑文件路径（通常是上一轮的 `list_failed.txt`）；与 `-list-file` / `-backup-file` 互斥，仅 `list_type=2` 生效。每行格式 `prefix\|token`（第一页失败时为单字段 `prefix`），工具按 `(prefix, token)` 重新 seed 进 BFS 队列，从失败页的 continuation token 续页，避免重复枚举已成功的前几页 |
 
 ## 配置
 
@@ -159,11 +161,13 @@ mismatch，每条原因见 `mismatch.log`。
 ```
 <output_dir>/
 ├── run.log                     # 进程运行日志
-├── list_failed.txt             # 列举失败 prefix（list worker 调用失败时写）
+├── list_failed.txt             # 列举失败 `prefix|token`（list worker 调用失败时写）；token 是失败页的 continuationToken（第一页失败时为单字段 prefix），可喂给 -resume-list 续跑
 ├── list_failed.log             # 列举失败结构化错误
-├── check_failed.txt            # 普通对象 RangeGet 失败 key
+├── parse_failed.txt            # -list-file / -backup-file / -resume-list 输入解析失败的原始行（坏行、bkt 不匹配、空行等）；不可自动续跑，需人工修输入文件
+├── invalid_keys.txt            # 违反 `|` 字段分隔契约的 key/prefix（S3 key 含 `|`）；不可被工具处理，需人工修数据或改工具
+├── check_failed.txt            # 普通对象 RangeGet 失败 `bkt|key`（可直喂 -backup-file 普通对象输入）
 ├── check_failed.log            # 普通对象 RangeGet 失败结构化错误
-├── mp_check_failed.txt         # 多段分段 RangeGet 失败 key（multipart_check_mode!=0 时）
+├── mp_check_failed.txt         # 多段分段 RangeGet 失败 `bkt|key|partcnt|off0|...`（可直喂 -backup-file/-list-file 多段输入；multipart_check_mode!=0 时）
 ├── mp_check_failed.log         # 多段分段 RangeGet 失败结构化错误
 ├── backup_ok.txt               # 备份成功的原始输入行（-backup-file 模式）
 ├── backup_failed.txt           # 备份失败的原始输入行（-backup-file 模式）
@@ -178,3 +182,20 @@ mismatch，每条原因见 `mismatch.log`。
     ├── corrupted_mp.txt        # 损坏多段对象 key（分段检查命中 chunk-signature）
     └── ok_mp.txt               # 干净多段对象 key（multipart_check_mode!=0 && is_multipart_success_log=true 时）
 ```
+
+### 失败分类与补跑链路
+
+工具把"失败"分成三类，分别落不同文件，补跑链路也不同：
+
+| 文件 | 触发场景 | 是否可自动补跑 | 补跑方式 |
+|---|---|---|---|
+| `list_failed.txt` | S3 LIST 调用失败（节点故障/5xx/超时） | 是 | `-resume-list <list_failed.txt>`（Mode 2 BFS，从失败页 token 续页） |
+| `parse_failed.txt` | 输入文件解析失败（坏行/bkt 不匹配/空行） | 否 | 人工修输入文件后重跑 |
+| `invalid_keys.txt` | S3 key/prefix 含 `\|`（违反字段分隔契约） | 否 | 人工修数据或改工具 |
+| `check_failed.txt` | 普通对象 RangeGet 失败 | 是 | `-backup-file check_failed.txt -bkt <bkt>`（重新下载中转） |
+| `mp_check_failed.txt` | 多段对象分段 RangeGet 失败 | 是 | `-backup-file mp_check_failed.txt -bkt <bkt>` 或 `-list-file mp_check_failed.txt` |
+| `corrupted_mp.txt` | 已确认损坏的多段对象 | 是 | `-backup-file corrupted_mp.txt -bkt <bkt>`（mode=1 / -list-file 模式行带 offsets 可直喂） |
+
+`list_failed.txt` 行格式 `prefix|token`：token 是失败页的 continuationToken（V1 是上一页最后一个 key，V2 是服务端返回的不透明 token）。第一页就失败时 token 为空，整行就是单字段 `prefix`。补跑时 `-resume-list` 读这些行，把 `(prefix, token)` 作为初始状态 seed 进 BFS 队列，`processPrefix` 从该 token 续页，避免重复枚举已成功的前几页。
+
+**stats 注意**：补跑（`-resume-list` 或 append 模式重跑）会让 `list_obj`/`list_mp`/`ok_obj`/`corrupt_mp` 等 atomic 计数器累加重复对象——summary 数字会翻倍，结果文件会有重复行。这是已知行为：append 模式不去重，使用者需自行知晓。`corrupted_mp.txt` 单文件内字节级重复行可用 `sort -u` 去重（同一对象同 offsets 字节级相同）。

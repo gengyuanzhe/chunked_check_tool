@@ -24,6 +24,8 @@ type Stats struct {
 	corruptedObjectsCount atomic.Int64
 	corruptedMpCount      atomic.Int64
 	listFailedCount       atomic.Int64
+	parseFailedCount      atomic.Int64
+	invalidKeysCount      atomic.Int64
 	checkFailedCount      atomic.Int64
 	mpCheckFailedCount    atomic.Int64
 	listCalls             atomic.Int64
@@ -59,6 +61,8 @@ type StatsSnapshot struct {
 	CorruptedObjects   int64
 	CorruptedMp        int64
 	ListFailed         int64
+	ParseFailed        int64
+	InvalidKeys        int64
 	CheckFailed        int64
 	MpCheckFailed      int64
 	ListCalls          int64
@@ -86,6 +90,8 @@ func (s *Stats) IncrOkMp()               { s.okMpCount.Add(1) }
 func (s *Stats) IncrCorruptedObjects()   { s.corruptedObjectsCount.Add(1) }
 func (s *Stats) IncrCorruptedMp()        { s.corruptedMpCount.Add(1) }
 func (s *Stats) IncrListFailed()         { s.listFailedCount.Add(1) }
+func (s *Stats) IncrParseFailed()        { s.parseFailedCount.Add(1) }
+func (s *Stats) IncrInvalidKeys()        { s.invalidKeysCount.Add(1) }
 func (s *Stats) IncrCheckFailed()        { s.checkFailedCount.Add(1) }
 func (s *Stats) IncrMpCheckFailed()      { s.mpCheckFailedCount.Add(1) }
 func (s *Stats) IncrBackupOk()           { s.backupOkCount.Add(1) }
@@ -135,6 +141,8 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		CorruptedObjects:   s.corruptedObjectsCount.Load(),
 		CorruptedMp:        s.corruptedMpCount.Load(),
 		ListFailed:         s.listFailedCount.Load(),
+		ParseFailed:        s.parseFailedCount.Load(),
+		InvalidKeys:        s.invalidKeysCount.Load(),
 		CheckFailed:        s.checkFailedCount.Load(),
 		MpCheckFailed:      s.mpCheckFailedCount.Load(),
 		ListCalls:          calls,
@@ -168,12 +176,12 @@ func (s *Stats) PrintSummary(w io.Writer, mode RunMode) {
 		fmt.Fprintf(w, "get_calls: %d avg_latency_ms: %.2f get_total_sec: %.2f\n",
 			snap.GetCalls, snap.GetAvgLatencyMs, snap.GetTotalSec)
 		if mode == ModeListFile {
-			fmt.Fprintf(w, "ok_mp: %d corrupt_mp: %d mp_check_failed: %d\n",
-				snap.OkMp, snap.CorruptedMp, snap.MpCheckFailed)
+			fmt.Fprintf(w, "ok_mp: %d corrupt_mp: %d mp_check_failed: %d parse_failed: %d invalid_keys: %d\n",
+				snap.OkMp, snap.CorruptedMp, snap.MpCheckFailed, snap.ParseFailed, snap.InvalidKeys)
 			return
 		}
-		fmt.Fprintf(w, "backup_ok: %d backup_failed: %d backup_mismatch: %d backup_skipped_clean: %d\n",
-			snap.BackupOk, snap.BackupFailed, snap.BackupMismatch, snap.BackupSkippedClean)
+		fmt.Fprintf(w, "backup_ok: %d backup_failed: %d backup_mismatch: %d backup_skipped_clean: %d parse_failed: %d invalid_keys: %d\n",
+			snap.BackupOk, snap.BackupFailed, snap.BackupMismatch, snap.BackupSkippedClean, snap.ParseFailed, snap.InvalidKeys)
 	case ModeListCheck:
 		fmt.Fprintf(w, "list_all: %d (list_obj: %d list_mp: %d) total_sec: %.2f\n",
 			snap.ListedAll, snap.ListedObjects, snap.ListedMp, snap.TotalSec)
@@ -181,14 +189,14 @@ func (s *Stats) PrintSummary(w io.Writer, mode RunMode) {
 			snap.ListCalls, snap.ListAvgLatencyMs, snap.ListTotalSec)
 		fmt.Fprintf(w, "get_calls: %d avg_latency_ms: %.2f get_total_sec: %.2f\n",
 			snap.GetCalls, snap.GetAvgLatencyMs, snap.GetTotalSec)
-		fmt.Fprintf(w, "ok_obj: %d corrupt_obj: %d ok_mp: %d corrupt_mp: %d list_failed: %d check_failed: %d mp_check_failed: %d\n",
+		fmt.Fprintf(w, "ok_obj: %d corrupt_obj: %d ok_mp: %d corrupt_mp: %d list_failed: %d check_failed: %d mp_check_failed: %d invalid_keys: %d\n",
 			snap.OkObjects, snap.CorruptedObjects, snap.OkMp, snap.CorruptedMp,
-			snap.ListFailed, snap.CheckFailed, snap.MpCheckFailed)
+			snap.ListFailed, snap.CheckFailed, snap.MpCheckFailed, snap.InvalidKeys)
 	default: // ModeListOnly
 		fmt.Fprintf(w, "list_all: %d (list_obj: %d list_mp: %d) total_sec: %.2f\n",
 			snap.ListedAll, snap.ListedObjects, snap.ListedMp, snap.TotalSec)
 		fmt.Fprintf(w, "list_calls: %d avg_latency_ms: %.2f list_total_sec: %.2f\n",
 			snap.ListCalls, snap.ListAvgLatencyMs, snap.ListTotalSec)
-		fmt.Fprintf(w, "list_failed: %d\n", snap.ListFailed)
+		fmt.Fprintf(w, "list_failed: %d invalid_keys: %d\n", snap.ListFailed, snap.InvalidKeys)
 	}
 }

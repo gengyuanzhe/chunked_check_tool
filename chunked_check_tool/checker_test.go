@@ -160,8 +160,8 @@ func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read check_failed.txt: %v", err)
 	}
-	if line := strings.TrimSpace(string(cfBytes)); line != "path/obj" {
-		t.Errorf("check_failed.txt = %q, want %q", line, "path/obj")
+	if line := strings.TrimSpace(string(cfBytes)); line != "test-bkt|path/obj" {
+		t.Errorf("check_failed.txt = %q, want %q", line, "test-bkt|path/obj")
 	}
 
 	// check_failed.log is slog text-handler output. req_id must appear
@@ -298,8 +298,8 @@ func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read mp_check_failed: %v", err)
 	}
-	if line := strings.TrimSpace(string(data)); line != "k" {
-		t.Errorf("mp_check_failed.txt = %q, want %q", line, "k")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|k|2|0|5242880" {
+		t.Errorf("mp_check_failed.txt = %q, want %q", line, "test-bkt|k|2|0|5242880")
 	}
 }
 

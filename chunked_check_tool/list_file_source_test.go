@@ -196,22 +196,22 @@ func TestListFileSourceRunEndToEnd(t *testing.T) {
 	if got := stats.Snapshot().ReadLines; got != 4 {
 		t.Errorf("ReadLines=%d want 4 (all lines read, malformed included)", got)
 	}
-	// Malformed line → list_failed + IncrListFailed.
-	if got := stats.Snapshot().ListFailed; got != 1 {
-		t.Errorf("ListFailed=%d want 1 (one malformed line)", got)
+	// Malformed line → parse_failed + IncrParseFailed.
+	if got := stats.Snapshot().ParseFailed; got != 1 {
+		t.Errorf("ParseFailed=%d want 1 (one malformed line)", got)
 	}
-	// Malformed line written to list_failed.txt with original content.
-	// out.Close flushes the listFailed consumer goroutine.
+	// Malformed line written to parse_failed.txt with original content.
+	// out.Close flushes the parseFailed consumer goroutine.
 	if err := out.Close(); err != nil {
 		t.Fatalf("output close: %v", err)
 	}
-	listFailedPath := filepath.Join(dir, "list_failed.txt")
-	failedContent, err := os.ReadFile(listFailedPath)
+	parseFailedPath := filepath.Join(dir, "parse_failed.txt")
+	failedContent, err := os.ReadFile(parseFailedPath)
 	if err != nil {
-		t.Fatalf("read list_failed.txt: %v", err)
+		t.Fatalf("read parse_failed.txt: %v", err)
 	}
 	if !strings.Contains(string(failedContent), "mybucket|bad|1|100") {
-		t.Errorf("list_failed.txt = %q, want substring %q", string(failedContent), "mybucket|bad|1|100")
+		t.Errorf("parse_failed.txt = %q, want substring %q", string(failedContent), "mybucket|bad|1|100")
 	}
 }
 

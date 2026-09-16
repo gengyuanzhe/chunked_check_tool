@@ -135,11 +135,11 @@ func TestOutputOffsetModeMpCheckFailedEnabled(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
 	o, _ := NewOutput(cfg, "test-bkt", false)
-	o.WriteMpCheckFailed("mp/k1")
+	o.WriteMpCheckFailed("mp/k1", []int64{0, 5242880})
 	o.Close()
 	data, _ := os.ReadFile(filepath.Join(dir, "mp_check_failed.txt"))
-	if line := strings.TrimSpace(string(data)); line != "mp/k1" {
-		t.Errorf("mp_check_failed.txt = %q, want %q", line, "mp/k1")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/k1|2|0|5242880" {
+		t.Errorf("mp_check_failed.txt = %q, want %q", line, "test-bkt|mp/k1|2|0|5242880")
 	}
 }
 
@@ -194,8 +194,8 @@ func TestOutputCheckFailedAtRoot(t *testing.T) {
 	o.WriteCheckFailed("obj/c")
 	o.Close()
 	data, _ := os.ReadFile(filepath.Join(dir, "check_failed.txt"))
-	if line := strings.TrimSpace(string(data)); line != "obj/c" {
-		t.Errorf("check_failed.txt = %q, want %q", line, "obj/c")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|obj/c" {
+		t.Errorf("check_failed.txt = %q, want %q", line, "test-bkt|obj/c")
 	}
 	// Per-owner folder should NOT have been created just from a check_failed.
 	if _, err := os.Stat(filepath.Join(dir, "owner-A")); !os.IsNotExist(err) {
@@ -209,11 +209,11 @@ func TestOutputMpCheckFailedAtRoot(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: 5 * 1024 * 1024}
 	o, _ := NewOutput(cfg, "test-bkt", false)
-	o.WriteMpCheckFailed("mp/k1")
+	o.WriteMpCheckFailed("mp/k1", []int64{0, 5242880})
 	o.Close()
 	data, _ := os.ReadFile(filepath.Join(dir, "mp_check_failed.txt"))
-	if line := strings.TrimSpace(string(data)); line != "mp/k1" {
-		t.Errorf("mp_check_failed.txt = %q, want %q", line, "mp/k1")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/k1|2|0|5242880" {
+		t.Errorf("mp_check_failed.txt = %q, want %q", line, "test-bkt|mp/k1|2|0|5242880")
 	}
 }
 
@@ -223,7 +223,7 @@ func TestOutputMpCheckFailedSkippedWhenSwitchOff(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOff}
 	o, _ := NewOutput(cfg, "test-bkt", false)
-	o.WriteMpCheckFailed("mp/k1") // no-op
+	o.WriteMpCheckFailed("mp/k1", []int64{0, 5242880}) // no-op
 	o.Close()
 	if _, err := os.Stat(filepath.Join(dir, "mp_check_failed.txt")); !os.IsNotExist(err) {
 		t.Errorf("mp_check_failed.txt should not exist when switch off, got %v", err)
@@ -244,7 +244,7 @@ func TestOutputListFailedLogStructured(t *testing.T) {
 		StatusCode: 500,
 		RequestID:  "REQ-LF-1",
 	}
-	o.WriteListFailed("prefix/x")
+	o.WriteListFailed("prefix/x", "")
 	o.WriteListFailedLog("prefix/x", extractHTTPStatusCode(er), extractS3Code(er), extractRequestID(er), er)
 	if err := o.Close(); err != nil {
 		t.Fatal(err)
@@ -293,8 +293,8 @@ func TestOutputListOnlySkipsPerOwnerFiles(t *testing.T) {
 	o.WriteMultipartAll("owner-A", "k2")
 	o.WriteCheckFailed("k3")
 	o.WriteSuccess("owner-A", "k4")
-	o.WriteListFailed("prefix/")
-	o.WriteMpCheckFailed("k5")
+	o.WriteListFailed("prefix/", "")
+	o.WriteMpCheckFailed("k5", []int64{0, 5242880})
 	if err := o.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +337,7 @@ func TestBackupOutputWritesFourFiles(t *testing.T) {
 	out.WriteBackupFailed("k3")
 	out.WriteMismatch("mybucket|k4|1|0")
 	out.WriteBackupSkippedClean("k5")
-	out.WriteListFailed("mybucket|bad")
+	out.WriteParseFailed("mybucket|bad")
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestBackupOutputWritesFourFiles(t *testing.T) {
 	assertFileContent(t, dir, "backup_failed.txt", "k3\n")
 	assertFileContent(t, dir, "mismatch.txt", "mybucket|k4|1|0\n")
 	assertFileContent(t, dir, "backup_skipped_clean.txt", "k5\n")
-	assertFileContent(t, dir, "list_failed.txt", "mybucket|bad\n")
+	assertFileContent(t, dir, "parse_failed.txt", "mybucket|bad\n")
 }
 
 // TestBackupOutputNoCheckModeFiles — backup output must not create the
@@ -391,14 +391,14 @@ func TestNewOutputListFileModeEnablesMultipartResults(t *testing.T) {
 	}
 	o.WriteCorruptedMultipart("", "mp-bad", []int64{0, 1024})
 	o.WriteMultipartOk("", "mp-ok")
-	o.WriteMpCheckFailed("mp-err")
+	o.WriteMpCheckFailed("mp-err", []int64{0, 1024})
 	o.WriteMultipartAll("", "mp-all") // catalog path — must stay gated OFF
 	if err := o.Close(); err != nil {
 		t.Fatal(err)
 	}
 	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "test-bkt|mp-bad|2|0|1024\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "test-bkt|mp-ok\n")
-	assertFileContent(t, dir, "mp_check_failed.txt", "mp-err\n")
+	assertFileContent(t, dir, "mp_check_failed.txt", "test-bkt|mp-err|2|0|1024\n")
 	if _, err := os.Stat(filepath.Join(dir, "_unknown", "mp.txt")); !os.IsNotExist(err) {
 		t.Errorf("mp.txt should not be written in list-file mode")
 	}

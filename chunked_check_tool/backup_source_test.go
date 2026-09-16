@@ -201,9 +201,9 @@ func TestBackupSourceRunEndToEnd(t *testing.T) {
 	if got[3].RawLine != "mybucket|mp2|3|0|5242880|10485760" {
 		t.Errorf("RawLine = %q, want original line", got[3].RawLine)
 	}
-	// Malformed lines → list_failed + IncrListFailed (2 of them).
-	if got := stats.Snapshot().ListFailed; got != 2 {
-		t.Errorf("ListFailed=%d want 2", got)
+	// Malformed lines → parse_failed + IncrParseFailed (2 of them).
+	if got := stats.Snapshot().ParseFailed; got != 2 {
+		t.Errorf("ParseFailed=%d want 2", got)
 	}
 	// Every line read (valid + malformed) bumps read for the read progress
 	// counter.
@@ -213,15 +213,15 @@ func TestBackupSourceRunEndToEnd(t *testing.T) {
 	if err := out.Close(); err != nil {
 		t.Fatalf("output close: %v", err)
 	}
-	failedContent, err := os.ReadFile(filepath.Join(dir, "list_failed.txt"))
+	failedContent, err := os.ReadFile(filepath.Join(dir, "parse_failed.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(failedContent), "mybucket|bad|1|100") {
-		t.Errorf("list_failed.txt missing malformed multipart line: %q", failedContent)
+		t.Errorf("parse_failed.txt missing malformed multipart line: %q", failedContent)
 	}
 	if !strings.Contains(string(failedContent), "otherbucket|reg3") {
-		t.Errorf("list_failed.txt missing bucket-mismatch line: %q", failedContent)
+		t.Errorf("parse_failed.txt missing bucket-mismatch line: %q", failedContent)
 	}
 }
 

@@ -95,9 +95,9 @@ func (s *backupSource) Run(ctx context.Context, ch chan<- BackupTask) error {
 		line := scanner.Text()
 		task, err := parseBackupFileLine(line, s.bucket, lineNum)
 		if err != nil {
-			s.out.WriteListFailed(line)
+			s.out.WriteParseFailed(line)
 			s.out.WriteListFailedLog(line, 0, "", "", err)
-			s.stats.IncrListFailed()
+			s.stats.IncrParseFailed()
 			continue
 		}
 		select {

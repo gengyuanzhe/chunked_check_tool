@@ -141,15 +141,15 @@ func (s *listFileSource) Run(ctx context.Context, objCh chan<- VerifyTask) error
 		if err != nil {
 			var mle *MalformedLineError
 			if errors.As(err, &mle) {
-				s.out.WriteListFailed(mle.Line)
+				s.out.WriteParseFailed(mle.Line)
 				s.out.WriteListFailedLog(mle.Line, 0, "", "", err)
-				s.stats.IncrListFailed()
+				s.stats.IncrParseFailed()
 				continue
 			}
 			// Non-malformed error (shouldn't happen for parseListFileLine).
-			s.out.WriteListFailed(line)
+			s.out.WriteParseFailed(line)
 			s.out.WriteListFailedLog(line, 0, "", "", err)
-			s.stats.IncrListFailed()
+			s.stats.IncrParseFailed()
 			continue
 		}
 		select {

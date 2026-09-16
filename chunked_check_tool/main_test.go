@@ -45,7 +45,7 @@ func TestRunEndToEnd_smoke(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var buf bytes.Buffer
-	if err := run(ctx, cfg, os.Getenv("S3_BUCKET"), os.Getenv("S3_PREFIX"), "", "", "", &buf); err != nil {
+	if err := run(ctx, cfg, os.Getenv("S3_BUCKET"), os.Getenv("S3_PREFIX"), "", "", "", "", &buf); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -96,14 +96,14 @@ func TestRunListFileDispatch(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err = run(context.Background(), cfg, "mybucket", "", "", listPath, "", &buf)
+	err = run(context.Background(), cfg, "mybucket", "", "", listPath, "", "", &buf)
 	if err != nil {
 		t.Fatalf("run returned err: %v (want nil — list-file mode returns nil on completion)", err)
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "list_failed: 1") {
-		t.Errorf("stdout = %q, want substring %q", out, "list_failed: 1")
+	if !strings.Contains(out, "parse_failed: 1") {
+		t.Errorf("stdout = %q, want substring %q", out, "parse_failed: 1")
 	}
 	// list-file summary reports input consumption instead of list_all (no
 	// S3 LIST happens): the one malformed line was still read.
@@ -114,16 +114,16 @@ func TestRunListFileDispatch(t *testing.T) {
 		t.Errorf("stdout = %q should not contain list_all (all-zero noise in list-file mode)", out)
 	}
 
-	// The malformed line must be persisted to list_failed.txt for resumable
-	// debugging. cfg.OutputDir carries the timestamp suffix (default-on
-	// output_dir_timestamp), which run() created.
-	listFailedPath := filepath.Join(cfg.OutputDir, "list_failed.txt")
-	content, err := os.ReadFile(listFailedPath)
+	// The malformed line must be persisted to parse_failed.txt for
+	// resumable debugging. cfg.OutputDir carries the timestamp suffix
+	// (default-on output_dir_timestamp), which run() created.
+	parseFailedPath := filepath.Join(cfg.OutputDir, "parse_failed.txt")
+	content, err := os.ReadFile(parseFailedPath)
 	if err != nil {
-		t.Fatalf("read list_failed.txt: %v", err)
+		t.Fatalf("read parse_failed.txt: %v", err)
 	}
 	if !strings.Contains(string(content), "wrongbucket|k|1|0") {
-		t.Errorf("list_failed.txt = %q, want substring %q", string(content), "wrongbucket|k|1|0")
+		t.Errorf("parse_failed.txt = %q, want substring %q", string(content), "wrongbucket|k|1|0")
 	}
 }
 
@@ -158,7 +158,7 @@ func TestRunListFileMultipartResultsEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), cfg, "srcbucket", "", "", listPath, "", &buf); err != nil {
+	if err := run(context.Background(), cfg, "srcbucket", "", "", listPath, "", "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 
@@ -166,7 +166,7 @@ func TestRunListFileMultipartResultsEndToEnd(t *testing.T) {
 	// shape-compatible with -backup-file input.
 	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "srcbucket|mp1|1|0\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "srcbucket|mpclean\n")
-	assertFileContent(t, dir, "list_failed.txt", "srcbucket|bad|1|100\n")
+	assertFileContent(t, dir, "parse_failed.txt", "srcbucket|bad|1|100\n")
 
 	out := buf.String()
 	if !strings.Contains(out, "corrupt_mp: 1") || !strings.Contains(out, "ok_mp: 1") {
@@ -202,7 +202,7 @@ func TestRunListFileProgressLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), cfg, "srcbucket", "", "", listPath, "", &buf); err != nil {
+	if err := run(context.Background(), cfg, "srcbucket", "", "", listPath, "", "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 	out := buf.String()
