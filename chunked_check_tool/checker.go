@@ -264,15 +264,26 @@ func buildProbesStatic(task VerifyTask, threshold int) []probeSpec {
 		}
 	}
 	if task.Size > 0 { // tail (skip degenerate Size==0)
-		out = append(out, headTail(task.Size, probeWindow)...)
+		// Only append the tail — head@0 was already added at line 252.
+		// Calling headTail here would duplicate the head probe.
+		out = append(out, tailProbe(task.Size, probeWindow))
 	}
 	return out
 }
 
-// headTail returns the head and tail probes for a non-multipart object
-// (or the tail pair appended after boundary probes for multipart). Tail
-// start clamps to 0 for Size < probeWindow; tail length clamps to Size.
+// headTail returns the head and tail probes for a non-multipart object.
+// Tail start clamps to 0 for Size < probeWindow; tail length clamps to Size.
 func headTail(size, probe int64) []probeSpec {
+	return []probeSpec{{0, probe}, tailProbe(size, probe)}
+}
+
+// tailProbe returns the tail probe spec for an object of `size` bytes with
+// the given probe window. Tail start clamps to 0 for Size < probeWindow;
+// tail length clamps to Size. Used by headTail (non-multipart path) and
+// directly by the multipart path (which adds head@0 separately at line 252
+// and only needs the tail appended after boundary probes — calling headTail
+// there would duplicate the head probe).
+func tailProbe(size, probe int64) probeSpec {
 	tailStart := size - probe
 	if tailStart < 0 {
 		tailStart = 0
@@ -281,7 +292,7 @@ func headTail(size, probe int64) []probeSpec {
 	if size < probe {
 		tailLen = size
 	}
-	return []probeSpec{{0, probe}, {tailStart, tailLen}}
+	return probeSpec{tailStart, tailLen}
 }
 
 // probeAndRoute removed: runProbes + verify's switch replaced it. The old

@@ -676,3 +676,37 @@ func TestRunProbesThreeStates(t *testing.T) {
 // backup_test.go but referenced here so runProbes tests cover the signed
 // variant without duplicating the constant.
 var _ = corruptBody
+
+// TestCheckerMultipartProbeCountIsNPlusOne — regression guard: a multipart
+// object with N parts gets exactly N+1 probes (head@0 + (N-1) boundary +
+// tail@Size-128). A previous bug duplicated the head probe (headTail was
+// called at the tail step, returning head+tail and adding head a second
+// time), making it N+2. Tests that only checked match outcome missed it
+// because both head reads returned identical bytes; this test pins the count.
+func TestCheckerMultipartProbeCountIsNPlusOne(t *testing.T) {
+	dir := t.TempDir()
+	// threshold=0 disables small-object fast-path so we exercise the
+	// head+boundary+tail matrix directly.
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, WholeObjectProbeThreshold: 0}
+	out, _ := NewOutput(cfg, "test-bkt", false)
+	defer out.Close()
+	s := NewStats()
+
+	const size int64 = 10 * 1024 * 1024 // 10 MiB, 2 parts at [0, 5MiB)
+	offs := []int64{0, 5 * 1024 * 1024}
+	count := 0
+	worker := &rangeGetCountingS3{
+		FakeS3: &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
+			return []byte("clean part body, no signature"), nil
+		}},
+		count: &count,
+	}
+	c := NewChecker(worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: size, Offsets: offs})
+
+	// N=2 parts → expect N+1 = 3 probes (head + 1 boundary + tail). The old
+	// bug ran 4 (head added twice via headTail at the tail step).
+	if count != 3 {
+		t.Errorf("RangeGetAt calls = %d, want 3 (head@0 + 1 boundary + tail; old bug duplicated head → 4)", count)
+	}
+}
