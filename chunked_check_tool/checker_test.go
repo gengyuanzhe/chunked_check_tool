@@ -710,3 +710,91 @@ func TestCheckerMultipartProbeCountIsNPlusOne(t *testing.T) {
 		t.Errorf("RangeGetAt calls = %d, want 3 (head@0 + 1 boundary + tail; old bug duplicated head → 4)", count)
 	}
 }
+
+// TestCheckerHeadFirstFillsSizeEnablesTailProbe — regression guard for the
+// list-file-mode bug: parseListFileLine returns Size=0, and buildProbesStatic
+// gated the tail probe on `if task.Size > 0`, so list-file tasks silently
+// skipped the tail probe — missing trailer corruption at the object tail.
+// HeadFirst (set by the list-file source) makes Checker.Handle HEAD the
+// object first to fill Size; the tail probe is now built and catches a
+// trailer marker that lives only in the last 128 bytes.
+func TestCheckerHeadFirstFillsSizeEnablesTailProbe(t *testing.T) {
+	dir := t.TempDir()
+	// threshold=0 disables small-object fast-path so we exercise head+tail
+	// (the test body is large enough that head won't see the trailer).
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, WholeObjectProbeThreshold: 0}
+	out, _ := NewOutput(cfg, "test-bkt", false)
+	defer out.Close()
+	s := NewStats()
+
+	const size int64 = 4096
+	tail := []byte("\r\n0\r\nx-amz-checksum-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n\r\n")
+	body := make([]byte, size)
+	for i := range body {
+		body[i] = 'x'
+	}
+	copy(body[size-int64(len(tail)):], tail)
+
+	worker := &FakeS3{
+		Heads: map[string]HeadInfo{"k": {ETag: "0123456789abcdef0123456789abcdef-2", Size: size}},
+		RangeGetHandler: func(offset, length int64) ([]byte, error) {
+			end := offset + length
+			if end > size {
+				end = size
+			}
+			if offset >= size {
+				return nil, nil
+			}
+			return body[offset:end], nil
+		},
+	}
+	c := NewChecker(worker, out, s, cfg)
+	// HeadFirst=true + Size=0 mirrors what parseListFileLine produces. Without
+	// the Handle HEAD, buildProbesStatic would skip the tail probe and the
+	// trailer at byte 3968 would be missed.
+	c.Handle(VerifyTask{Key: "k", IsMultipart: true, Offsets: []int64{0, size / 2}, HeadFirst: true})
+
+	if got := s.Snapshot().CorruptedMp; got != 1 {
+		t.Errorf("corrupted_mp=%d want 1 (tail probe must run once Size is filled by HEAD)", got)
+	}
+}
+
+// TestCheckerHeadFirstHeadFailureRoutesToMpCheckFailed — when HEAD fails for
+// a HeadFirst task (list-file tasks are always multipart), the task routes
+// to mp_check_failed.txt + mp_check_failed.log with the line's offsets
+// preserved (so the file is feedable back into -list-file for retry),
+// mirroring backup mode's backup_failed stage=head.
+func TestCheckerHeadFirstHeadFailureRoutesToMpCheckFailed(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
+	out, _ := NewOutput(cfg, "mybucket", true) // listFileMode=true → mp_check_failed enabled
+	s := NewStats()
+
+	worker := &FakeS3{HeadErr: minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}}
+	c := NewChecker(worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", IsMultipart: true, Offsets: []int64{0, 5242880}, HeadFirst: true})
+
+	if got := s.Snapshot().MpCheckFailed; got != 1 {
+		t.Errorf("MpCheckFailed=%d want 1", got)
+	}
+	// Close flushes the mp_check_failed writer goroutine before we read.
+	if err := out.Close(); err != nil {
+		t.Fatalf("output close: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "mp_check_failed.txt"))
+	if err != nil {
+		t.Fatalf("read mp_check_failed.txt: %v", err)
+	}
+	// Line shape = bkt|key|partcnt|off0|off1, feedable back into -list-file.
+	wantLine := "mybucket|k|2|0|5242880"
+	if !strings.Contains(string(data), wantLine) {
+		t.Errorf("mp_check_failed.txt = %q, want substring %q", string(data), wantLine)
+	}
+	logData, err := os.ReadFile(filepath.Join(dir, "mp_check_failed.log"))
+	if err != nil {
+		t.Fatalf("read mp_check_failed.log: %v", err)
+	}
+	if !strings.Contains(string(logData), "key=k") {
+		t.Errorf("mp_check_failed.log missing key=k: %q", string(logData))
+	}
+}

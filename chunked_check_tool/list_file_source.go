@@ -43,7 +43,9 @@ func (e *MalformedLineError) Error() string {
 //   - offset0 must be 0
 //
 // On success returns a VerifyTask with IsMultipart=true (list-file tasks are
-// always multipart), ETag="" and Size=0 (the file does not carry them).
+// always multipart), ETag="" and Size=0 (the file does not carry them) and
+// HeadFirst=true (the checker HEADs the object to fill them in before probing,
+// mirroring backup mode).
 func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyTask, error) {
 	if strings.TrimSpace(line) == "" {
 		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: "empty line"}
@@ -96,6 +98,7 @@ func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyT
 		Key:         key,
 		IsMultipart: true,
 		Offsets:     offs,
+		HeadFirst:   true, // list-file lines omit ETag/Size — checker HEADs to fill them in
 	}, nil
 }
 

@@ -140,9 +140,13 @@ func TestParseListFileLineSuccessFields(t *testing.T) {
 	if task.Offsets[2] != 10485760 {
 		t.Errorf("Offsets[2]=%d want 10485760", task.Offsets[2])
 	}
-	// ETag/Size empty for list-file tasks (caller doesn't know them).
+	// ETag/Size empty for list-file tasks (caller doesn't know them); the
+	// checker HEADs the object to fill them in (HeadFirst=true).
 	if task.ETag != "" || task.Size != 0 {
 		t.Errorf("ETag=%q Size=%d, want empty/0", task.ETag, task.Size)
+	}
+	if !task.HeadFirst {
+		t.Errorf("HeadFirst=false, want true (list-file tasks HEAD in Checker.Handle)")
 	}
 }
 

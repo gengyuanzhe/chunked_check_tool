@@ -109,7 +109,26 @@ func NewChecker(worker S3API, out *Output, stats *Stats, cfg *Config) *Checker {
 // the S3 lister bumps them in check mode before pushing the task. List-file
 // source does not bump them (no S3 LIST); its summary reports read
 // instead of list_all.
+//
+// HeadFirst (set by the list-file source) HEADs the object to fill ETag/Size
+// before probing — the list-file input format omits them, and Size is needed
+// by buildProbesStatic to compute the tail probe (@Size-128). Mirrors backup
+// mode's HEAD-in-Handle pattern so the two modes share HEAD→probe via runProbes;
+// only post-probe routing differs. HEAD failure routes to mp_check_failed
+// (list-file tasks are always multipart) — the analog of backup mode's
+// backup_failed stage=head.
 func (c *Checker) Handle(task VerifyTask) {
+	if task.HeadFirst {
+		etag, size, err := c.worker.HeadObject(context.Background(), task.Key)
+		if err != nil {
+			c.out.WriteMpCheckFailed(task.Key, task.Offsets)
+			c.out.WriteMpCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
+			c.stats.IncrMpCheckFailed()
+			return
+		}
+		task.ETag = etag
+		task.Size = size
+	}
 	if !task.IsMultipart && task.Size == 0 {
 		c.stats.IncrOkObjects()
 		if c.cfg.IsSuccessLog {
