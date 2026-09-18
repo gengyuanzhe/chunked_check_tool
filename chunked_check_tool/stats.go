@@ -12,8 +12,9 @@ type RunMode int
 const (
 	ModeListCheck RunMode = iota // bucket LIST + check (is_check=true)
 	ModeListOnly                 // bucket LIST only (is_check=false)
-	ModeListFile                 // -list-file: verify tasks read from a local file
-	ModeBackup                   // -backup-file: HEAD + verify + relay
+	ModeListFile                 // -list-file: verify tasks read from a local file (legacy, multipart-only)
+	ModeCheckFile                // -check-file: verify tasks read from a local file (mixed format)
+	ModeBackup                   // -backup-file: HEAD + relay (no probing)
 )
 
 type Stats struct {
@@ -35,13 +36,12 @@ type Stats struct {
 	backupOkCount         atomic.Int64
 	backupFailedCount     atomic.Int64
 	backupMismatchCount   atomic.Int64
-	backupSkippedCleanCnt atomic.Int64
 
-	// Input-file consumption for -list-file / -backup-file: every line read
-	// (valid or malformed) bumps readLines. read=X is the cumulative
-	// progress counter for the file modes, replacing the bucket modes'
-	// list_all (no total is counted — a full pre-scan of the input file is
-	// not worth the extra pass).
+	// Input-file consumption for -list-file / -check-file / -backup-file:
+	// every line read (valid or malformed) bumps readLines. read=X is the
+	// cumulative progress counter for the file modes, replacing the bucket
+	// modes' list_all (no total is counted — a full pre-scan of the input
+	// file is not worth the extra pass).
 	readLines atomic.Int64
 
 	// Durations are atomics because SetListDuration is called from the
@@ -53,52 +53,50 @@ type Stats struct {
 }
 
 type StatsSnapshot struct {
-	ListedObjects      int64
-	ListedMp           int64
-	ListedAll          int64
-	OkObjects          int64
-	OkMp               int64
-	CorruptedObjects   int64
-	CorruptedMp        int64
-	ListFailed         int64
-	ParseFailed        int64
-	InvalidKeys        int64
-	CheckFailed        int64
-	MpCheckFailed      int64
-	ListCalls          int64
-	ListAvgLatencyMs   float64
-	ListTotalSec       float64
-	GetCalls           int64
-	GetAvgLatencyMs    float64
-	GetTotalSec        float64
-	BackupOk           int64
-	BackupFailed       int64
-	BackupMismatch     int64
-	BackupSkippedClean int64
-	ReadLines          int64
-	TotalSec           float64
+	ListedObjects    int64
+	ListedMp         int64
+	ListedAll        int64
+	OkObjects        int64
+	OkMp             int64
+	CorruptedObjects int64
+	CorruptedMp      int64
+	ListFailed       int64
+	ParseFailed      int64
+	InvalidKeys      int64
+	CheckFailed      int64
+	MpCheckFailed    int64
+	ListCalls        int64
+	ListAvgLatencyMs float64
+	ListTotalSec     float64
+	GetCalls         int64
+	GetAvgLatencyMs  float64
+	GetTotalSec      float64
+	BackupOk         int64
+	BackupFailed     int64
+	BackupMismatch   int64
+	ReadLines        int64
+	TotalSec         float64
 }
 
 func NewStats() *Stats {
 	return &Stats{}
 }
 
-func (s *Stats) IncrListedObject()       { s.listedObjectsCount.Add(1) }
-func (s *Stats) IncrListedMp()           { s.listedMpCount.Add(1) }
-func (s *Stats) IncrOkObjects()          { s.okObjectsCount.Add(1) }
-func (s *Stats) IncrOkMp()               { s.okMpCount.Add(1) }
-func (s *Stats) IncrCorruptedObjects()   { s.corruptedObjectsCount.Add(1) }
-func (s *Stats) IncrCorruptedMp()        { s.corruptedMpCount.Add(1) }
-func (s *Stats) IncrListFailed()         { s.listFailedCount.Add(1) }
-func (s *Stats) IncrParseFailed()        { s.parseFailedCount.Add(1) }
-func (s *Stats) IncrInvalidKeys()        { s.invalidKeysCount.Add(1) }
-func (s *Stats) IncrCheckFailed()        { s.checkFailedCount.Add(1) }
-func (s *Stats) IncrMpCheckFailed()      { s.mpCheckFailedCount.Add(1) }
-func (s *Stats) IncrBackupOk()           { s.backupOkCount.Add(1) }
-func (s *Stats) IncrBackupFailed()       { s.backupFailedCount.Add(1) }
-func (s *Stats) IncrBackupMismatch()     { s.backupMismatchCount.Add(1) }
-func (s *Stats) IncrBackupSkippedClean() { s.backupSkippedCleanCnt.Add(1) }
-func (s *Stats) IncrReadLine()           { s.readLines.Add(1) }
+func (s *Stats) IncrListedObject()     { s.listedObjectsCount.Add(1) }
+func (s *Stats) IncrListedMp()         { s.listedMpCount.Add(1) }
+func (s *Stats) IncrOkObjects()        { s.okObjectsCount.Add(1) }
+func (s *Stats) IncrOkMp()             { s.okMpCount.Add(1) }
+func (s *Stats) IncrCorruptedObjects() { s.corruptedObjectsCount.Add(1) }
+func (s *Stats) IncrCorruptedMp()      { s.corruptedMpCount.Add(1) }
+func (s *Stats) IncrListFailed()       { s.listFailedCount.Add(1) }
+func (s *Stats) IncrParseFailed()      { s.parseFailedCount.Add(1) }
+func (s *Stats) IncrInvalidKeys()      { s.invalidKeysCount.Add(1) }
+func (s *Stats) IncrCheckFailed()      { s.checkFailedCount.Add(1) }
+func (s *Stats) IncrMpCheckFailed()    { s.mpCheckFailedCount.Add(1) }
+func (s *Stats) IncrBackupOk()         { s.backupOkCount.Add(1) }
+func (s *Stats) IncrBackupFailed()     { s.backupFailedCount.Add(1) }
+func (s *Stats) IncrBackupMismatch()   { s.backupMismatchCount.Add(1) }
+func (s *Stats) IncrReadLine()         { s.readLines.Add(1) }
 
 func (s *Stats) AddListCall(latency time.Duration) {
 	s.listCalls.Add(1)
@@ -133,55 +131,60 @@ func (s *Stats) Snapshot() StatsSnapshot {
 	listedObj := s.listedObjectsCount.Load()
 	listedMp := s.listedMpCount.Load()
 	return StatsSnapshot{
-		ListedObjects:      listedObj,
-		ListedMp:           listedMp,
-		ListedAll:          listedObj + listedMp,
-		OkObjects:          s.okObjectsCount.Load(),
-		OkMp:               s.okMpCount.Load(),
-		CorruptedObjects:   s.corruptedObjectsCount.Load(),
-		CorruptedMp:        s.corruptedMpCount.Load(),
-		ListFailed:         s.listFailedCount.Load(),
-		ParseFailed:        s.parseFailedCount.Load(),
-		InvalidKeys:        s.invalidKeysCount.Load(),
-		CheckFailed:        s.checkFailedCount.Load(),
-		MpCheckFailed:      s.mpCheckFailedCount.Load(),
-		ListCalls:          calls,
-		ListAvgLatencyMs:   avgMs,
-		ListTotalSec:       time.Duration(s.listTotalDurationNs.Load()).Seconds(),
-		GetCalls:           getCalls,
-		GetAvgLatencyMs:    getAvgMs,
-		GetTotalSec:        getTotalSec,
-		BackupOk:           s.backupOkCount.Load(),
-		BackupFailed:       s.backupFailedCount.Load(),
-		BackupMismatch:     s.backupMismatchCount.Load(),
-		BackupSkippedClean: s.backupSkippedCleanCnt.Load(),
-		ReadLines:          s.readLines.Load(),
-		TotalSec:           time.Duration(s.totalDurationNs.Load()).Seconds(),
+		ListedObjects:    listedObj,
+		ListedMp:         listedMp,
+		ListedAll:        listedObj + listedMp,
+		OkObjects:        s.okObjectsCount.Load(),
+		OkMp:             s.okMpCount.Load(),
+		CorruptedObjects: s.corruptedObjectsCount.Load(),
+		CorruptedMp:      s.corruptedMpCount.Load(),
+		ListFailed:       s.listFailedCount.Load(),
+		ParseFailed:      s.parseFailedCount.Load(),
+		InvalidKeys:      s.invalidKeysCount.Load(),
+		CheckFailed:      s.checkFailedCount.Load(),
+		MpCheckFailed:    s.mpCheckFailedCount.Load(),
+		ListCalls:        calls,
+		ListAvgLatencyMs: avgMs,
+		ListTotalSec:     time.Duration(s.listTotalDurationNs.Load()).Seconds(),
+		GetCalls:         getCalls,
+		GetAvgLatencyMs:  getAvgMs,
+		GetTotalSec:      getTotalSec,
+		BackupOk:         s.backupOkCount.Load(),
+		BackupFailed:     s.backupFailedCount.Load(),
+		BackupMismatch:   s.backupMismatchCount.Load(),
+		ReadLines:        s.readLines.Load(),
+		TotalSec:         time.Duration(s.totalDurationNs.Load()).Seconds(),
 	}
 }
 
 // PrintSummary writes the final === summary === block. The metric set is
 // mode-specific: the bucket modes print list_* + check outcomes, while
-// -list-file and -backup-file print input consumption (read) plus only
-// the outcomes those modes can produce — no S3 LIST happens, so list_all/
-// list_calls would be all-zero noise.
+// -list-file / -check-file / -backup-file print input consumption (read)
+// plus only the outcomes those modes can produce — no S3 LIST happens, so
+// list_all/list_calls would be all-zero noise.
 func (s *Stats) PrintSummary(w io.Writer, mode RunMode) {
 	snap := s.Snapshot()
 	fmt.Fprintf(w, "=== summary ===\n")
 	switch mode {
-	case ModeListFile, ModeBackup:
+	case ModeListFile, ModeCheckFile, ModeBackup:
 		fmt.Fprintf(w, "read: %d total_sec: %.2f\n", snap.ReadLines, snap.TotalSec)
 		fmt.Fprintf(w, "list_failed: %d\n", snap.ListFailed)
-		// get_calls stays: multipart verification goes through RangeGetAt.
+		// get_calls stays: verification goes through RangeGetAt (and HEAD
+		// for the file check modes).
 		fmt.Fprintf(w, "get_calls: %d avg_latency_ms: %.2f get_total_sec: %.2f\n",
 			snap.GetCalls, snap.GetAvgLatencyMs, snap.GetTotalSec)
-		if mode == ModeListFile {
+		switch mode {
+		case ModeListFile:
 			fmt.Fprintf(w, "ok_mp: %d corrupt_mp: %d mp_check_failed: %d parse_failed: %d invalid_keys: %d\n",
 				snap.OkMp, snap.CorruptedMp, snap.MpCheckFailed, snap.ParseFailed, snap.InvalidKeys)
-			return
+		case ModeCheckFile:
+			fmt.Fprintf(w, "ok_obj: %d corrupt_obj: %d ok_mp: %d corrupt_mp: %d check_failed: %d mp_check_failed: %d parse_failed: %d invalid_keys: %d\n",
+				snap.OkObjects, snap.CorruptedObjects, snap.OkMp, snap.CorruptedMp,
+				snap.CheckFailed, snap.MpCheckFailed, snap.ParseFailed, snap.InvalidKeys)
+		default: // ModeBackup
+			fmt.Fprintf(w, "backup_ok: %d backup_failed: %d backup_mismatch: %d parse_failed: %d invalid_keys: %d\n",
+				snap.BackupOk, snap.BackupFailed, snap.BackupMismatch, snap.ParseFailed, snap.InvalidKeys)
 		}
-		fmt.Fprintf(w, "backup_ok: %d backup_failed: %d backup_mismatch: %d backup_skipped_clean: %d parse_failed: %d invalid_keys: %d\n",
-			snap.BackupOk, snap.BackupFailed, snap.BackupMismatch, snap.BackupSkippedClean, snap.ParseFailed, snap.InvalidKeys)
 	case ModeListCheck:
 		fmt.Fprintf(w, "list_all: %d (list_obj: %d list_mp: %d) total_sec: %.2f\n",
 			snap.ListedAll, snap.ListedObjects, snap.ListedMp, snap.TotalSec)

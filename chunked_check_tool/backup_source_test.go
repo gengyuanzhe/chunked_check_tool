@@ -110,7 +110,7 @@ func TestParseBackupFileLine(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			task, err := parseBackupFileLine(c.line, bkt, 1)
+			task, err := parseMixedLine(c.line, bkt, 1)
 			if c.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected err: %v", err)
@@ -150,7 +150,7 @@ func TestParseBackupFileLine(t *testing.T) {
 func TestBackupSourceRunEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
-	out, err := NewOutput(cfg, "mybucket", false)
+	out, err := NewOutput(cfg, "mybucket", FileInputNone)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestBackupSourceRunEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	src := newBackupSource(filePath, "mybucket", out, stats)
+	src := newFileSource[BackupTask](filePath, "mybucket", out, stats, parseMixedLine)
 	ch := make(chan BackupTask, 16)
 	go func() {
 		if err := src.Run(context.Background(), ch); err != nil {
@@ -230,7 +230,7 @@ func TestBackupSourceRunEndToEnd(t *testing.T) {
 func TestBackupSourceRunCancel(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, err := NewOutput(cfg, "mybucket", false)
+	out, err := NewOutput(cfg, "mybucket", FileInputNone)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestBackupSourceRunCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	src := newBackupSource(filePath, "mybucket", out, stats)
+	src := newFileSource[BackupTask](filePath, "mybucket", out, stats, parseMixedLine)
 	ch := make(chan BackupTask, 16)
 	err = src.Run(ctx, ch)
 	if !errors.Is(err, context.Canceled) {
@@ -258,12 +258,12 @@ func TestBackupSourceRunCancel(t *testing.T) {
 func TestBackupSourceRunOpenError(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, err := NewOutput(cfg, "mybucket", false)
+	out, err := NewOutput(cfg, "mybucket", FileInputNone)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer out.Close()
-	src := newBackupSource(filepath.Join(dir, "nope.txt"), "mybucket", out, NewStats())
+	src := newFileSource[BackupTask](filepath.Join(dir, "nope.txt"), "mybucket", out, NewStats(), parseMixedLine)
 	err = src.Run(context.Background(), make(chan BackupTask, 1))
 	if err == nil || !strings.Contains(err.Error(), "nope.txt") {
 		t.Fatalf("Run err = %v, want open error mentioning path", err)

@@ -57,11 +57,11 @@ func TestChunkSigRegex(t *testing.T) {
 func TestCheckerHandleNormal(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
 	worker := &FakeS3{Body: []byte("normal object content here")}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", OwnerID: "", ETag: "0123456789abcdef0123456789abcdef", Size: 1, IsMultipart: false, Offsets: nil})
 	// success not enabled, no files written yet (deferred to Close)
 }
@@ -69,12 +69,12 @@ func TestCheckerHandleNormal(t *testing.T) {
 func TestCheckerHandleCorrupted(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
 	body := []byte("1000;chunk-signature=0000000000000000000000000000000000000000000000000000000000000000\r\n")
 	worker := &FakeS3{Body: body}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", Size: 1, IsMultipart: false, Offsets: nil})
 	if s.Snapshot().CorruptedObjects != 1 {
 		t.Errorf("corrupted=%d want 1", s.Snapshot().CorruptedObjects)
@@ -84,7 +84,7 @@ func TestCheckerHandleCorrupted(t *testing.T) {
 func TestCheckerHandleMultipartSkipsRangeGet(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
 	called := false
@@ -93,7 +93,7 @@ func TestCheckerHandleMultipartSkipsRangeGet(t *testing.T) {
 		Err:  nil,
 	}
 	// 用一个 wrap 检测是否调用 RangeGet
-	c := NewChecker(&callTrackingS3{FakeS3: worker, called: &called}, out, s, cfg)
+	c := NewChecker(context.Background(), &callTrackingS3{FakeS3: worker, called: &called}, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", IsMultipart: true, Offsets: nil})
 	if called {
 		t.Error("RangeGet should not be called for multipart")
@@ -106,11 +106,11 @@ func TestCheckerHandleMultipartSkipsRangeGet(t *testing.T) {
 func TestCheckerHandleRangeGetError(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
 	worker := &FakeS3{Err: context.DeadlineExceeded}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", Size: 1, IsMultipart: false, Offsets: nil})
 	if s.Snapshot().CheckFailed != 1 {
 		t.Errorf("checkfailed=%d want 1", s.Snapshot().CheckFailed)
@@ -120,12 +120,12 @@ func TestCheckerHandleRangeGetError(t *testing.T) {
 func TestCheckerHandleEmptyObjectSkipsRangeGet(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
 	called := false
 	worker := &FakeS3{Err: errFake416}
-	c := NewChecker(&callTrackingS3{FakeS3: worker, called: &called}, out, s, cfg)
+	c := NewChecker(context.Background(), &callTrackingS3{FakeS3: worker, called: &called}, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", Size: 0, IsMultipart: false, Offsets: nil})
 	if called {
 		t.Error("RangeGet should not be called for size=0 object")
@@ -140,7 +140,7 @@ var errFake416 = errors.New("416 Range Not Satisfiable")
 func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	s := NewStats()
 	worker := &FakeS3{Err: minio.ErrorResponse{
 		Code:       "InvalidRange",
@@ -148,7 +148,7 @@ func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 		StatusCode: 416,
 		RequestID:  "REQ-1234-ABCD",
 	}}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "path/obj", Size: 1, IsMultipart: false, Offsets: nil})
 	if err := out.Close(); err != nil {
 		t.Fatalf("close: %v", err)
@@ -217,10 +217,10 @@ func multipartCfg(dir string, segSize int64) *Config {
 func TestCheckerMultipartSegmentCheckCorrupted(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	s := NewStats()
 	worker := &FakeS3{Body: chunkSigBody}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	// multipart etag + Size=10MB → 2 segments at offset 0 and 5MB. Body
 	// matches at offset 0, so it's flagged immediately as corrupted.
 	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5 * 1024 * 1024}})
@@ -246,10 +246,10 @@ func TestCheckerMultipartSegmentCheckCorrupted(t *testing.T) {
 func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	s := NewStats()
 	worker := &FakeS3{Body: []byte("normal object body, no chunk signature here")}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5 * 1024 * 1024}})
 	if got := s.Snapshot().CorruptedMp; got != 0 {
 		t.Errorf("corrupted_mp=%d want 0", got)
@@ -276,10 +276,10 @@ func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	s := NewStats()
 	worker := &FakeS3{Err: context.DeadlineExceeded}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5 * 1024 * 1024}})
 	if got := s.Snapshot().MpCheckFailed; got != 1 {
 		t.Errorf("mp_check_failed=%d want 1 (segment RangeGet error should bump MpCheckFailed)", got)
@@ -312,7 +312,7 @@ func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 func TestCheckerOffsetModeCorruptedCarriesOffsets(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, IsMultipartSuccessLog: true}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	s := NewStats()
 	partBoundary := int64(5242880)
 	worker := &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
@@ -322,7 +322,7 @@ func TestCheckerOffsetModeCorruptedCarriesOffsets(t *testing.T) {
 		}
 		return []byte("clean part body, no signature"), nil
 	}}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5242880}})
 	if got := s.Snapshot().CorruptedMp; got != 1 {
 		t.Errorf("corrupted_mp=%d want 1", got)
@@ -347,10 +347,10 @@ func TestCheckerOffsetModeCorruptedCarriesOffsets(t *testing.T) {
 func TestCheckerOffsetModeFallbackWritesMpAll(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	s := NewStats()
 	worker := &FakeS3{Body: chunkSigBody} // would match — but nothing is probed
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: nil})
 	if got := s.Snapshot().CorruptedMp; got != 0 {
 		t.Errorf("corrupted_mp=%d want 0 (unverified, not probed)", got)
@@ -375,10 +375,10 @@ func TestCheckerOffsetModeFallbackWritesMpAll(t *testing.T) {
 func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOff, MultipartSegmentSize: 5 * 1024 * 1024}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	s := NewStats()
 	worker := &FakeS3{Body: chunkSigBody} // would match if we checked — but we don't
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: nil})
 	if got := s.Snapshot().CorruptedMp; got != 0 {
 		t.Errorf("corrupt_mp=%d want 0 (switch off)", got)
@@ -405,7 +405,7 @@ func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 func TestCheckerMultipartSegmentCheckSecondSegmentMatches(t *testing.T) {
 	dir := t.TempDir()
 	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
 	cleanBody := []byte("clean segment, no signature")
@@ -417,7 +417,7 @@ func TestCheckerMultipartSegmentCheckSecondSegmentMatches(t *testing.T) {
 			return chunkSigBody, nil // second segment matches
 		},
 	}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5 * 1024 * 1024}})
 	if got := s.Snapshot().CorruptedMp; got != 1 {
 		t.Errorf("corrupted_mp=%d want 1 (second segment should trigger)", got)
@@ -479,12 +479,12 @@ func TestTrailerRegex(t *testing.T) {
 func TestCheckerSmallObjectFastPathClean(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsSuccessLog: true, WholeObjectProbeThreshold: 1024}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
 	count := 0
 	worker := &rangeGetCountingS3{FakeS3: &FakeS3{Body: []byte("normal small object content")}, count: &count}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", Size: 50, IsMultipart: false, Offsets: nil})
 	if got := s.Snapshot().CorruptedObjects; got != 0 {
 		t.Errorf("corrupted=%d want 0", got)
@@ -500,12 +500,12 @@ func TestCheckerSmallObjectFastPathClean(t *testing.T) {
 func TestCheckerSmallObjectFastPathCorruptedChunkSig(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, WholeObjectProbeThreshold: 1024}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
 	count := 0
 	worker := &rangeGetCountingS3{FakeS3: &FakeS3{Body: chunkSigBody}, count: &count}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", Size: 50, IsMultipart: false, Offsets: nil})
 	if got := s.Snapshot().CorruptedObjects; got != 1 {
 		t.Errorf("corrupted=%d want 1", got)
@@ -518,7 +518,7 @@ func TestCheckerSmallObjectFastPathCorruptedChunkSig(t *testing.T) {
 func TestCheckerSmallObjectFastPathCorruptedTrailer(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, WholeObjectProbeThreshold: 1024}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
 	count := 0
@@ -526,7 +526,7 @@ func TestCheckerSmallObjectFastPathCorruptedTrailer(t *testing.T) {
 	// head-only probe. The fast-path reads the whole body and trailerRe
 	// now catches it.
 	worker := &rangeGetCountingS3{FakeS3: &FakeS3{Body: trailerBody}, count: &count}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", Size: int64(len(trailerBody)), IsMultipart: false, Offsets: nil})
 	if got := s.Snapshot().CorruptedObjects; got != 1 {
 		t.Errorf("corrupted=%d want 1 (trailer marker should be caught)", got)
@@ -539,7 +539,7 @@ func TestCheckerSmallObjectFastPathCorruptedTrailer(t *testing.T) {
 func TestCheckerLargeNormalObjectHeadTail(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, WholeObjectProbeThreshold: 1024}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
 	const size int64 = 4096
@@ -569,7 +569,7 @@ func TestCheckerLargeNormalObjectHeadTail(t *testing.T) {
 		}},
 		count: &count,
 	}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", Size: size, IsMultipart: false, Offsets: nil})
 	if got := s.Snapshot().CorruptedObjects; got != 1 {
 		t.Errorf("corrupted=%d want 1 (tail probe should catch trailer)", got)
@@ -582,7 +582,7 @@ func TestCheckerLargeNormalObjectHeadTail(t *testing.T) {
 func TestCheckerMultipartBoundaryProbeCatchesTrailerInPartTail(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
 	// 2 parts, boundary at 5MiB. Boundary probe reads [5242752, 5253008].
@@ -596,7 +596,7 @@ func TestCheckerMultipartBoundaryProbeCatchesTrailerInPartTail(t *testing.T) {
 		}
 		return []byte("clean part body, no signature"), nil
 	}}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5242880}})
 	if got := s.Snapshot().CorruptedMp; got != 1 {
 		t.Errorf("corrupted_mp=%d want 1 (boundary probe should catch trailer)", got)
@@ -606,7 +606,7 @@ func TestCheckerMultipartBoundaryProbeCatchesTrailerInPartTail(t *testing.T) {
 func TestCheckerMultipartBoundaryProbeCatchesChunkSigInNextPartHead(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
 	// 2 parts, boundary at 5MiB. Boundary probe reads [5242752, 5253008]
@@ -620,7 +620,7 @@ func TestCheckerMultipartBoundaryProbeCatchesChunkSigInNextPartHead(t *testing.T
 		}
 		return []byte("clean part body, no signature"), nil
 	}}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5242880}})
 	if got := s.Snapshot().CorruptedMp; got != 1 {
 		t.Errorf("corrupted_mp=%d want 1 (de-anchored regex should match next part head)", got)
@@ -635,7 +635,7 @@ func TestRunProbesThreeStates(t *testing.T) {
 	t.Run("clean", func(t *testing.T) {
 		f := &FakeS3{Body: []byte("nothing signature-like in here")}
 		task := VerifyTask{Key: "k", Size: 40, IsMultipart: false}
-		result, err := runProbes(f, task, 1024)
+		result, err := runProbes(context.Background(), f, task, 1024)
 		if err != nil {
 			t.Errorf("err = %v, want nil", err)
 		}
@@ -646,7 +646,7 @@ func TestRunProbesThreeStates(t *testing.T) {
 	t.Run("corrupted by chunkSigRe", func(t *testing.T) {
 		f := &FakeS3{Body: []byte(corruptBody)}
 		task := VerifyTask{Key: "k", Size: int64(len(corruptBody)), IsMultipart: false}
-		result, _ := runProbes(f, task, 1024)
+		result, _ := runProbes(context.Background(), f, task, 1024)
 		if result != probeCorrupted {
 			t.Errorf("result = %v, want probeCorrupted", result)
 		}
@@ -654,7 +654,7 @@ func TestRunProbesThreeStates(t *testing.T) {
 	t.Run("corrupted by trailerRe", func(t *testing.T) {
 		f := &FakeS3{Body: trailerBody}
 		task := VerifyTask{Key: "k", Size: int64(len(trailerBody)), IsMultipart: false}
-		result, _ := runProbes(f, task, 1024)
+		result, _ := runProbes(context.Background(), f, task, 1024)
 		if result != probeCorrupted {
 			t.Errorf("result = %v, want probeCorrupted (unsigned-trailer has no chunk-signature, only trailer marker)", result)
 		}
@@ -662,7 +662,7 @@ func TestRunProbesThreeStates(t *testing.T) {
 	t.Run("failed on GET error", func(t *testing.T) {
 		f := &FakeS3{Err: context.DeadlineExceeded}
 		task := VerifyTask{Key: "k", Size: 40, IsMultipart: false}
-		result, err := runProbes(f, task, 1024)
+		result, err := runProbes(context.Background(), f, task, 1024)
 		if result != probeFailed {
 			t.Errorf("result = %v, want probeFailed", result)
 		}
@@ -688,7 +688,7 @@ func TestCheckerMultipartProbeCountIsNPlusOne(t *testing.T) {
 	// threshold=0 disables small-object fast-path so we exercise the
 	// head+boundary+tail matrix directly.
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, WholeObjectProbeThreshold: 0}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
 
@@ -701,7 +701,7 @@ func TestCheckerMultipartProbeCountIsNPlusOne(t *testing.T) {
 		}},
 		count: &count,
 	}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: size, Offsets: offs})
 
 	// N=2 parts → expect N+1 = 3 probes (head + 1 boundary + tail). The old
@@ -723,7 +723,7 @@ func TestCheckerHeadFirstFillsSizeEnablesTailProbe(t *testing.T) {
 	// threshold=0 disables small-object fast-path so we exercise head+tail
 	// (the test body is large enough that head won't see the trailer).
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, WholeObjectProbeThreshold: 0}
-	out, _ := NewOutput(cfg, "test-bkt", false)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
 
@@ -748,7 +748,7 @@ func TestCheckerHeadFirstFillsSizeEnablesTailProbe(t *testing.T) {
 			return body[offset:end], nil
 		},
 	}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	// HeadFirst=true + Size=0 mirrors what parseListFileLine produces. Without
 	// the Handle HEAD, buildProbesStatic would skip the tail probe and the
 	// trailer at byte 3968 would be missed.
@@ -760,18 +760,18 @@ func TestCheckerHeadFirstFillsSizeEnablesTailProbe(t *testing.T) {
 }
 
 // TestCheckerHeadFirstHeadFailureRoutesToMpCheckFailed — when HEAD fails for
-// a HeadFirst task (list-file tasks are always multipart), the task routes
-// to mp_check_failed.txt + mp_check_failed.log with the line's offsets
-// preserved (so the file is feedable back into -list-file for retry),
-// mirroring backup mode's backup_failed stage=head.
+// a multipart HeadFirst task, the task routes to mp_check_failed.txt +
+// mp_check_failed.log with the line's offsets preserved (so the file is
+// feedable back into -check-file for retry), mirroring backup mode's
+// backup_failed stage=head.
 func TestCheckerHeadFirstHeadFailureRoutesToMpCheckFailed(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
-	out, _ := NewOutput(cfg, "mybucket", true) // listFileMode=true → mp_check_failed enabled
+	out, _ := NewOutput(cfg, "mybucket", FileInputCheckFile) // file input → mp_check_failed enabled
 	s := NewStats()
 
 	worker := &FakeS3{HeadErr: minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}}
-	c := NewChecker(worker, out, s, cfg)
+	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", IsMultipart: true, Offsets: []int64{0, 5242880}, HeadFirst: true})
 
 	if got := s.Snapshot().MpCheckFailed; got != 1 {
@@ -785,7 +785,7 @@ func TestCheckerHeadFirstHeadFailureRoutesToMpCheckFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read mp_check_failed.txt: %v", err)
 	}
-	// Line shape = bkt|key|partcnt|off0|off1, feedable back into -list-file.
+	// Line shape = bkt|key|partcnt|off0|off1, feedable back into -check-file.
 	wantLine := "mybucket|k|2|0|5242880"
 	if !strings.Contains(string(data), wantLine) {
 		t.Errorf("mp_check_failed.txt = %q, want substring %q", string(data), wantLine)
@@ -796,5 +796,105 @@ func TestCheckerHeadFirstHeadFailureRoutesToMpCheckFailed(t *testing.T) {
 	}
 	if !strings.Contains(string(logData), "key=k") {
 		t.Errorf("mp_check_failed.log missing key=k: %q", string(logData))
+	}
+}
+
+// TestCheckerHeadFirstHeadFailureRegularRoutesToCheckFailed — the same HEAD
+// failure for a regular -check-file line (bkt|key, no offsets) routes to
+// check_failed.txt in the bkt|key shape, not mp_check_failed.
+func TestCheckerHeadFirstHeadFailureRegularRoutesToCheckFailed(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
+	out, _ := NewOutput(cfg, "mybucket", FileInputCheckFile)
+	s := NewStats()
+
+	worker := &FakeS3{HeadErr: minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}}
+	c := NewChecker(context.Background(), worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", HeadFirst: true})
+
+	if got := s.Snapshot().CheckFailed; got != 1 {
+		t.Errorf("CheckFailed=%d want 1", got)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatalf("output close: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "check_failed.txt"))
+	if err != nil {
+		t.Fatalf("read check_failed.txt: %v", err)
+	}
+	if got, want := string(data), "mybucket|k\n"; got != want {
+		t.Errorf("check_failed.txt = %q, want %q", got, want)
+	}
+}
+
+// TestCheckerHeadFirstDriftToRegularProbesHeadTail — type drift: the input
+// line declares multipart with offsets, but the HEAD ETag says the object
+// was overwritten as a regular single-PUT object. The HEAD is authoritative:
+// the stale offsets are dropped and the object is probed head+tail as
+// regular, so corruption lands in corrupted_objects.txt (not corrupted_mp).
+func TestCheckerHeadFirstDriftToRegularProbesHeadTail(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, WholeObjectProbeThreshold: 0}
+	out, _ := NewOutput(cfg, "mybucket", FileInputCheckFile)
+	s := NewStats()
+
+	corrupt := []byte(corruptBody + "rest of a now-regular object")
+	worker := &FakeS3{
+		Heads: map[string]HeadInfo{"k": {ETag: md5Hex(corrupt), Size: int64(len(corrupt))}},
+		Body:  corrupt,
+	}
+	c := NewChecker(context.Background(), worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", IsMultipart: true, Offsets: []int64{0, 5}, HeadFirst: true})
+
+	snap := s.Snapshot()
+	if snap.CorruptedObjects != 1 || snap.CorruptedMp != 0 {
+		t.Errorf("corrupt_obj=%d corrupt_mp=%d, want 1/0 (drifted object probes as regular)", snap.CorruptedObjects, snap.CorruptedMp)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatalf("output close: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "_unknown", "corrupted_objects.txt"))
+	if err != nil {
+		t.Fatalf("read corrupted_objects.txt: %v", err)
+	}
+	if got, want := string(data), "mybucket|k\n"; got != want {
+		t.Errorf("corrupted_objects.txt = %q, want %q", got, want)
+	}
+}
+
+// TestCheckerHeadFirstDriftToMultipartWritesMpTxt — the reverse drift: a
+// regular line (bkt|key, no offsets) whose HEAD reveals a multipart object.
+// No offsets are available, so the object lands unverified in mp.txt —
+// never ok_mp ("unverified must not be claimed clean"). This is the path
+// that keeps mp.txt open in -check-file mode even with
+// multipart_check_mode=0.
+func TestCheckerHeadFirstDriftToMultipartWritesMpTxt(t *testing.T) {
+	dir := t.TempDir()
+	// mode=0: without FileInputCheckFile the mp.txt writer would be disabled
+	// and the drifted object would vanish silently.
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOff}
+	out, _ := NewOutput(cfg, "mybucket", FileInputCheckFile)
+	s := NewStats()
+
+	worker := &FakeS3{
+		Heads: map[string]HeadInfo{"k": {ETag: "0123456789abcdef0123456789abcdef-2", Size: 10}},
+		Body:  []byte("clean body"),
+	}
+	c := NewChecker(context.Background(), worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", HeadFirst: true})
+
+	snap := s.Snapshot()
+	if snap.OkMp != 0 {
+		t.Errorf("ok_mp=%d, want 0 (no offsets — must not claim clean)", snap.OkMp)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatalf("output close: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "_unknown", "mp.txt"))
+	if err != nil {
+		t.Fatalf("read mp.txt: %v", err)
+	}
+	if got, want := string(data), "mybucket|k\n"; got != want {
+		t.Errorf("mp.txt = %q, want %q", got, want)
 	}
 }

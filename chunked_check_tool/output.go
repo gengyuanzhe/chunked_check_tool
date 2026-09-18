@@ -26,6 +26,25 @@ type ownerLine struct {
 // offset/list-file mode, the offset-carrying bkt|key|partcnt|off0|... shape.
 type ownerRenderer func(w io.Writer, bucket string, ol ownerLine)
 
+// FileInputMode tells NewOutput which file-input mode (if any) is running,
+// so it can gate the multipart result routing that is otherwise keyed on
+// multipart_check_mode (the mode only governs offset synthesis during S3
+// LIST and is meaningless for file inputs, whose lines carry their own
+// offsets).
+type FileInputMode int
+
+const (
+	// FileInputNone: S3 list/check or list-only mode.
+	FileInputNone FileInputMode = iota
+	// FileInputListFile: legacy -list-file (multipart-only lines). Tasks
+	// always carry offsets, so mp.txt has no fallback role here.
+	FileInputListFile
+	// FileInputCheckFile: -check-file (mixed lines). mp.txt IS enabled: a
+	// regular line whose HEAD reveals a multipart object (type drift) has no
+	// offsets and must land unverified in mp.txt.
+	FileInputCheckFile
+)
+
 type Output struct {
 	dir    string
 	bucket string
@@ -43,15 +62,14 @@ type Output struct {
 	successCh            chan ownerLine
 
 	// root-level channels (global, no ownerID)
-	listFailedCh         chan string
-	parseFailedCh        chan string
-	invalidKeysCh       chan string
-	checkFailedCh        chan string
-	mpCheckFailedCh      chan string
-	backupOkCh           chan string
-	backupFailedCh       chan string
-	mismatchCh           chan string
-	backupSkippedCleanCh chan string
+	listFailedCh    chan string
+	parseFailedCh   chan string
+	invalidKeysCh   chan string
+	checkFailedCh   chan string
+	mpCheckFailedCh chan string
+	backupOkCh      chan string
+	backupFailedCh  chan string
+	mismatchCh      chan string
 
 	// slog loggers for the three .log files (root, concurrency-safe)
 	listLogger           *slog.Logger
@@ -73,19 +91,18 @@ type Output struct {
 	mpCheckFailedEnabled      bool // is_check && (mode!=off || list-file)
 	checkEnabled              bool // is_check
 	successEnabled            bool // is_check && is_success_log
-	backupEnabled             bool // backup mode: the four backup files
+	backupEnabled             bool // backup mode: the three backup files
 
 	wg    sync.WaitGroup
 	files []*os.File // root files only — per-owner files are owned by their goroutines
 }
 
-// NewOutput builds the Output for list/check modes. listFileMode enables
-// the multipart result routing (corrupted_mp/mp_check_failed/ok_mp) that is
-// otherwise keyed on multipart_check_mode != off: list-file tasks always
-// carry explicit offsets, so their verification results must land in those
-// files even when the mode is off (it only governs offset synthesis in
-// bucket mode and is meaningless for list files).
-func NewOutput(cfg *Config, bucket string, listFileMode bool) (*Output, error) {
+// NewOutput builds the Output for list/check modes. fileInput selects the
+// file-input mode (if any) and forces the multipart result routing
+// (corrupted_mp/mp_check_failed/ok_mp) on regardless of multipart_check_mode:
+// file-input tasks carry explicit offsets, so their verification results must
+// land in those files even when the mode is off.
+func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, error) {
 	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
 		return nil, fmt.Errorf("mkdir output: %w", err)
 	}
@@ -94,12 +111,29 @@ func NewOutput(cfg *Config, bucket string, listFileMode bool) (*Output, error) {
 		chCap = 1024
 	}
 	isCheck := cfg.IsCheck
-	mpOutputs := cfg.MultipartCheckMode != MultipartCheckModeOff || listFileMode
+	mpOutputs := cfg.MultipartCheckMode != MultipartCheckModeOff || fileInput != FileInputNone
 	// corrupted_mp lines carry partcnt+offsets when the offsets are real
-	// part boundaries: offset mode (etag-derived) and list-file mode (input
-	// file carries them). Segment mode offsets are synthetic [0, seg, 2*seg,
-	// ...] guesses and must NOT be written as if they were part boundaries.
-	mpOffsetLines := cfg.MultipartCheckMode == MultipartCheckModeOffset || listFileMode
+	// part boundaries: offset mode (etag-derived) and the file-input modes
+	// (input file carries them). Segment mode offsets are synthetic [0, seg,
+	// 2*seg, ...] guesses and must NOT be written as if they were part
+	// boundaries.
+	mpOffsetLines := cfg.MultipartCheckMode == MultipartCheckModeOffset || fileInput != FileInputNone
+	// mp.txt gating:
+	//   - mode=off writes every multipart here; mode=offset writes the
+	//     unparseable-ETag fallback here. Segment mode disables it (offsets
+	//     always synthesized when Size>0).
+	//   - -list-file tasks always carry offsets → no fallback role → off.
+	//   - -check-file accepts regular lines, and a regular line whose HEAD
+	//     reveals a multipart object (type drift) has no offsets → on.
+	var multipartAll bool
+	switch fileInput {
+	case FileInputListFile:
+		multipartAll = false
+	case FileInputCheckFile:
+		multipartAll = isCheck
+	default:
+		multipartAll = isCheck && (!mpOutputs || cfg.MultipartCheckMode == MultipartCheckModeOffset)
+	}
 	format := cfg.ResultLineFormat
 	if format == "" {
 		format = "<bucket>|<key>"
@@ -123,12 +157,7 @@ func NewOutput(cfg *Config, bucket string, listFileMode bool) (*Output, error) {
 		checkFailedCh:             make(chan string, chCap),
 		mpCheckFailedCh:           make(chan string, chCap),
 		corruptedEnabled:          isCheck,
-		// mp.txt: mode=off writes every multipart here; mode=offset writes
-		// the unparseable-ETag fallback here. Segment mode disables it
-		// (offsets always synthesized when Size>0). List-file mode has no
-		// fallback path (tasks always carry offsets), so it stays off to
-		// avoid creating an empty file.
-		multipartAllEnabled:       isCheck && !listFileMode && (!mpOutputs || cfg.MultipartCheckMode == MultipartCheckModeOffset),
+		multipartAllEnabled:       multipartAll,
 		corruptedMultipartEnabled: isCheck && mpOutputs,
 		multipartOkEnabled:        isCheck && mpOutputs && cfg.IsMultipartSuccessLog,
 		mpCheckFailedEnabled:      isCheck && mpOutputs,
@@ -200,7 +229,7 @@ func NewOutput(cfg *Config, bucket string, listFileMode bool) (*Output, error) {
 }
 
 // NewBackupOutput builds an Output for -backup-file mode: list_failed
-// (malformed input lines) plus the four backup result files and
+// (malformed input lines) plus the three backup result files and
 // backup_failed.log. The per-owner check-mode files (corrupted/ok/multipart)
 // are not opened.
 func NewBackupOutput(cfg *Config, bucket string) (*Output, error) {
@@ -220,17 +249,16 @@ func NewBackupOutput(cfg *Config, bucket string) (*Output, error) {
 		return nil, err
 	}
 	o := &Output{
-		dir:                  cfg.BackupOutputDir,
-		bucket:               bucket,
-		lineFmt:              lineFmt,
-		listFailedCh:         make(chan string, chCap),
-		parseFailedCh:        make(chan string, chCap),
-		invalidKeysCh:       make(chan string, chCap),
-		backupOkCh:           make(chan string, chCap),
-		backupFailedCh:       make(chan string, chCap),
-		mismatchCh:           make(chan string, chCap),
-		backupSkippedCleanCh: make(chan string, chCap),
-		backupEnabled:        true,
+		dir:            cfg.BackupOutputDir,
+		bucket:         bucket,
+		lineFmt:        lineFmt,
+		listFailedCh:   make(chan string, chCap),
+		parseFailedCh:  make(chan string, chCap),
+		invalidKeysCh:  make(chan string, chCap),
+		backupOkCh:     make(chan string, chCap),
+		backupFailedCh: make(chan string, chCap),
+		mismatchCh:     make(chan string, chCap),
+		backupEnabled:  true,
 	}
 	if err := o.openAndStartRoot("list_failed.txt", o.listFailedCh); err != nil {
 		return nil, err
@@ -257,9 +285,6 @@ func NewBackupOutput(cfg *Config, bucket string) (*Output, error) {
 		return nil, err
 	}
 	if err := o.openMismatchLog(); err != nil {
-		return nil, err
-	}
-	if err := o.openAndStartRoot("backup_skipped_clean.txt", o.backupSkippedCleanCh); err != nil {
 		return nil, err
 	}
 	return o, nil
@@ -678,14 +703,6 @@ func (o *Output) WriteMismatchLog(key string, lineIsMultipart bool, headETag str
 	o.mismatchLogger.Warn("backup mismatch", attrs...)
 }
 
-// WriteBackupSkippedClean records the raw input line of a multipart object
-// whose verification probes were all clean (no relay happened).
-func (o *Output) WriteBackupSkippedClean(rawLine string) {
-	if o.backupEnabled {
-		o.backupSkippedCleanCh <- rawLine
-	}
-}
-
 func (o *Output) WriteMpCheckFailedLog(key string, statusCode int, s3Code, reqID string, err error) {
 	if !o.mpCheckFailedEnabled || o.mpCheckFailedLogger == nil {
 		return
@@ -736,16 +753,15 @@ func (o *Output) ChannelSnapshot() (corrupted, multipartAll, corruptedMultipart,
 
 // BackupChannelSnapshot returns the current length of the backup-mode
 // writer channels. list_failed is shared with the other modes and always
-// reports; the four backup channels report 0 when backup mode is off.
+// reports; the backup channels report 0 when backup mode is off.
 // Called from ProgressPrinter's queueSnapshot provider once per progress
 // line in -backup-file mode.
-func (o *Output) BackupChannelSnapshot() (listFailed, backupOk, backupFailed, mismatch, backupSkippedClean int) {
+func (o *Output) BackupChannelSnapshot() (listFailed, backupOk, backupFailed, mismatch int) {
 	listFailed = len(o.listFailedCh)
 	if o.backupEnabled {
 		backupOk = len(o.backupOkCh)
 		backupFailed = len(o.backupFailedCh)
 		mismatch = len(o.mismatchCh)
-		backupSkippedClean = len(o.backupSkippedCleanCh)
 	}
 	return
 }
@@ -783,7 +799,6 @@ func (o *Output) Close() error {
 		close(o.backupOkCh)
 		close(o.backupFailedCh)
 		close(o.mismatchCh)
-		close(o.backupSkippedCleanCh)
 	}
 	o.wg.Wait()
 	var firstErr error

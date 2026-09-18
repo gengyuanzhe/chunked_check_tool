@@ -13,7 +13,7 @@ import (
 func TestWriteListFailedTokenFormat(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: false}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 
 	// First page failed: no token → single field.
 	o.WriteListFailed("data/2026/", "")
@@ -42,7 +42,7 @@ func TestWriteListFailedTokenFormat(t *testing.T) {
 func TestWriteListFailedInvalidPrefix(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: false}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 
 	o.WriteListFailed("data/a|b/", "tokenX")
 
@@ -109,7 +109,7 @@ func TestParseResumeListLineEmpty(t *testing.T) {
 func TestReadResumeListEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: false}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 
 	// Write the resume-list file manually (simulating a prior run's output).
 	resumePath := filepath.Join(dir, "list_failed.txt")

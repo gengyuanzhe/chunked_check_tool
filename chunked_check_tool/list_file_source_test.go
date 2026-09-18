@@ -153,7 +153,7 @@ func TestParseListFileLineSuccessFields(t *testing.T) {
 func TestListFileSourceRunEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
-	out, err := NewOutput(cfg, "mybucket", false)
+	out, err := NewOutput(cfg, "mybucket", FileInputNone)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestListFileSourceRunEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	src := newListFileSource(filePath, "mybucket", out, stats)
+	src := newFileSource[VerifyTask](filePath, "mybucket", out, stats, parseListFileLine)
 	objCh := make(chan VerifyTask, 16)
 	go func() {
 		if err := src.Run(context.Background(), objCh); err != nil {

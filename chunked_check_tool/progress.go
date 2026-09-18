@@ -36,10 +36,9 @@ type QueueSnapshot struct {
 
 	// Backup-mode channels (-backup-file). ObjCh above carries the
 	// source→worker task channel in that mode.
-	BackupOk           int // → backup_ok.txt
-	BackupFailed       int // → backup_failed.txt
-	Mismatch           int // → mismatch.txt
-	BackupSkippedClean int // → backup_skipped_clean.txt
+	BackupOk     int // → backup_ok.txt
+	BackupFailed int // → backup_failed.txt
+	Mismatch     int // → mismatch.txt
 }
 
 func NewProgressPrinter(w io.Writer, mode RunMode) *ProgressPrinter {
@@ -54,10 +53,10 @@ func (p *ProgressPrinter) SetQueueSnapshotProvider(fn func() QueueSnapshot) {
 
 // MaybePrint reads a global stats snapshot and prints one progress line.
 // The field set is mode-specific: bucket modes print the list/check
-// metrics, -list-file prints input consumption (read) plus the multipart
-// outcomes it can produce, -backup-file prints input consumption plus the
-// relay outcomes. label is "listed"/"checked"/"backed"; count is the
-// worker's local accumulated value since the last print. The snapshot
+// metrics, -list-file/-check-file print input consumption (read) plus the
+// check outcomes they can produce, -backup-file prints input consumption
+// plus the relay outcomes. label is "listed"/"checked"/"backed"; count is
+// the worker's local accumulated value since the last print. The snapshot
 // fields are read atomically here (once per threshold crossing), never
 // per-object.
 func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
@@ -71,12 +70,20 @@ func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
 			snap.ReadLines,
 			snap.OkMp, snap.CorruptedMp, snap.ListFailed, snap.MpCheckFailed,
 			snap.GetCalls, snap.GetAvgLatencyMs, label, count)
+	case ModeCheckFile:
+		fmt.Fprintf(p.w,
+			"[progress] read=%d ok_obj=%d corrupt_obj=%d ok_mp=%d corrupt_mp=%d check_failed=%d mp_check_failed=%d get_calls=%d get_avg_ms=%.2f (%s=%d)",
+			snap.ReadLines,
+			snap.OkObjects, snap.CorruptedObjects,
+			snap.OkMp, snap.CorruptedMp,
+			snap.CheckFailed, snap.MpCheckFailed,
+			snap.GetCalls, snap.GetAvgLatencyMs, label, count)
 	case ModeBackup:
 		fmt.Fprintf(p.w,
-			"[progress] read=%d list_failed=%d backup_ok=%d backup_failed=%d backup_mismatch=%d backup_skipped_clean=%d get_calls=%d get_avg_ms=%.2f (%s=%d)",
+			"[progress] read=%d list_failed=%d backup_ok=%d backup_failed=%d backup_mismatch=%d get_calls=%d get_avg_ms=%.2f (%s=%d)",
 			snap.ReadLines,
 			snap.ListFailed, snap.BackupOk, snap.BackupFailed,
-			snap.BackupMismatch, snap.BackupSkippedClean,
+			snap.BackupMismatch,
 			snap.GetCalls, snap.GetAvgLatencyMs, label, count)
 	default:
 		fmt.Fprintf(p.w,
@@ -97,9 +104,12 @@ func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
 		case ModeListFile:
 			fmt.Fprintf(p.w, " q=obj:%d cor_mp:%d ok_mp:%d mcf:%d lf:%d",
 				q.ObjCh, q.CorruptedMp, q.OkMp, q.MpCheckFailed, q.ListFailed)
+		case ModeCheckFile:
+			fmt.Fprintf(p.w, " q=obj:%d cor_obj:%d ok_o:%d ok_mp:%d cor_mp:%d cf:%d mcf:%d lf:%d",
+				q.ObjCh, q.CorruptedObjects, q.OkObjects, q.OkMp, q.CorruptedMp, q.CheckFailed, q.MpCheckFailed, q.ListFailed)
 		case ModeBackup:
-			fmt.Fprintf(p.w, " q=obj:%d lf:%d bok:%d bfail:%d mm:%d bsc:%d",
-				q.ObjCh, q.ListFailed, q.BackupOk, q.BackupFailed, q.Mismatch, q.BackupSkippedClean)
+			fmt.Fprintf(p.w, " q=obj:%d lf:%d bok:%d bfail:%d mm:%d",
+				q.ObjCh, q.ListFailed, q.BackupOk, q.BackupFailed, q.Mismatch)
 		default:
 			fmt.Fprintf(p.w, " q=pfx:%d obj:%d cor_obj:%d ok_o:%d ok_mp:%d cor_mp:%d lf:%d cf:%d mcf:%d",
 				q.Prefix, q.ObjCh, q.CorruptedObjects, q.OkObjects, q.OkMp, q.CorruptedMp, q.ListFailed, q.CheckFailed, q.MpCheckFailed)

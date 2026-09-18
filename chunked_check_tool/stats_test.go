@@ -180,9 +180,8 @@ func TestStatsBackupCounters(t *testing.T) {
 	s.IncrBackupOk()
 	s.IncrBackupFailed()
 	s.IncrBackupMismatch()
-	s.IncrBackupSkippedClean()
 	snap := s.Snapshot()
-	if snap.BackupOk != 2 || snap.BackupFailed != 1 || snap.BackupMismatch != 1 || snap.BackupSkippedClean != 1 {
+	if snap.BackupOk != 2 || snap.BackupFailed != 1 || snap.BackupMismatch != 1 {
 		t.Errorf("backup counters = %+v", snap)
 	}
 }
@@ -195,7 +194,6 @@ func TestStatsPrintSummaryBackupMode(t *testing.T) {
 	s.IncrBackupOk()
 	s.IncrBackupFailed()
 	s.IncrBackupMismatch()
-	s.IncrBackupSkippedClean()
 	s.AddGetCall(5 * time.Millisecond)
 	s.SetTotalDuration(3 * time.Second)
 	var buf strings.Builder
@@ -204,11 +202,10 @@ func TestStatsPrintSummaryBackupMode(t *testing.T) {
 	if !strings.Contains(out, "read: 5 total_sec: 3.00") {
 		t.Errorf("backup summary missing read line\nfull:\n%s", out)
 	}
-	// One new line, all four counters on it.
-	if !strings.Contains(out, "backup_ok: 1 backup_failed: 1 backup_mismatch: 1 backup_skipped_clean: 1") {
+	if !strings.Contains(out, "backup_ok: 1 backup_failed: 1 backup_mismatch: 1") {
 		t.Errorf("backup summary line missing\nfull:\n%s", out)
 	}
-	// get_calls stays (multipart verify uses RangeGetAt).
+	// get_calls stays (HEAD + relay downloads go through the S3 client).
 	if !strings.Contains(out, "get_calls: 1") {
 		t.Errorf("backup summary missing get_calls\nfull:\n%s", out)
 	}

@@ -91,6 +91,18 @@ func (q *Queue) Close() {
 	q.mu.Unlock()
 }
 
+// Drain returns all queued items and empties the queue. Call only after all
+// producers and consumers have stopped (list workers exited) — it does not
+// coordinate with concurrent Push/Pop beyond the internal mutex. Used by the
+// graceful-shutdown path to record never-started prefixes into list_failed.
+func (q *Queue) Drain() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	items := q.items
+	q.items = nil
+	return items
+}
+
 func (q *Queue) Len() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()

@@ -10,10 +10,10 @@ package main
 //   - IsMultipart=true, Offsets=[...] → probe each offset (offset-etag,
 //     fixed-segment, or list-file sources)
 //
-// ETag/Size may be empty/zero for list-file-sourced tasks; HeadFirst signals
-// the checker to HEAD the object before probing to fill them in (mirroring
-// backup mode's HEAD-in-Handle pattern so the two modes share HEAD→probe via
-// runProbes; only post-probe routing differs).
+// ETag/Size may be empty/zero for file-input tasks (-list-file /
+// -check-file); HeadFirst signals the checker to HEAD the object before
+// probing to fill them in and to re-validate the object type against the
+// HEAD ETag (see Checker.Handle).
 type VerifyTask struct {
 	Key         string
 	OwnerID     string
@@ -22,9 +22,10 @@ type VerifyTask struct {
 	IsMultipart bool
 	Offsets     []int64
 	// HeadFirst signals the checker to HEAD the object before probing. Set
-	// by the list-file source (its input format omits ETag/Size); left false
-	// by S3 LIST (which already has both). Backup mode HEADs in its own
-	// Handle, so it does not set HeadFirst.
+	// by the file-input sources (-list-file / -check-file: their input
+	// formats omit ETag/Size); left false by S3 LIST (which already has
+	// both). Backup mode HEADs in its own Handle, so it does not set
+	// HeadFirst.
 	HeadFirst bool
 }
 

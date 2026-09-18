@@ -93,41 +93,65 @@ func isNormalETag(etag string) bool {
 // outputs based on RangeGet probes (head/boundary/tail or whole-object
 // fast-path) per buildProbes.
 type Checker struct {
+	// ctx bounds every S3 call the checker makes (HEAD probes, RangeGets).
+	// It is the hard context of the two-stage shutdown: cancelled only on a
+	// second signal, so a graceful drain (first signal) finishes normally,
+	// while a hard abort fails in-flight probes fast — the error path then
+	// records the task in check_failed/mp_check_failed, which is exactly the
+	// -check-file retry input.
+	ctx    context.Context
 	worker S3API
 	out    *Output
 	stats  *Stats
 	cfg    *Config
 }
 
-func NewChecker(worker S3API, out *Output, stats *Stats, cfg *Config) *Checker {
-	return &Checker{worker: worker, out: out, stats: stats, cfg: cfg}
+func NewChecker(ctx context.Context, worker S3API, out *Output, stats *Stats, cfg *Config) *Checker {
+	return &Checker{ctx: ctx, worker: worker, out: out, stats: stats, cfg: cfg}
 }
 
 // Handle routes task to verify. The size==0 normal-object shortcut stays
 // here (RangeGet on an empty body returns 416 → would misclassify as
 // check_failed). Listed-counter bumps (list_obj/list_mp) are NOT done here —
-// the S3 lister bumps them in check mode before pushing the task. List-file
-// source does not bump them (no S3 LIST); its summary reports read
-// instead of list_all.
+// the S3 lister bumps them in check mode before pushing the task. File-input
+// modes (-list-file / -check-file) do not bump them either (no S3 LIST);
+// their summary reports read instead of list_all.
 //
-// HeadFirst (set by the list-file source) HEADs the object to fill ETag/Size
-// before probing — the list-file input format omits them, and Size is needed
-// by buildProbesStatic to compute the tail probe (@Size-128). Mirrors backup
-// mode's HEAD-in-Handle pattern so the two modes share HEAD→probe via runProbes;
-// only post-probe routing differs. HEAD failure routes to mp_check_failed
-// (list-file tasks are always multipart) — the analog of backup mode's
-// backup_failed stage=head.
+// HeadFirst (set by the file-input sources) HEADs the object to fill ETag/Size
+// before probing — file input lines omit them, and Size is needed by
+// buildProbesStatic to compute the tail probe (@Size-128). The HEAD ETag is
+// also the authoritative object type: the line describes the object as it
+// was during a previous run, and it may have been overwritten since.
+//   - HEAD failure routes by the LINE's declared type (all we have):
+//     regular → check_failed, multipart → mp_check_failed (offsets preserved
+//     for the -check-file retry).
+//   - drift to regular (line multipart, HEAD normal ETag): drop the stale
+//     offsets and probe head+tail as a regular object.
+//   - drift to multipart (line regular, HEAD multipart ETag): no offsets
+//     available → verify() routes to mp.txt unverified (never claim clean).
 func (c *Checker) Handle(task VerifyTask) {
 	if task.HeadFirst {
-		etag, size, err := c.worker.HeadObject(context.Background(), task.Key)
+		etag, size, err := c.worker.HeadObject(c.ctx, task.Key)
 		if err != nil {
-			c.out.WriteMpCheckFailed(task.Key, task.Offsets)
-			c.out.WriteMpCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
-			c.stats.IncrMpCheckFailed()
+			if task.IsMultipart {
+				c.out.WriteMpCheckFailed(task.Key, task.Offsets)
+				c.out.WriteMpCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
+				c.stats.IncrMpCheckFailed()
+			} else {
+				c.out.WriteCheckFailed(task.Key)
+				c.out.WriteCheckFailedLog(task.Key, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
+				c.stats.IncrCheckFailed()
+			}
 			return
 		}
 		task.ETag = etag
 		task.Size = size
+		if headIsMultipart := !isNormalETag(etag); headIsMultipart != task.IsMultipart {
+			task.IsMultipart = headIsMultipart
+			if !headIsMultipart {
+				task.Offsets = nil
+			}
+		}
 	}
 	if !task.IsMultipart && task.Size == 0 {
 		c.stats.IncrOkObjects()
@@ -150,7 +174,7 @@ func (c *Checker) verify(task VerifyTask) {
 		c.out.WriteMultipartAll(task.OwnerID, task.Key)
 		return
 	}
-	result, err := runProbes(c.worker, task, c.cfg.WholeObjectProbeThreshold)
+	result, err := runProbes(c.ctx, c.worker, task, c.cfg.WholeObjectProbeThreshold)
 	switch result {
 	case probeCorrupted:
 		if task.IsMultipart {
@@ -197,7 +221,7 @@ const (
 	probeCorrupted
 	// probeFailed: a RangeGet returned an error before any probe matched.
 	// err is the RangeGet error; the caller routes to check_failed /
-	// mp_check_failed / backup_failed(stage=verify).
+	// mp_check_failed.
 	probeFailed
 )
 
@@ -207,15 +231,16 @@ const (
 // further probes run — matches the early-exit behavior of the old per-probe
 // loop). Any probe matching chunkSigRe OR trailerRe → probeCorrupted.
 //
-// Shared between list-check / -list-file (checker.go verify) and -backup-file
-// (backup.go verifyCorrupt) so the three modes detect corruption identically:
-// same probe positions (buildProbesStatic), same regexes (chunkSigRe ||
-// trailerRe), same early-exit on first settled result. threshold is
+// Used by list-check and the file-input check modes (-list-file /
+// -check-file), so all of them detect corruption identically: same probe
+// positions (buildProbesStatic), same regexes (chunkSigRe || trailerRe), same
+// early-exit on first settled result. Backup mode no longer probes — it
+// relays whatever the check stage flagged. threshold is
 // WholeObjectProbeThreshold from cfg (caller passes it in so runProbes has no
 // cfg dependency).
-func runProbes(worker S3API, task VerifyTask, threshold int) (probeResult, error) {
+func runProbes(ctx context.Context, worker S3API, task VerifyTask, threshold int) (probeResult, error) {
 	for _, p := range buildProbesStatic(task, threshold) {
-		body, err := worker.RangeGetAt(context.Background(), task.Key, p.start, p.length)
+		body, err := worker.RangeGetAt(ctx, task.Key, p.start, p.length)
 		if err != nil {
 			return probeFailed, err
 		}
@@ -254,10 +279,9 @@ func (c *Checker) buildProbes(task VerifyTask) []probeSpec {
 	return buildProbesStatic(task, c.cfg.WholeObjectProbeThreshold)
 }
 
-// buildProbesStatic is the package-level probe planner shared by list-check /
-// -list-file (checker.go) and -backup-file (backup.go) so both modes run the
-// same probe matrix. threshold is WholeObjectProbeThreshold (0 disables the
-// small-object fast-path).
+// buildProbesStatic is the package-level probe planner shared by list-check
+// and the file-input check modes (-list-file / -check-file). threshold is
+// WholeObjectProbeThreshold (0 disables the small-object fast-path).
 func buildProbesStatic(task VerifyTask, threshold int) []probeSpec {
 	thr := int64(threshold)
 	if task.Size > 0 && thr > 0 && task.Size <= thr {

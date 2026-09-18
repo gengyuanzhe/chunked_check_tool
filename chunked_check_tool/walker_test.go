@@ -34,7 +34,7 @@ func TestWalkerHappyPath(t *testing.T) {
 
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, ListType: 3, ListConcurrency: 4, CheckConcurrency: 1, IsCheck: true}
-	out, err := NewOutput(cfg, "test-bkt", false)
+	out, err := NewOutput(cfg, "test-bkt", FileInputNone)
 	if err != nil {
 		t.Fatalf("NewOutput: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestWalkerHappyPath(t *testing.T) {
 	stats := NewStats()
 
 	objCh := make(chan VerifyTask, 16)
-	runRecursiveWalk(context.Background(), fake, "root/", objCh, out, stats, cfg, nil)
+	runRecursiveWalk(context.Background(), context.Background(), fake, "root/", objCh, out, stats, cfg, nil)
 	close(objCh)
 
 	got := []string{}
@@ -96,7 +96,7 @@ func TestWalkerConcurrencyCap(t *testing.T) {
 
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, ListType: 3, ListConcurrency: cap_, CheckConcurrency: 1, IsCheck: true}
-	out, err := NewOutput(cfg, "test-bkt", false)
+	out, err := NewOutput(cfg, "test-bkt", FileInputNone)
 	if err != nil {
 		t.Fatalf("NewOutput: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestWalkerConcurrencyCap(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runRecursiveWalk(context.Background(), fake, "root/", objCh, out, stats, cfg, nil)
+		runRecursiveWalk(context.Background(), context.Background(), fake, "root/", objCh, out, stats, cfg, nil)
 		close(done)
 	}()
 
@@ -140,14 +140,14 @@ func TestWalkerSubtreeFailureIsolation(t *testing.T) {
 
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, ListType: 3, ListConcurrency: 2, CheckConcurrency: 1, IsCheck: true}
-	out, err := NewOutput(cfg, "test-bkt", false)
+	out, err := NewOutput(cfg, "test-bkt", FileInputNone)
 	if err != nil {
 		t.Fatalf("NewOutput: %v", err)
 	}
 	defer out.Close()
 	stats := NewStats()
 	objCh := make(chan VerifyTask, 8)
-	runRecursiveWalk(context.Background(), fake, "root/", objCh, out, stats, cfg, nil)
+	runRecursiveWalk(context.Background(), context.Background(), fake, "root/", objCh, out, stats, cfg, nil)
 	close(objCh)
 
 	got := []string{}

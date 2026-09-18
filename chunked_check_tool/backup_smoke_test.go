@@ -103,7 +103,7 @@ func TestBackupRelayRealS3(t *testing.T) {
 
 	// Source ETags for the post-run comparison.
 	srcETags := map[string]string{}
-	for _, k := range []string{"reg-corrupt", "reg-clean", "mp-corrupt"} {
+	for _, k := range []string{"reg-corrupt", "reg-clean", "mp-corrupt", "mp-clean"} {
 		info, err := client.StatObject(ctx, srcBkt, k, minio.StatObjectOptions{})
 		if err != nil {
 			t.Fatalf("stat src %s: %v", k, err)
@@ -111,7 +111,8 @@ func TestBackupRelayRealS3(t *testing.T) {
 		srcETags[k] = info.ETag
 	}
 
-	// Backup list: 3 relays, 1 clean skip, 1 type mismatch, 1 malformed.
+	// Backup list: 4 relays, 1 type mismatch, 1 malformed. Backup does not
+	// probe — reg-clean and mp-clean are relayed like the corrupt ones.
 	dir := t.TempDir()
 	backupPath := filepath.Join(dir, "list.txt")
 	list := fmt.Sprintf("%s|reg-corrupt\n"+
@@ -139,14 +140,14 @@ func TestBackupRelayRealS3(t *testing.T) {
 		ProgressInterval: 100,
 	}
 	var buf bytes.Buffer
-	if err := run(ctx, cfg, srcBkt, "", "", "", backupPath, "", &buf); err != nil {
+	if err := run(ctx, ctx, cfg, srcBkt, "", "", "", "", backupPath, "", &buf); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 
 	// Local result files (order-insensitive: check workers finish
 	// concurrently). dumpResults prints everything when anything is off.
 	dumpResults := func() {
-		for _, name := range []string{"backup_ok.txt", "backup_failed.txt", "backup_failed.log", "backup_skipped_clean.txt", "mismatch.txt", "list_failed.txt"} {
+		for _, name := range []string{"backup_ok.txt", "backup_failed.txt", "backup_failed.log", "mismatch.txt", "list_failed.txt"} {
 			if data, err := os.ReadFile(filepath.Join(dir, name)); err == nil && len(data) > 0 {
 				t.Logf("--- %s ---\n%s", name, data)
 			}
@@ -171,8 +172,8 @@ func TestBackupRelayRealS3(t *testing.T) {
 		}
 	}
 	assertLines("backup_ok.txt", srcBkt+"|reg-corrupt", srcBkt+"|reg-clean",
-		fmt.Sprintf("%s|mp-corrupt|2|0|%d", srcBkt, partSize))
-	assertLines("backup_skipped_clean.txt", fmt.Sprintf("%s|mp-clean|2|0|%d", srcBkt, partSize))
+		fmt.Sprintf("%s|mp-corrupt|2|0|%d", srcBkt, partSize),
+		fmt.Sprintf("%s|mp-clean|2|0|%d", srcBkt, partSize))
 	assertLines("mismatch.txt", srcBkt+"|mp-clean")
 	assertLines("list_failed.txt", srcBkt+"|bad|1|100")
 	if data, err := os.ReadFile(filepath.Join(dir, "backup_failed.txt")); err == nil && len(data) > 0 {
@@ -180,13 +181,13 @@ func TestBackupRelayRealS3(t *testing.T) {
 		t.Errorf("backup_failed.txt not empty: %s", data)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "backup_ok: 3 backup_failed: 0 backup_mismatch: 1 backup_skipped_clean: 1") {
+	if !strings.Contains(out, "backup_ok: 4 backup_failed: 0 backup_mismatch: 1") {
 		dumpResults()
 		t.Errorf("summary line wrong")
 	}
 
 	// Destination objects: ETag equal to source and bytes identical.
-	for _, k := range []string{"reg-corrupt", "reg-clean", "mp-corrupt"} {
+	for _, k := range []string{"reg-corrupt", "reg-clean", "mp-corrupt", "mp-clean"} {
 		info, err := client.StatObject(ctx, dstBkt, k, minio.StatObjectOptions{})
 		if err != nil {
 			t.Fatalf("stat dst %s: %v", k, err)
@@ -215,11 +216,6 @@ func TestBackupRelayRealS3(t *testing.T) {
 		if !bytes.Equal(dst, want) {
 			t.Errorf("relayed %s differs from source (%d vs %d bytes)", k, len(dst), len(want))
 		}
-	}
-
-	// mp-clean must NOT be in the destination.
-	if _, err := client.StatObject(ctx, dstBkt, "mp-clean", minio.StatObjectOptions{}); err == nil {
-		t.Errorf("mp-clean must not be relayed (clean multipart)")
 	}
 
 	// The list archive landed under .backup_lists/.

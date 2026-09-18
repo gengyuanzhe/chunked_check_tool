@@ -154,15 +154,13 @@ func TestProgressBackupMode(t *testing.T) {
 	s.IncrBackupOk()
 	s.IncrBackupFailed()
 	s.IncrBackupMismatch()
-	s.IncrBackupSkippedClean()
-	s.IncrBackupSkippedClean()
 	s.IncrListFailed()
 	s.AddGetCall(5 * time.Millisecond)
 	var buf bytes.Buffer
 	pp := NewProgressPrinter(&buf, ModeBackup)
 	pp.SetQueueSnapshotProvider(func() QueueSnapshot {
 		return QueueSnapshot{
-			ObjCh: 11, ListFailed: 1, BackupOk: 2, BackupFailed: 3, Mismatch: 4, BackupSkippedClean: 5,
+			ObjCh: 11, ListFailed: 1, BackupOk: 2, BackupFailed: 3, Mismatch: 4,
 			// bucket-mode-only fields: must NOT be printed in this mode.
 			Prefix: 7, CorruptedObjects: 1, OkMp: 2, CorruptedMp: 6, CheckFailed: 8, OkObjects: 9,
 		}
@@ -175,7 +173,6 @@ func TestProgressBackupMode(t *testing.T) {
 		`backup_ok=3`,
 		`backup_failed=1`,
 		`backup_mismatch=1`,
-		`backup_skipped_clean=2`,
 		`get_calls=1`,
 		`(backed=50)`,
 		`q=obj:11`,
@@ -183,7 +180,6 @@ func TestProgressBackupMode(t *testing.T) {
 		`bok:2`,
 		`bfail:3`,
 		`mm:4`,
-		`bsc:5`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("backup progress line missing %q\nfull line:\n%s", want, out)
@@ -193,6 +189,64 @@ func TestProgressBackupMode(t *testing.T) {
 	for _, notWant := range []string{"list_all=", "ok_obj=", "corrupt_obj=", "ok_mp=", "corrupt_mp=", "mp_check_failed=", "list_calls=", "pfx:", "cor_obj:", "ok_o:", "cor_mp:", "mcf:", "cf:"} {
 		if strings.Contains(out, notWant) {
 			t.Errorf("backup progress line should not contain %q\nfull line:\n%s", notWant, out)
+		}
+	}
+}
+
+// TestProgressCheckFileMode — -check-file prints input consumption plus the
+// full check outcome set (it re-checks regular AND multipart objects), and
+// the queue snapshot carries both regular and multipart channels. S3-listing
+// fields are noise (no LIST happens).
+func TestProgressCheckFileMode(t *testing.T) {
+	s := NewStats()
+	for i := 0; i < 2000; i++ {
+		s.IncrReadLine()
+	}
+	s.IncrOkObjects()
+	s.IncrCorruptedObjects()
+	s.IncrCorruptedObjects()
+	s.IncrOkMp()
+	s.IncrCorruptedMp()
+	s.IncrCheckFailed()
+	s.IncrMpCheckFailed()
+	s.AddGetCall(5 * time.Millisecond)
+	var buf bytes.Buffer
+	pp := NewProgressPrinter(&buf, ModeCheckFile)
+	pp.SetQueueSnapshotProvider(func() QueueSnapshot {
+		return QueueSnapshot{
+			ObjCh: 12, CorruptedObjects: 1, OkObjects: 2, OkMp: 3, CorruptedMp: 4, CheckFailed: 5, MpCheckFailed: 6, ListFailed: 7,
+			// bucket-mode-only fields: must NOT be printed in this mode.
+			Prefix: 7, BackupOk: 1, BackupFailed: 3, Mismatch: 4,
+		}
+	})
+	pp.MaybePrint(s, "checked", 100)
+	out := buf.String()
+	for _, want := range []string{
+		`read=2000`,
+		`ok_obj=1`,
+		`corrupt_obj=2`,
+		`ok_mp=1`,
+		`corrupt_mp=1`,
+		`check_failed=1`,
+		`mp_check_failed=1`,
+		`get_calls=1`,
+		`(checked=100)`,
+		`q=obj:12`,
+		`cor_obj:1`,
+		`ok_o:2`,
+		`ok_mp:3`,
+		`cor_mp:4`,
+		`cf:5`,
+		`mcf:6`,
+		`lf:7`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("check-file progress line missing %q\nfull line:\n%s", want, out)
+		}
+	}
+	for _, notWant := range []string{"list_all=", "list_obj=", "list_calls=", "pfx:", "bok:", "bfail:", "mm:"} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("check-file progress line should not contain %q\nfull line:\n%s", notWant, out)
 		}
 	}
 }

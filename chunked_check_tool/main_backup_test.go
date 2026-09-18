@@ -219,9 +219,10 @@ func decodeAwsChunkedBytes(b []byte) []byte {
 var _ = bytes.MinRead // keep bytes import if unused elsewhere
 
 // TestRunBackupFileEndToEnd drives the full -backup-file relay pipeline
-// against a fake S3 server: list-file upload, HEAD typing, multipart
-// verification, per-offset part re-upload, ETag verification, and the
-// local result files + summary line.
+// against a fake S3 server: list-file upload, HEAD typing, per-offset part
+// re-upload, ETag verification, and the local result files + summary line.
+// No corruption probing — the clean multipart is relayed like the corrupt
+// one.
 func TestRunBackupFileEndToEnd(t *testing.T) {
 	f := newFakeBackupS3Server(t)
 
@@ -267,12 +268,12 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", &buf); err != nil {
+	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", "", "", backupPath, "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "backup_ok: 2 backup_failed: 0 backup_mismatch: 1 backup_skipped_clean: 1") {
+	if !strings.Contains(out, "backup_ok: 3 backup_failed: 0 backup_mismatch: 1") {
 		t.Errorf("stdout missing backup summary line\nfull:\n%s", out)
 	}
 	// Input consumption replaces the bucket modes' list_all line: 5 lines in
@@ -289,8 +290,7 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 	// timestamp suffix (default-on output_dir_timestamp), which runBackup
 	// created.
 	assertFileContent(t, cfg.OutputDir, "backup_ok.txt",
-		"srcbucket|reg1\n"+fmt.Sprintf("srcbucket|mp1|2|0|%d\n", len(corruptBody)))
-	assertFileContent(t, cfg.OutputDir, "backup_skipped_clean.txt", "srcbucket|mpclean|1|0\n")
+		"srcbucket|reg1\n"+fmt.Sprintf("srcbucket|mp1|2|0|%d\n", len(corruptBody))+"srcbucket|mpclean|1|0\n")
 	assertFileContent(t, cfg.OutputDir, "mismatch.txt", "srcbucket|mm1\n")
 	assertFileContent(t, cfg.OutputDir, "parse_failed.txt", "srcbucket|bad|1|100\n")
 
@@ -310,8 +310,8 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 	if got := f.relayed["mp1"]; !bytes.Equal(got, mpContent) {
 		t.Errorf("relayed mp1 = %q, want %q", got, mpContent)
 	}
-	if _, ok := f.relayed["mpclean"]; ok {
-		t.Errorf("mpclean must not be relayed (clean multipart)")
+	if got := f.relayed["mpclean"]; !bytes.Equal(got, mpCleanContent) {
+		t.Errorf("relayed mpclean = %q, want %q (backup never probes — clean multipart is relayed too)", got, mpCleanContent)
 	}
 	if len(f.aborted) != 0 {
 		t.Errorf("aborted = %v, want none on the happy path", f.aborted)
@@ -349,7 +349,7 @@ func TestRunBackupFileETagMismatchEndToEnd(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", &buf); err != nil {
+	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", "", "", backupPath, "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 
@@ -390,7 +390,7 @@ func TestRunBackupListUploadFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", &buf)
+	err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", "", "", backupPath, "", &buf)
 	if err == nil || !strings.Contains(err.Error(), "upload backup list") {
 		t.Fatalf("run err = %v, want upload backup list failure", err)
 	}
@@ -424,7 +424,7 @@ func TestRunBackupProgressLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", &buf); err != nil {
+	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", "", "", backupPath, "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 	out := buf.String()

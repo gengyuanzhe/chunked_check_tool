@@ -45,8 +45,128 @@ func TestRunEndToEnd_smoke(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var buf bytes.Buffer
-	if err := run(ctx, cfg, os.Getenv("S3_BUCKET"), os.Getenv("S3_PREFIX"), "", "", "", "", &buf); err != nil {
+	if err := run(ctx, ctx, cfg, os.Getenv("S3_BUCKET"), os.Getenv("S3_PREFIX"), "", "", "", "", "", &buf); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestRunCheckFileDispatch exercises the -check-file dispatch branch in
+// run(): a single malformed line (bucket mismatch) is rejected before any
+// S3 GET, mirroring TestRunListFileDispatch for the new mode.
+func TestRunCheckFileDispatch(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "cfg.yaml")
+	cfgContent := "endpoints:\n  - 127.0.0.1:1\n" +
+		"scheme: http\n" +
+		"ak: test\n" +
+		"sk: test\n" +
+		"list_type: 2\n" +
+		"list_api_version: 2\n" +
+		"list_concurrency: 2\n" +
+		"check_concurrency: 2\n" +
+		"output_dir: " + dir + "\n" +
+		"is_check: true\n" +
+		"is_success_log: false\n" +
+		"progress_interval: 1000\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checkPath := filepath.Join(dir, "check.txt")
+	if err := os.WriteFile(checkPath, []byte("wrongbucket|k\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	err = run(context.Background(), context.Background(), cfg, "mybucket", "", "", "", checkPath, "", "", &buf)
+	if err != nil {
+		t.Fatalf("run returned err: %v (want nil)", err)
+	}
+
+	out := buf.String()
+	for _, want := range []string{"parse_failed: 1", "read: 1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout = %q, want substring %q", out, want)
+		}
+	}
+	if strings.Contains(out, "list_all:") {
+		t.Errorf("stdout = %q should not contain list_all (all-zero noise in check-file mode)", out)
+	}
+	parseFailedPath := filepath.Join(cfg.OutputDir, "parse_failed.txt")
+	content, err := os.ReadFile(parseFailedPath)
+	if err != nil {
+		t.Fatalf("read parse_failed.txt: %v", err)
+	}
+	if !strings.Contains(string(content), "wrongbucket|k") {
+		t.Errorf("parse_failed.txt = %q, want substring %q", string(content), "wrongbucket|k")
+	}
+}
+
+// TestRunCheckFileEndToEnd — -check-file against the fake S3 server: mixed
+// regular/multipart input (the failure-file shapes of a prior run), with
+// multipart_check_mode=0 proving the mode's irrelevance for file inputs
+// (offsets come from the lines). Covers both type-drift directions: line
+// multipart + HEAD regular (probed as regular → ok_obj) and line regular +
+// HEAD multipart (no offsets → mp.txt unverified).
+func TestRunCheckFileEndToEnd(t *testing.T) {
+	f := newFakeBackupS3Server(t)
+	f.objects["regcorrupt"] = fakeBackupObject{ETag: md5Hex([]byte(corruptBody)), Content: []byte(corruptBody)}
+	f.objects["mpcorrupt"] = fakeBackupObject{ETag: "0123456789abcdef0123456789abcdef-1", Content: []byte(corruptBody)}
+	f.objects["mpclean"] = fakeBackupObject{ETag: "0123456789abcdef0123456789abcdef-1", Content: []byte("clean multipart content")}
+	f.objects["driftreg"] = fakeBackupObject{ETag: md5Hex([]byte("now a regular object")), Content: []byte("now a regular object")}
+	f.objects["driftmp"] = fakeBackupObject{ETag: "0123456789abcdef0123456789abcdef-2", Content: []byte("now a multipart object")}
+	host := strings.TrimPrefix(f.srv.URL, "http://")
+	dir := t.TempDir()
+	cfg := &Config{
+		Endpoints:             []string{host},
+		Scheme:                "http",
+		AK:                    "t",
+		SK:                    "t",
+		OutputDir:             dir,
+		IsCheck:               true,
+		IsSuccessLog:          true,
+		IsMultipartSuccessLog: true,
+		MultipartCheckMode:    MultipartCheckModeOff,
+		ProgressInterval:      1000,
+		CheckConcurrency:      2,
+		ListConcurrency:       2,
+		ListAPIVersion:        2,
+	}
+	checkPath := filepath.Join(dir, "check.txt")
+	content := "srcbucket|regcorrupt\n" +
+		"srcbucket|mpcorrupt|1|0\n" +
+		"srcbucket|mpclean|1|0\n" +
+		"srcbucket|driftreg|1|0\n" +
+		"srcbucket|driftmp\n" +
+		"srcbucket|bad|1|100\n"
+	if err := os.WriteFile(checkPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", "", checkPath, "", "", &buf); err != nil {
+		t.Fatalf("run returned err: %v", err)
+	}
+
+	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_objects.txt"), "srcbucket|regcorrupt\n")
+	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "srcbucket|mpcorrupt|1|0\n")
+	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "srcbucket|mpclean\n")
+	assertFileContent(t, dir, filepath.Join("_unknown", "ok_objects.txt"), "srcbucket|driftreg\n")
+	assertFileContent(t, dir, filepath.Join("_unknown", "mp.txt"), "srcbucket|driftmp\n")
+	assertFileContent(t, dir, "parse_failed.txt", "srcbucket|bad|1|100\n")
+
+	out := buf.String()
+	for _, want := range []string{
+		"read: 6",
+		"ok_obj: 1 corrupt_obj: 1 ok_mp: 1 corrupt_mp: 1 check_failed: 0 mp_check_failed: 0",
+		"parse_failed: 1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q\nfull:\n%s", want, out)
+		}
 	}
 }
 
@@ -96,7 +216,7 @@ func TestRunListFileDispatch(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err = run(context.Background(), cfg, "mybucket", "", "", listPath, "", "", &buf)
+	err = run(context.Background(), context.Background(), cfg, "mybucket", "", "", listPath, "", "", "", &buf)
 	if err != nil {
 		t.Fatalf("run returned err: %v (want nil — list-file mode returns nil on completion)", err)
 	}
@@ -158,7 +278,7 @@ func TestRunListFileMultipartResultsEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), cfg, "srcbucket", "", "", listPath, "", "", &buf); err != nil {
+	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", listPath, "", "", "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 
@@ -202,7 +322,7 @@ func TestRunListFileProgressLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), cfg, "srcbucket", "", "", listPath, "", "", &buf); err != nil {
+	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", listPath, "", "", "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 	out := buf.String()

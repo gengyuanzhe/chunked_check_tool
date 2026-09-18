@@ -21,7 +21,7 @@ func TestListerMode2BFSPrefixes(t *testing.T) {
 	}
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, ListType: 2, ListConcurrency: 2, CheckConcurrency: 2, IsCheck: true}
-	out, err := NewOutput(cfg, "test-bkt", false)
+	out, err := NewOutput(cfg, "test-bkt", FileInputNone)
 	if err != nil {
 		t.Fatalf("NewOutput: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestListerMode2BFSPrefixes(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.ListConcurrency; i++ {
 		wg.Add(1)
-		go lister.Run(context.Background(), &wg, objCh, i, fake, nil)
+		go lister.Run(context.Background(), context.Background(), &wg, objCh, i, fake, nil)
 	}
 	go func() {
 		wg.Wait()
@@ -81,7 +81,7 @@ func TestListerMode2CommonPrefixesOnlyPage(t *testing.T) {
 	}
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, ListType: 2, ListConcurrency: 1, CheckConcurrency: 1, IsCheck: true}
-	out, err := NewOutput(cfg, "test-bkt", false)
+	out, err := NewOutput(cfg, "test-bkt", FileInputNone)
 	if err != nil {
 		t.Fatalf("NewOutput: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestListerMode2CommonPrefixesOnlyPage(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go lister.Run(context.Background(), &wg, objCh, 0, fake, nil)
+	go lister.Run(context.Background(), context.Background(), &wg, objCh, 0, fake, nil)
 	go func() {
 		wg.Wait()
 		close(objCh)

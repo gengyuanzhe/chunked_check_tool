@@ -9,45 +9,50 @@ import (
 )
 
 // BackupChecker processes one BackupTask: HEAD the object, validate the
-// input line's type against the HEAD ETag, verify multipart corruption
-// (reusing the checker's chunk-signature probe), then relay the object
-// into the configured backup bucket (download → re-upload) and verify the
+// input line's type against the HEAD ETag, then relay the object into the
+// configured backup bucket (download → re-upload) and verify the
 // destination ETag against the source.
 //
-// The four result .txt files (backup_ok / backup_failed /
-// backup_skipped_clean / mismatch) all carry the task's raw input line
-// verbatim (bkt|key or bkt|key|partcnt|offsets...) — the outputs stay
-// shape-compatible with the input, so e.g. backup_failed.txt can be fed
-// straight back into -backup-file for a retry (it carries the offsets).
+// No corruption probing happens here: the input list is the output of a
+// check run (corrupted_objects.txt / corrupted_mp.txt, possibly unioned
+// across runs) — whether an object is corrupt was decided there, and this
+// mode's job is only to preserve the bytes.
+//
+// The three result .txt files (backup_ok / backup_failed / mismatch) all
+// carry the task's raw input line verbatim (bkt|key or
+// bkt|key|partcnt|offsets...) — the outputs stay shape-compatible with the
+// input, so backup_failed.txt can be fed straight back into -backup-file
+// for a retry (it carries the offsets), and mismatch.txt into -check-file
+// (the object changed since the check run — re-check its current state).
 // The .log files stay structured with the bare key.
 //
 // Routing:
 //   - HEAD fails                         → backup_failed (stage=head)
 //   - line type != HEAD type             → mismatch (raw line), no relay
-//   - regular line                       → relay directly (input list is a
-//     prior corrupted_objects.txt —
-//     already known corrupt, no re-probe)
-//   - multipart line, any offset matches
-//     the chunk signature                → relay
-//   - multipart line, GET error          → backup_failed (stage=verify)
-//   - multipart line, all offsets clean  → backup_skipped_clean, no relay
 //   - relay error                        → backup_failed (stage=upload)
 //   - dst ETag != src ETag               → backup_failed (stage=etag);
 //     the bad copy stays in the backup
 //     bucket as evidence
 type BackupChecker struct {
+	// ctx bounds every S3 call the relay makes. It is the hard context of
+	// the two-stage shutdown: cancelled only on a second signal, so a
+	// graceful drain (first signal) finishes in-flight relays, while a hard
+	// abort cancels them (multipart uploads are aborted, no partial object
+	// lingers) and the error path records the task in backup_failed — the
+	// file this mode's own retry consumes.
+	ctx    context.Context
 	worker S3API
 	out    *Output
 	stats  *Stats
 	cfg    *Config
 }
 
-func NewBackupChecker(worker S3API, out *Output, stats *Stats, cfg *Config) *BackupChecker {
-	return &BackupChecker{worker: worker, out: out, stats: stats, cfg: cfg}
+func NewBackupChecker(ctx context.Context, worker S3API, out *Output, stats *Stats, cfg *Config) *BackupChecker {
+	return &BackupChecker{ctx: ctx, worker: worker, out: out, stats: stats, cfg: cfg}
 }
 
 func (c *BackupChecker) Handle(task BackupTask) {
-	etag, size, err := c.worker.HeadObject(context.Background(), task.Key)
+	etag, size, err := c.worker.HeadObject(c.ctx, task.Key)
 	if err != nil {
 		c.fail(task, "head", err)
 		return
@@ -58,47 +63,7 @@ func (c *BackupChecker) Handle(task BackupTask) {
 		c.stats.IncrBackupMismatch()
 		return
 	}
-	if task.IsMultipart && !c.verifyCorrupt(task, size) {
-		return
-	}
 	c.backup(task, etag, size)
-}
-
-// verifyCorrupt runs the shared probe matrix (runProbes) and routes the
-// result. Returns true when the task is corrupt (relay should proceed); false
-// when the task is clean or the probe failed (relay should be skipped).
-//
-// Mirrors checker.go verify's probe logic — both modes call runProbes so
-// detection is identical: same probe positions (head/boundary/tail or
-// small-object whole-read), same regexes (chunkSigRe || trailerRe), same
-// early-exit. Before this refactor, backup only read 128 bytes per offset
-// (missing trailer at segment tail) and only matched chunkSigRe (missing
-// unsigned-trailer corruption entirely) — STREAMING-UNSIGNED-PAYLOAD-TRAILER
-// objects were silently misclassified as clean and skipped (not backed up).
-//
-// size is the HEAD object size, needed by buildProbesStatic to compute the
-// tail probe (@Size-128) and the small-object fast-path threshold. It is not
-// part of BackupTask because only the HEAD result is authoritative.
-func (c *BackupChecker) verifyCorrupt(task BackupTask, size int64) bool {
-	vtask := VerifyTask{
-		Key:         task.Key,
-		Size:        size,
-		IsMultipart: true, // verifyCorrupt is only called for multipart tasks
-		Offsets:     task.Offsets,
-	}
-	result, err := runProbes(c.worker, vtask, c.cfg.WholeObjectProbeThreshold)
-	switch result {
-	case probeCorrupted:
-		return true
-	case probeFailed:
-		c.fail(task, "verify", err)
-		return false
-	case probeClean:
-		c.out.WriteBackupSkippedClean(task.RawLine)
-		c.stats.IncrBackupSkippedClean()
-		return false
-	}
-	return false
 }
 
 // backup relays the object and verifies the destination ETag. The ETag
@@ -131,14 +96,14 @@ func (c *BackupChecker) backup(task BackupTask, srcETag string, size int64) {
 func (c *BackupChecker) relayRegular(key string, size int64) (string, error) {
 	var r io.Reader = strings.NewReader("")
 	if size > 0 {
-		rc, err := c.worker.DownloadRange(context.Background(), key, 0, size)
+		rc, err := c.worker.DownloadRange(c.ctx, key, 0, size)
 		if err != nil {
 			return "", err
 		}
 		defer rc.Close()
 		r = rc
 	}
-	return c.worker.PutObjectStream(context.Background(), c.cfg.BackupBucket, key, r, size)
+	return c.worker.PutObjectStream(c.ctx, c.cfg.BackupBucket, key, r, size)
 }
 
 // relayMultipart re-uploads the object as multipart parts split at the
@@ -147,9 +112,8 @@ func (c *BackupChecker) relayRegular(key string, size int64) (string, error) {
 // straight into the part upload — no per-part buffering). Any failure
 // aborts the in-progress upload so no partial object lingers.
 func (c *BackupChecker) relayMultipart(task BackupTask, size int64) (string, error) {
-	ctx := context.Background()
 	dst := c.cfg.BackupBucket
-	uploadID, err := c.worker.CreateMultipart(ctx, dst, task.Key)
+	uploadID, err := c.worker.CreateMultipart(c.ctx, dst, task.Key)
 	if err != nil {
 		return "", err
 	}
@@ -161,25 +125,25 @@ func (c *BackupChecker) relayMultipart(task BackupTask, size int64) (string, err
 		}
 		length := end - off
 		if length <= 0 {
-			c.worker.AbortMultipart(ctx, dst, task.Key, uploadID)
+			c.worker.AbortMultipart(c.ctx, dst, task.Key, uploadID)
 			return "", fmt.Errorf("part %d at offset %d has non-positive length %d (object size %d)", i+1, off, length, size)
 		}
-		rc, err := c.worker.DownloadRange(ctx, task.Key, off, length)
+		rc, err := c.worker.DownloadRange(c.ctx, task.Key, off, length)
 		if err != nil {
-			c.worker.AbortMultipart(ctx, dst, task.Key, uploadID)
+			c.worker.AbortMultipart(c.ctx, dst, task.Key, uploadID)
 			return "", err
 		}
-		partETag, err := c.worker.UploadPart(ctx, dst, task.Key, uploadID, i+1, rc, length)
+		partETag, err := c.worker.UploadPart(c.ctx, dst, task.Key, uploadID, i+1, rc, length)
 		rc.Close()
 		if err != nil {
-			c.worker.AbortMultipart(ctx, dst, task.Key, uploadID)
+			c.worker.AbortMultipart(c.ctx, dst, task.Key, uploadID)
 			return "", err
 		}
 		parts = append(parts, UploadedPart{PartNumber: i + 1, ETag: partETag})
 	}
-	dstETag, err := c.worker.CompleteMultipart(ctx, dst, task.Key, uploadID, parts)
+	dstETag, err := c.worker.CompleteMultipart(c.ctx, dst, task.Key, uploadID, parts)
 	if err != nil {
-		c.worker.AbortMultipart(ctx, dst, task.Key, uploadID)
+		c.worker.AbortMultipart(c.ctx, dst, task.Key, uploadID)
 		return "", err
 	}
 	return dstETag, nil

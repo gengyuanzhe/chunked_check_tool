@@ -19,7 +19,7 @@ func ownerSub(dir, ownerID, name string) string {
 func TestOutputPerOwnerRouting(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsSuccessLog: true}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	o.WriteCorrupted("owner-A", "obj/a1")
 	o.WriteCorrupted("owner-B", "obj/b1")
 	o.WriteSuccess("owner-A", "obj/a-ok")
@@ -57,7 +57,7 @@ func TestOutputPerOwnerRouting(t *testing.T) {
 func TestOutputMultipartAllKeyOnly(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	o.WriteMultipartAll("owner-A", "key/with|pipe")
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "mp.txt"))
@@ -71,7 +71,7 @@ func TestOutputMultipartAllKeyOnly(t *testing.T) {
 func TestOutputCorruptedMultipartPerOwner(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: 5 * 1024 * 1024}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	o.WriteCorruptedMultipart("owner-A", "mp/k1", nil)
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
@@ -88,7 +88,7 @@ func TestOutputCorruptedMultipartPerOwner(t *testing.T) {
 func TestOutputOffsetModeCorruptedMultipartCarriesOffsets(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, ResultLineFormat: "<key>@<bucket>"}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	o.WriteCorruptedMultipart("owner-A", "mp/k1", []int64{0, 5242880, 10485760})
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
@@ -104,7 +104,7 @@ func TestOutputOffsetModeCorruptedMultipartCarriesOffsets(t *testing.T) {
 func TestOutputSegmentModeCorruptedMultipartIgnoresOffsets(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: 5 * 1024 * 1024}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	o.WriteCorruptedMultipart("owner-A", "mp/k1", []int64{0, 5242880})
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
@@ -120,7 +120,7 @@ func TestOutputSegmentModeCorruptedMultipartIgnoresOffsets(t *testing.T) {
 func TestOutputOffsetModeMultipartAllFallback(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	o.WriteMultipartAll("owner-A", "mp/nosupport")
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "mp.txt"))
@@ -134,7 +134,7 @@ func TestOutputOffsetModeMultipartAllFallback(t *testing.T) {
 func TestOutputOffsetModeMpCheckFailedEnabled(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	o.WriteMpCheckFailed("mp/k1", []int64{0, 5242880})
 	o.Close()
 	data, _ := os.ReadFile(filepath.Join(dir, "mp_check_failed.txt"))
@@ -149,7 +149,7 @@ func TestOutputOffsetModeMpCheckFailedEnabled(t *testing.T) {
 func TestOutputListFileModeCorruptedMultipartCarriesOffsets(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOff}
-	o, _ := NewOutput(cfg, "test-bkt", true)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputListFile)
 	o.WriteCorruptedMultipart("owner-A", "mp/k1", []int64{0, 5242880})
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
@@ -163,7 +163,7 @@ func TestOutputListFileModeCorruptedMultipartCarriesOffsets(t *testing.T) {
 func TestOutputMultipartOkPerOwner(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeSegment, IsSuccessLog: true, IsMultipartSuccessLog: true, MultipartSegmentSize: 5 * 1024 * 1024}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	o.WriteMultipartOk("owner-A", "mp/clean")
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "ok_mp.txt"))
@@ -177,7 +177,7 @@ func TestOutputMultipartOkPerOwner(t *testing.T) {
 func TestOutputMultipartOkSkippedWhenSuccessLogOff(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeSegment, IsSuccessLog: true, IsMultipartSuccessLog: false, MultipartSegmentSize: 5 * 1024 * 1024}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	o.WriteMultipartOk("owner-A", "mp/clean") // no-op
 	o.Close()
 	if _, err := os.Stat(ownerSub(dir, "owner-A", "ok_mp.txt")); !os.IsNotExist(err) {
@@ -190,7 +190,7 @@ func TestOutputMultipartOkSkippedWhenSuccessLogOff(t *testing.T) {
 func TestOutputCheckFailedAtRoot(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	o.WriteCheckFailed("obj/c")
 	o.Close()
 	data, _ := os.ReadFile(filepath.Join(dir, "check_failed.txt"))
@@ -208,7 +208,7 @@ func TestOutputCheckFailedAtRoot(t *testing.T) {
 func TestOutputMpCheckFailedAtRoot(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: 5 * 1024 * 1024}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	o.WriteMpCheckFailed("mp/k1", []int64{0, 5242880})
 	o.Close()
 	data, _ := os.ReadFile(filepath.Join(dir, "mp_check_failed.txt"))
@@ -222,7 +222,7 @@ func TestOutputMpCheckFailedAtRoot(t *testing.T) {
 func TestOutputMpCheckFailedSkippedWhenSwitchOff(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOff}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	o.WriteMpCheckFailed("mp/k1", []int64{0, 5242880}) // no-op
 	o.Close()
 	if _, err := os.Stat(filepath.Join(dir, "mp_check_failed.txt")); !os.IsNotExist(err) {
@@ -237,7 +237,7 @@ func TestOutputMpCheckFailedSkippedWhenSwitchOff(t *testing.T) {
 func TestOutputListFailedLogStructured(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: false}
-	o, _ := NewOutput(cfg, "test-bkt", false)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	er := minio.ErrorResponse{
 		Code:       "InternalError",
 		Message:    "we crashed",
@@ -284,7 +284,7 @@ func TestOutputListFailedLogStructured(t *testing.T) {
 func TestOutputListOnlySkipsPerOwnerFiles(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: false, IsSuccessLog: false}
-	o, err := NewOutput(cfg, "test-bkt", false)
+	o, err := NewOutput(cfg, "test-bkt", FileInputNone)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +325,7 @@ func TestOutputListOnlySkipsPerOwnerFiles(t *testing.T) {
 	}
 }
 
-func TestBackupOutputWritesFourFiles(t *testing.T) {
+func TestBackupOutputWritesThreeFiles(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, BackupOutputDir: dir, IsCheck: true}
 	out, err := NewBackupOutput(cfg, "mybucket")
@@ -336,7 +336,6 @@ func TestBackupOutputWritesFourFiles(t *testing.T) {
 	out.WriteBackupOk("k2")
 	out.WriteBackupFailed("k3")
 	out.WriteMismatch("mybucket|k4|1|0")
-	out.WriteBackupSkippedClean("k5")
 	out.WriteParseFailed("mybucket|bad")
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
@@ -344,8 +343,12 @@ func TestBackupOutputWritesFourFiles(t *testing.T) {
 	assertFileContent(t, dir, "backup_ok.txt", "k1\nk2\n")
 	assertFileContent(t, dir, "backup_failed.txt", "k3\n")
 	assertFileContent(t, dir, "mismatch.txt", "mybucket|k4|1|0\n")
-	assertFileContent(t, dir, "backup_skipped_clean.txt", "k5\n")
 	assertFileContent(t, dir, "parse_failed.txt", "mybucket|bad\n")
+	// backup_skipped_clean.txt is gone: backup relays every object the input
+	// list names — the corruption verdict was made by the check run.
+	if _, err := os.Stat(filepath.Join(dir, "backup_skipped_clean.txt")); !os.IsNotExist(err) {
+		t.Errorf("backup_skipped_clean.txt should not exist (backup never probes): %v", err)
+	}
 }
 
 // TestBackupOutputNoCheckModeFiles — backup output must not create the
@@ -385,7 +388,7 @@ func assertFileContent(t *testing.T, dir, name, want string) {
 func TestNewOutputListFileModeEnablesMultipartResults(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSuccessLog: true}
-	o, err := NewOutput(cfg, "test-bkt", true)
+	o, err := NewOutput(cfg, "test-bkt", FileInputListFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +413,7 @@ func TestNewOutputListFileModeEnablesMultipartResults(t *testing.T) {
 func TestNewOutputListFileModeOkMpOptIn(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
-	o, err := NewOutput(cfg, "test-bkt", true)
+	o, err := NewOutput(cfg, "test-bkt", FileInputListFile)
 	if err != nil {
 		t.Fatal(err)
 	}

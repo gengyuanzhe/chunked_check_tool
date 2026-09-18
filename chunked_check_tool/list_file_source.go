@@ -1,37 +1,13 @@
-// list_file_source.go
+// list_file_source.go — parser for the legacy -list-file input format.
 package main
 
 import (
-	"bufio"
-	"context"
-	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 )
 
-// InputSource produces VerifyTasks and pushes them to objCh until EOF or
-// context cancellation. Reserved for future extension (e.g. etag-based
-// offset extraction). The S3 list path (Mode 1/2/3) is currently inline in
-// main.go; listFileSource is the first InputSource implementation.
-type InputSource interface {
-	Run(ctx context.Context, objCh chan<- VerifyTask) error
-}
-
-// MalformedLineError carries the original line and its 1-based line number
-// so the caller can write it to list_failed for resumable debugging.
-type MalformedLineError struct {
-	Line    string
-	LineNum int
-	Reason  string
-}
-
-func (e *MalformedLineError) Error() string {
-	return fmt.Sprintf("line %d: %s: %q", e.LineNum, e.Reason, e.Line)
-}
-
-// parseListFileLine parses one line of the list file.
+// parseListFileLine parses one line of the -list-file input.
 //
 // Format: bkt|key|partcnt|offset0|offset1|...
 //
@@ -44,8 +20,11 @@ func (e *MalformedLineError) Error() string {
 //
 // On success returns a VerifyTask with IsMultipart=true (list-file tasks are
 // always multipart), ETag="" and Size=0 (the file does not carry them) and
-// HeadFirst=true (the checker HEADs the object to fill them in before probing,
-// mirroring backup mode).
+// HeadFirst=true (the checker HEADs the object to fill them in before probing).
+//
+// -list-file is the legacy re-check vehicle from the days when list+check
+// could not obtain multipart offsets itself; -check-file (parseCheckFileLine)
+// is its mixed-format successor and accepts these lines unchanged.
 func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyTask, error) {
 	if strings.TrimSpace(line) == "" {
 		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: "empty line"}
@@ -60,7 +39,7 @@ func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyT
 	}
 	// TrimSpace matches minio-go's CheckValidObjectName: whitespace-only keys
 	// would fail per-call anyway — reject them here with a resolvable line
-	// number (list_failed) instead of per-object failure entries.
+	// number (parse_failed) instead of per-object failure entries.
 	if strings.TrimSpace(key) == "" {
 		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: "empty key"}
 	}
@@ -100,66 +79,4 @@ func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyT
 		Offsets:     offs,
 		HeadFirst:   true, // list-file lines omit ETag/Size — checker HEADs to fill them in
 	}, nil
-}
-
-// listFileSource reads a list file line-by-line and pushes VerifyTasks to
-// objCh. Malformed lines are written to list_failed (with line number) and
-// bump IncrListFailed; processing continues. Every line read (valid or
-// malformed) bumps IncrReadLine — the cumulative read progress counter for
-// this mode. The listed_* counters are NOT bumped (per spec §6 — list-file
-// mode bypasses S3 LIST, so "listed" semantics don't apply; the summary
-// reports read instead of list_all).
-type listFileSource struct {
-	path   string
-	bucket string
-	out    *Output
-	stats  *Stats
-}
-
-func newListFileSource(path, bucket string, out *Output, stats *Stats) *listFileSource {
-	return &listFileSource{path: path, bucket: bucket, out: out, stats: stats}
-}
-
-func (s *listFileSource) Run(ctx context.Context, objCh chan<- VerifyTask) error {
-	f, err := os.Open(s.path)
-	if err != nil {
-		return fmt.Errorf("open list file %q: %w", s.path, err)
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	// Allow long lines (default 64KB limit is too small for huge offset lists).
-	const maxLineLen = 1 << 20 // 1 MiB
-	scanner.Buffer(make([]byte, 0, 64*1024), maxLineLen)
-	lineNum := 0
-	for scanner.Scan() {
-		lineNum++
-		s.stats.IncrReadLine()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		line := scanner.Text()
-		task, err := parseListFileLine(line, s.bucket, lineNum)
-		if err != nil {
-			var mle *MalformedLineError
-			if errors.As(err, &mle) {
-				s.out.WriteParseFailed(mle.Line)
-				s.out.WriteListFailedLog(mle.Line, 0, "", "", err)
-				s.stats.IncrParseFailed()
-				continue
-			}
-			// Non-malformed error (shouldn't happen for parseListFileLine).
-			s.out.WriteParseFailed(line)
-			s.out.WriteListFailedLog(line, 0, "", "", err)
-			s.stats.IncrParseFailed()
-			continue
-		}
-		select {
-		case objCh <- task:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return scanner.Err()
 }
