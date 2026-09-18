@@ -1,8 +1,9 @@
 # chunked_check_tool 配置模板
 # 用法:
 #   ./chunked_check_tool -c config.yaml -bkt <bucket> [-prefix <p>] [-nextmarker <key>]
-#   ./chunked_check_tool -c config.yaml -bkt <bucket> -list-file <path>   # 跳过 S3 列举
-#   ./chunked_check_tool -c config.yaml -bkt <bucket> -backup-file <path> # 损坏对象备份（需配 backup_bucket）
+#   ./chunked_check_tool -c config.yaml -bkt <bucket> -check-file <path>   # 重查失败对象（check_failed/mp_check_failed/mismatch）
+#   ./chunked_check_tool -c config.yaml -bkt <bucket> -list-file <path>    # 旧模式：多段-only 按行校验
+#   ./chunked_check_tool -c config.yaml -bkt <bucket> -backup-file <path>  # 损坏对象备份（不校验直接中转；需配 backup_bucket）
 
 # S3 节点 ip:port 列表，至少 1 个；多个节点会做故障轮询隔离
 endpoints:
@@ -39,7 +40,7 @@ output_dir: ./out
 output_dir_timestamp: true
 
 # backup-file 模式的输出目录（与 output_dir 分离，避免 list/check 结果与 backup
-# 结果混写）。仅 -backup-file 模式使用，list/list-file 模式忽略。
+# 结果混写）。仅 -backup-file 模式使用，其他模式忽略。
 # -backup-file 模式必填，不配启动即报错中止；同样受 output_dir_timestamp 控制。
 backup_output_dir: ./backup_out
 
@@ -65,7 +66,7 @@ multipart_check_mode: 0
 multipart_segment_size: 0
 
 # 是否记录干净的多段对象到 <ownerID>/ok_mp.txt
-# （multipart_check_mode != 0 或 -list-file 模式时生效）
+# （multipart_check_mode != 0 或 -check-file/-list-file 模式时生效）
 is_multipart_success_log: false
 
 # 节点隔离阈值：进程级累积的节点故障数（连接错误、超时、5xx；4xx 业务错误
@@ -98,9 +99,11 @@ result_line_format: <bucket>|<key>
 # 备份目标桶（-backup-file 模式必填，其他模式忽略）。
 # 备份流程：先上传输入列表文件到 backup_bucket 的 .backup_lists/<原名>_<时间戳>.txt，
 # 然后逐对象 HEAD 判型（普通/多段），与输入行声明的类型不一致 → mismatch.txt
-# （这是备份前的输入类型校验；中转后的 ETag 终验失败走 backup_failed，别混淆）；
-# 普通对象直接下载中转上传；多段对象先按行内 offset 做 chunk-signature 校验，
-# 命中损坏才按 offsets 分段下载再分段上传（多段边界=原始 part 边界，非末段需 ≥5MB），
-# 最后比对目标/源 ETag，不一致记 backup_failed（坏副本保留）。全部干净 → backup_skipped_clean.txt。
-# 本地输出：backup_ok.txt / backup_failed.txt / mismatch.txt / backup_skipped_clean.txt。
+# （对象在检查后被改写，可喂回 -check-file 重查）；
+# 普通对象整对象流式中转上传，多段对象按行内 offset 分段流式中转上传
+# （多段边界=原始 part 边界，非末段需 ≥5MB），
+# 最后比对目标/源 ETag，不一致记 backup_failed（坏副本保留）。
+# 备份不做损坏探测：是否损坏由检查阶段（list+check / -check-file）判定，
+# 输入列表里的对象一视同仁直接中转。
+# 本地输出：backup_ok.txt / backup_failed.txt / mismatch.txt。
 backup_bucket:
