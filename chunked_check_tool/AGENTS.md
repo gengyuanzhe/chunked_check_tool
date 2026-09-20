@@ -322,7 +322,83 @@ pkill -f 'minio server.*127.0.0.1:9100'
 # /tmp/chunked-e2e 视情况删；权限系统可能拒绝 rm -rf，必要时用 rm 逐文件
 ```
 
-**mp-seed helper**（`/tmp/chunked-e2e/mp-seed/main.go`，非仓库代码）：用 `github.com/minio/minio-go/v7` 上传两个 5MiB+ 对象触发 multipart，partSize 必须是 `5*1024*1024`（minio 最小 part size）。`mp/corrupt.bin` 的首段前 128 字节是 `1000;chunk-signature=...` 头，其余是 filler——分段检查在段 0 offset 0 命中。
+**mp-seed helper**（`/tmp/chunked-e2e/mp-seed/main.go`，非仓库代码）：用 `github.com/minio/minio-go/v7` 上传两个 5MiB+ 对象触发 multipart，partSize 必须是 `5*1024*1024`（minio 最小 part size）。`mp/corrupt.bin` 的首段前 128 字节是 `1000;chunk-signature=...` 头，其余是 filler——分段检查在段 0 offset 0 命中。helper 无独立 go.mod，从仓库目录 `go run /tmp/chunked-e2e/mp-seed2/main.go`（借仓库模块上下文解析 minio-go）。
+
+### 7.2 -check-file / -backup-file 冒烟（复用 7.1 环境）
+
+复用 7.1 的 8 对象数据（5 干净普通 + 1 损坏普通 + 2 个 6MB 两段对象，多段 offsets = `[0, 5242880]`）。要确定性对象数就用全新 data 目录重跑 7.1 步骤 1-4。
+
+**-check-file**（HEAD 权威判型 + 失败分流 + 漂移回落）：
+
+```bash
+cat > /tmp/chunked-e2e/check-input.txt <<'EOF'
+testbucket|corrupted/corrupted.bin
+testbucket|data/2026/01/file_01.bin
+testbucket|mp/corrupt.bin|2|0|5242880
+testbucket|mp/clean.bin|2|0|5242880
+testbucket|mp/clean.bin
+testbucket|no-such-key
+testbucket|bad|1|100
+EOF
+# cfg 关键项：is_check+is_success_log+is_multipart_success_log，multipart_check_mode: 0
+# （0 验证文件模式无视该配置——mp 输出照常开启，offsets 来自输入行）
+/tmp/chunked_check_tool -c cfg.yaml -bkt testbucket -check-file /tmp/chunked-e2e/check-input.txt
+```
+
+期望 summary：`read: 7` + `ok_obj: 1 corrupt_obj: 1 ok_mp: 1 corrupt_mp: 1 check_failed: 1 mp_check_failed: 0 parse_failed: 1`。文件（全落 `_unknown/`）：
+
+| 文件 | 内容 |
+|---|---|
+| `corrupted_objects.txt` | `testbucket\|corrupted/corrupted.bin` |
+| `corrupted_mp.txt` | `testbucket\|mp/corrupt.bin\|2\|0\|5242880`（带 offsets，可直喂 -backup-file） |
+| `ok_mp.txt` / `ok_objects.txt` | `mp/clean.bin` / `file_01.bin` |
+| `mp.txt` | `testbucket\|mp/clean.bin`（漂移行：普通行 + HEAD 多段 → 无 offsets 不认干净） |
+| `check_failed.txt` | `testbucket\|no-such-key`（普通行 HEAD 404 按行型分流） |
+| `parse_failed.txt` | `testbucket\|bad\|1\|100` |
+
+**-backup-file**（不探测直接中转）：
+
+```bash
+cat > /tmp/chunked-e2e/backup-input.txt <<'EOF'
+testbucket|corrupted/corrupted.bin
+testbucket|mp/corrupt.bin|2|0|5242880
+testbucket|mp/clean.bin|2|0|5242880
+testbucket|mp/clean.bin
+EOF
+# cfg 关键项：backup_bucket: backupbucket + backup_output_dir（先 mc mb local/backupbucket）
+/tmp/chunked_check_tool -c cfg.yaml -bkt testbucket -backup-file /tmp/chunked-e2e/backup-input.txt
+```
+
+期望 summary：`read: 4` + `backup_ok: 3 backup_failed: 0 backup_mismatch: 1`，**`get_calls: 0`**（零探测的证据——HEAD/下载不经过 RangeGetAt 计数路径）。文件与远端：
+
+- `backup_ok.txt` 3 行——**含干净多段**（旧行为是 backup_skipped_clean 跳过）；`backup_skipped_clean.txt` 不存在
+- `mismatch.txt` = `testbucket|mp/clean.bin`（第 4 行普通行 vs HEAD 多段），可喂回 -check-file 重查
+- 目标桶三对象 `mc stat` ETag 与源一致（多段 `-2` 形式 = 分段边界保真）；`mc cat local/testbucket/<k> | cmp -s - <(mc cat local/backupbucket/<k>)` 字节级相同
+- `.backup_lists/backup-input_<时间戳>.txt` 归档存在
+
+### 7.3 两段式信号冒烟（SIGINT 优雅排空 + -resume-list 闭环）
+
+本地 minio 很快（9000 对象 <1.6s 跑完），SIGINT 时机取预估运行时长的 ~70-80%：
+
+```bash
+# seed 2000 前缀 × 3 对象（拉长运行；配合 7.1 的 300×10 共 9008 对象）
+mkdir -p /tmp/chunked-e2e/bulk2 && cd /tmp/chunked-e2e/bulk2
+for d in $(seq -w 0 1999); do mkdir -p $d; for f in 1 2 3; do head -c 4096 /dev/urandom > $d/obj_$f.bin; done; done
+mc cp --recursive . local/testbucket/bulk2/
+
+# 后台全量扫描，1.2s 后 SIGINT（check_concurrency 调低可拉长运行便于掐点）
+/tmp/chunked_check_tool -c cfg-sig.yaml -bkt testbucket > /tmp/chunked-e2e/sig.log 2>&1 &
+PID=$!; sleep 1.2; kill -INT $PID; wait $PID; echo "exit=$?"
+```
+
+期望：
+
+- run.log 含 `signal received: stopping listing, draining in-flight work`；summary 在 drain 完成后照常 flush（total_sec 覆盖 drain 时长）
+- 退出码非 0，run.log 末尾 `run: interrupted: graceful drain complete, output is a resumable checkpoint`
+- **终态完备**：`list_obj == ok_obj + corrupt_obj`（+ mode 下落 mp.txt 的多段量），`check_failed.txt`/`mp_check_failed.txt` 为空——已列举对象在 drain 中全部检查完
+- `list_failed.txt` 非空：未启动前缀为**裸 prefix**，`list_failed.log` 记 `err="interrupted before listing started: context canceled"`；worker 恰在分页中时会记 `prefix|token`（时序相关，本次未命中——该路径由 `TestListerGracefulCancelRecordsNextPageToken` 单测钉死）
+- **闭环验证**：`/tmp/chunked_check_tool -c cfg -bkt testbucket -resume-list <中断轮目录>/list_failed.txt` 跑完 `list_failed: 0`，且两轮 `list_all` 之和 == `mc ls --recursive local/testbucket | wc -l`（无丢失无重复的完备性证明）
+- 第二次信号（硬停）时序难在真机稳定触发，由单测覆盖（`TestListerHardAbortMidPageRecordsCurrentPageToken` + `TestRunInterruptedDrainsQueue`）
 
 ## 8. 已知遗留项（改动时留意，非阻塞）
 
