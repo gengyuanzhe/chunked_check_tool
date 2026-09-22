@@ -173,7 +173,7 @@ func (c *Checker) verify(task VerifyTask) {
 	if task.IsMultipart && len(task.Offsets) == 0 {
 		if c.cfg.MultipartCheckMode == MultipartCheckModeOffset {
 			c.out.WriteListParseFailedLog(task.Key, task.OwnerID, task.Size, task.ETag)
-			c.out.WriteListParseFailed(task.OwnerID, task.Key)
+			c.out.WriteListParseFailed(task.Key)
 			c.stats.IncrListParseFailed()
 		} else {
 			c.out.WriteMultipartAll(task.OwnerID, task.Key)

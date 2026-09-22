@@ -92,7 +92,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `backup_output_dir` | （无） | `-backup-file` 模式专用输出目录，与 `output_dir` 分离避免 backup 结果与 list/check 结果混写。仅 backup 模式必填，其他模式忽略；同样受 `output_dir_timestamp` 控制并共享同一时间戳成对生成 |
 | `is_check` | `true` | `false` 时只列举不校验，不写对象文件，仅写 `list_failed.*` |
 | `is_success_log` | `false` | `true` 时把正常普通对象 key 写入 `<ownerID>/ok_objects.txt` |
-| `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 `mp.txt` 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，服务端返回 `<md5>-<partcnt>-<off0>\|<off1>\|...` 格式 ETag，按真实 part 边界逐段检查；解析不出 offsets 的对象回落 `mp.txt`）；`2`=固定分段检查（旧模式，未来废弃；必须配 `multipart_segment_size > 0`） |
+| `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 `mp.txt` 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，服务端返回 `<md5>-<partcnt>-<off0>\|<off1>\|...` 格式 ETag，按真实 part 边界逐段检查；解析不出 offsets 的对象回落 `list_parse_failed.txt`，配套 `list_parse_failed.log` 记录完整 ETag）；`2`=固定分段检查（旧模式，未来废弃；必须配 `multipart_segment_size > 0`） |
 | `multipart_segment_size` | `0` | 模式 2 的段长度（字节），需与上传 part size 一致；仅 `multipart_check_mode: 2` 时必填 |
 | `whole_object_probe_threshold` | `1024` | 小对象全读阈值（字节）。`0 < Size <= 该值` 时走快路径：单次 RangeGet 读全对象，body 同时匹配 chunk-signature 与 trailer 正则（`x-amz-checksum-(sha256\|crc32\|crc32c\|sha1\|crc64):`），1 请求覆盖段首+段尾两种损坏；超过该值走 head@0+tail@Size-128（普通对象 2 请求）/head@0+(N-1) 边界+tail@Size-128（多段 N+1 请求）多探测。`0` 禁用快路径恒走多探测；负值启动报错 |
 | `is_multipart_success_log` | `false` | `true` 时把干净的多段对象 key 写入 `<ownerID>/ok_mp.txt` |
@@ -166,7 +166,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 - 坏行（格式错误/bkt 不匹配）与文件模式一致：写入 `parse_failed.txt` 并跳过
 - 复用 `check_concurrency` 作为备份 worker 数；节点故障轮询仅覆盖请求发起阶段——流式中转一旦开始，中途故障不重试（流不可重放），整对象记为失败
 - S3 多段约束：非末段必须 ≥5MB。输入行语义是原始 part 边界（原上传本来合规）；若喂入"固定分段"格式（段 <5MB）会被 S3 拒绝（EntityTooSmall）→ `backup_failed`
-- `mp.txt`（mode=0/2 未验证多段、mode=1 ETag 解析失败回落）**无 offsets，无法自动中转**（ETag 终验对不上），需人工补 part 边界后走 `-check-file`/`-backup-file`
+- `mp.txt`（mode=0/2 未验证多段、`-check-file` 时普通行 HEAD 判多段的漂移对象）**无 offsets，无法自动中转**（ETag 终验对不上），需人工补 part 边界后走 `-check-file`/`-backup-file`。mode=1 ETag 解析失败的对象落到根目录 `list_parse_failed.txt`（同样无 offsets，无法自动中转）
 - 观测指标（无 S3 LIST，不显示 `list_*`）：进度行 `[progress] read=X list_failed=… backup_ok=… backup_failed=… backup_mismatch=… get_calls=… get_avg_ms=… (backed=N) q=obj:… lf:… bok:… bfail:… mm:…`；汇总 `read: X` + `list_failed` + `get_calls` + `backup_ok: N backup_failed: N backup_mismatch: N`
 - **中断恢复**：信号到达时停止读输入、排空已入队对象；重跑同一输入文件即可（探测/中转幂等，重复中转 = 覆盖写）。大输入可用 comm 差集跳过已成功对象（三个输出文件的行都是原始输入行）：
   `comm -23 <(sort input.txt) <(cat out/{backup_ok,backup_failed,mismatch}.txt | sort -u) > retry.txt`
@@ -186,6 +186,8 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 ├── check_failed.log            # 普通对象 RangeGet 失败结构化错误
 ├── mp_check_failed.txt         # 多段分段 RangeGet 失败 `bkt|key|partcnt|off0|...`（可直喂 -check-file / -backup-file 多段输入）
 ├── mp_check_failed.log         # 多段分段 RangeGet 失败结构化错误
+├── list_parse_failed.txt       # mode=offset 多段 ETag 解析失败 `bkt|key`（无 offsets，无法自动中转；可直喂 -check-file 重查当前状态）
+├── list_parse_failed.log       # mode=offset 多段 ETag 解析失败结构化诊断（key/owner/size/原始 ETag，不截断）
 ├── backup_ok.txt               # 备份成功的原始输入行（-backup-file 模式）
 ├── backup_failed.txt           # 备份失败的原始输入行（-backup-file 模式；可自喂重试）
 ├── backup_failed.log           # 备份失败结构化错误（stage=head/upload/etag）
@@ -194,7 +196,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 └── <ownerID>/                  # OwnerID 为空（含全部文件输入模式）时落到 _unknown/
     ├── corrupted_objects.txt   # 损坏普通对象 key（Range GET 命中 chunk-signature/trailer）
     ├── ok_objects.txt          # 正常普通对象 key（is_success_log=true 时）
-    ├── mp.txt                  # 多段对象 key（multipart_check_mode=0 时全部多段；=1 时为 ETag 解析失败的回落；-check-file 时普通行 HEAD 判多段的漂移对象）
+    ├── mp.txt                  # 多段对象 key（multipart_check_mode=0 时全部多段；-check-file 时普通行 HEAD 判多段的漂移对象）
     ├── corrupted_mp.txt        # 损坏多段对象 key（分段检查命中）
     └── ok_mp.txt               # 干净多段对象 key（is_multipart_success_log=true 时）
 ```
@@ -212,7 +214,8 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `mp_check_failed.txt` | 多段对象分段 RangeGet 失败（状态未知） | 是 | `-check-file mp_check_failed.txt` 重查 |
 | `mismatch.txt` | 对象在检查后被改写（类型漂移），检查结果过期 | 是 | `-check-file mismatch.txt` 重查当前状态 |
 | `backup_failed.txt` | 备份中转失败 | 是 | `-backup-file backup_failed.txt` 自喂重试 |
-| `mp.txt` | 未验证多段（mode=0/2、mode=1 解析失败回落） | 否 | 人工补 part 边界后走 `-check-file`/`-backup-file` |
+| `list_parse_failed.txt` | mode=offset 多段 ETag 解析失败（服务端未返回 `internal-list-mp-offset` 或 ETag 格式不合法） | 否 | 人工补 part 边界后走 `-check-file`/`-backup-file`（也可直喂 `-check-file` 重查当前状态） |
+| `mp.txt` | 未验证多段（mode=0/2、`-check-file` 时普通行 HEAD 判多段的漂移对象） | 否 | 人工补 part 边界后走 `-check-file`/`-backup-file` |
 
 `list_failed.txt` 行格式 `prefix|token`：token 是失败页的 continuationToken（V1 是上一页最后一个 key，V2 是服务端返回的不透明 token）。第一页就失败或该 prefix 从未启动时 token 为空，整行就是单字段 `prefix`。补跑时 `-resume-list` 读这些行，把 `(prefix, token)` 作为初始状态 seed 进 BFS 队列，`processPrefix` 从该 token 续页，避免重复枚举已成功的前几页。**仅 Mode 2 支持**——Mode 1 的根/子前缀游标语义不可区分、Mode 3 递归无游标，这两类的列举失败重试 = 原命令重跑（幂等，跨轮并集吸收重复）。
 

@@ -60,17 +60,17 @@ type Output struct {
 	corruptedMultipartCh chan ownerLine
 	multipartOkCh        chan ownerLine
 	successCh            chan ownerLine
-	listParseFailedCh    chan ownerLine
 
 	// root-level channels (global, no ownerID)
-	listFailedCh    chan string
-	parseFailedCh   chan string
-	invalidKeysCh   chan string
-	checkFailedCh   chan string
-	mpCheckFailedCh chan string
-	backupOkCh      chan string
-	backupFailedCh  chan string
-	mismatchCh      chan string
+	listFailedCh      chan string
+	parseFailedCh     chan string
+	invalidKeysCh     chan string
+	checkFailedCh     chan string
+	mpCheckFailedCh   chan string
+	listParseFailedCh chan string
+	backupOkCh        chan string
+	backupFailedCh    chan string
+	mismatchCh        chan string
 
 	// slog loggers for the three .log files (root, concurrency-safe)
 	listLogger             *slog.Logger
@@ -163,12 +163,12 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 		corruptedMultipartCh:      make(chan ownerLine, chCap),
 		multipartOkCh:             make(chan ownerLine, chCap),
 		successCh:                 make(chan ownerLine, chCap),
-		listParseFailedCh:         make(chan ownerLine, chCap),
 		listFailedCh:              make(chan string, chCap),
 		parseFailedCh:             make(chan string, chCap),
 		invalidKeysCh:             make(chan string, chCap),
 		checkFailedCh:             make(chan string, chCap),
 		mpCheckFailedCh:           make(chan string, chCap),
+		listParseFailedCh:         make(chan string, chCap),
 		corruptedEnabled:          isCheck,
 		multipartAllEnabled:       multipartAll,
 		corruptedMultipartEnabled: isCheck && mpOutputs,
@@ -208,7 +208,7 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 		}
 	}
 	if o.listParseFailedEnabled {
-		if err := o.openAndStartOwner("list_parse_failed.txt", o.listParseFailedCh, o.renderLineFmt); err != nil {
+		if err := o.openAndStartRoot("list_parse_failed.txt", o.listParseFailedCh); err != nil {
 			return nil, err
 		}
 	}
@@ -638,13 +638,15 @@ func (o *Output) WriteListParseFailedLog(key, ownerID string, size int64, etag s
 }
 
 // WriteListParseFailed records a multipart object whose S3-listed ETag did
-// not parse in mode=offset. Routed to <owner>/list_parse_failed.txt —
+// not parse in mode=offset. Routed to root-level list_parse_failed.txt —
 // distinct from mp.txt (which is for mode=off / type drift) and from
 // parse_failed.txt (which is for malformed -list-file / -backup-file input
-// lines). Line format matches the other per-owner files: <bucket>|<key>.
-func (o *Output) WriteListParseFailed(ownerID, key string) {
+// lines). Line format `bucket|key`, aligned with check_failed.txt /
+// mp_check_failed.txt so the file can be fed back to -check-file for retry
+// (the retry HEADs the object and re-derives offsets from the ETag).
+func (o *Output) WriteListParseFailed(key string) {
 	if o.listParseFailedEnabled {
-		o.listParseFailedCh <- ownerLine{ownerID, key, nil}
+		o.listParseFailedCh <- o.bucket + "|" + key
 	}
 }
 

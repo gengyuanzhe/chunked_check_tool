@@ -362,8 +362,8 @@ func TestCheckerOffsetModeFallbackWritesListParseFailed(t *testing.T) {
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// Object must land in list_parse_failed.txt, NOT mp.txt.
-	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "list_parse_failed.txt"))
+	// Object must land in root-level list_parse_failed.txt, NOT mp.txt.
+	data, err := os.ReadFile(filepath.Join(dir, "list_parse_failed.txt"))
 	if err != nil {
 		t.Fatalf("read list_parse_failed.txt: %v", err)
 	}

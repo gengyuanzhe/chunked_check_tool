@@ -115,15 +115,15 @@ func TestOutputSegmentModeCorruptedMultipartIgnoresOffsets(t *testing.T) {
 
 // TestOutputOffsetModeListParseFailedFallback — offset mode: mp.txt is
 // disabled; multipart objects whose ETag did not parse (server without the
-// feature) land in list_parse_failed.txt instead. Lines keep the
-// result_line_format shape — those objects have no offsets to write.
+// feature) land in root-level list_parse_failed.txt instead. Line format
+// `bucket|key`, aligned with check_failed.txt for -check-file retry.
 func TestOutputOffsetModeListParseFailedFallback(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
 	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
-	o.WriteListParseFailed("owner-A", "mp/nosupport")
+	o.WriteListParseFailed("mp/nosupport")
 	o.Close()
-	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "list_parse_failed.txt"))
+	data, _ := os.ReadFile(filepath.Join(dir, "list_parse_failed.txt"))
 	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/nosupport" {
 		t.Errorf("list_parse_failed.txt = %q, want %q", line, "test-bkt|mp/nosupport")
 	}
