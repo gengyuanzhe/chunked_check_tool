@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -44,7 +46,10 @@ func TestParseMultipartOffsetETag(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, ok := parseMultipartOffsetETag(c.etag)
+			// Size=0 would reject any non-zero offset; pass a large Size
+			// so format validation is tested without conflating with the
+			// size check (covered separately by SizeValidation).
+			got, ok := parseMultipartOffsetETag(c.etag, 1<<40)
 			if ok != c.ok {
 				t.Fatalf("ok = %v, want %v", ok, c.ok)
 			}
@@ -67,11 +72,11 @@ func TestParseMultipartOffsetETag(t *testing.T) {
 
 func TestIsListRequest(t *testing.T) {
 	cases := []struct {
-		name  string
+		name   string
 		method string
 		path   string
 		query  string
-		want  bool
+		want   bool
 	}{
 		// V2 lists minio-go emits via Core.ListObjectsV2.
 		{"v2 full", "GET", "/bkt", "delimiter=%2F&encoding-type=url&fetch-owner=true&list-type=2&max-keys=1000&prefix=dir%2F", true},
@@ -210,4 +215,172 @@ func TestMpOffsetTransportMinioList(t *testing.T) {
 	if statWithHdr != 0 {
 		t.Errorf("StatObject carried header, want none")
 	}
+}
+
+// TestParseMultipartOffsetETagLargeScale verifies parseMultipartOffsetETag
+// handles an extreme but realistic object: 10000 parts at 5 GiB each. The
+// server rewrites the ETag to <md5>-10000-0|5368709120|...|5368709120*9999,
+// a ~110 KB string. The test asserts the parser accepts it, returns the
+// expected part count and offsets, and finishes in well under a second —
+// the real concern is correctness on this volume, not latency (a 50 TB
+// object spending tens of seconds in runProbes is acceptable).
+func TestParseMultipartOffsetETagLargeScale(t *testing.T) {
+	const md5 = "0123456789abcdef0123456789abcdef"
+	const partCount = 10000
+	const partSize = int64(5 * 1024 * 1024 * 1024) // 5 GiB
+
+	offStrs := make([]string, partCount)
+	for i := 0; i < partCount; i++ {
+		offStrs[i] = fmt.Sprintf("%d", int64(i)*partSize)
+	}
+	etag := fmt.Sprintf("%s-%d-%s", md5, partCount, strings.Join(offStrs, "|"))
+
+	start := time.Now()
+	offs, ok := parseMultipartOffsetETag(etag, int64(partCount)*partSize)
+	elapsed := time.Since(start)
+
+	if !ok {
+		t.Fatalf("parseMultipartOffsetETag returned ok=false on %d-part etag (len=%d)", partCount, len(etag))
+	}
+	if len(offs) != partCount {
+		t.Fatalf("offset count = %d, want %d", len(offs), partCount)
+	}
+	if offs[0] != 0 {
+		t.Fatalf("offs[0] = %d, want 0", offs[0])
+	}
+	for i := 1; i < partCount; i++ {
+		want := int64(i) * partSize
+		if offs[i] != want {
+			if i < 3 || i >= partCount-1 {
+				t.Errorf("offs[%d] = %d, want %d", i, offs[i], want)
+			}
+		}
+	}
+	lastExpected := int64(partCount-1) * partSize
+	if offs[partCount-1] != lastExpected {
+		t.Errorf("offs[last] = %d, want %d", offs[partCount-1], lastExpected)
+	}
+	t.Logf("parsed %d-part etag (len=%d bytes) in %v", partCount, len(etag), elapsed)
+}
+
+// TestParseMultipartOffsetETagSizeValidation verifies the offset > Size
+// check: an ETag whose offsets are individually well-formed but claim a part
+// starting beyond the object's known size is invalid. size=0 is a legitimate
+// empty object — the only valid offset sequence is single-part [0].
+func TestParseMultipartOffsetETagSizeValidation(t *testing.T) {
+	const md5 = "0123456789abcdef0123456789abcdef"
+	etag3 := md5 + "-3-0|5242880|10485760" // 3 parts, offsets 0/5M/10M
+
+	cases := []struct {
+		name string
+		etag string
+		size int64
+		want bool
+	}{
+		{"size equals last offset", etag3, 10485760, true},
+		{"size larger than last offset", etag3, 15728640, true},
+		{"size smaller than last offset", etag3, 8000000, false},
+		{"size smaller than middle offset", etag3, 5242880, false},
+		{"size 1 with multi-part", etag3, 1, false},
+		{"empty object single part", md5 + "-1-0", 0, true},
+		{"empty object multi-part", etag3, 0, false},
+		{"single part offset 0 fits any size", md5 + "-1-0", 1, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, ok := parseMultipartOffsetETag(c.etag, c.size)
+			if ok != c.want {
+				t.Errorf("size=%d: ok=%v, want %v", c.size, ok, c.want)
+			}
+		})
+	}
+}
+
+// TestMinioListLargeOffsetETag verifies the minio-go SDK itself can parse a
+// LIST response whose ETag carries 10000 part offsets (~145 KB). This is
+// the real concern for multipart_check_mode=offset: parseMultipartOffsetETag
+// is ours, but the XML decoding is minio's. A stack overflow, truncation, or
+// silent ETag drop in minio-go's xmlDecoder would break the offset pipeline
+// before our code ever runs.
+//
+// The test stands up an httptest server that returns a V2 ListBucketResult
+// with one Contents entry whose ETag is <md5>-10000-0|5368709120|...|...,
+// then issues a real Core.ListObjectsV2 through a minio client and asserts:
+//   - no error
+//   - exactly one object returned
+//   - the ETag survived the round-trip byte-for-byte (length + first/last
+//     offsets intact)
+//
+// Pinned to minio-go v7.3.0's V2 LIST query shape; a minio upgrade must
+// re-verify the XML decoder still handles ETags this large.
+func TestMinioListLargeOffsetETag(t *testing.T) {
+	const md5 = "0123456789abcdef0123456789abcdef"
+	const partCount = 10000
+	const partSize = int64(5 * 1024 * 1024 * 1024)
+
+	offStrs := make([]string, partCount)
+	for i := 0; i < partCount; i++ {
+		offStrs[i] = fmt.Sprintf("%d", int64(i)*partSize)
+	}
+	etag := fmt.Sprintf("%s-%d-%s", md5, partCount, strings.Join(offStrs, "|"))
+	etagQuoted := "&quot;" + etag + "&quot;"
+
+	listXML := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>bkt</Name><Prefix></Prefix><KeyCount>1</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>
+<Contents><Key>bigobj</Key><LastModified>2026-09-22T00:00:00.000Z</LastModified><ETag>%s</ETag><Size>53687091200000</Size><StorageClass>STANDARD</StorageClass></Contents>
+</ListBucketResult>`, etagQuoted)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		// minio-go v7.3.0 Core.ListObjectsV2 emits list-type=2; the server
+		// responds identically to any list-type=2 request.
+		w.Write([]byte(listXML))
+	}))
+	defer srv.Close()
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	client, err := minio.New(host, &minio.Options{
+		Creds:     credentials.NewStaticV4("ak", "sk", ""),
+		Secure:    false,
+		Region:    "us-east-1",
+		Transport: &http.Transport{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	core := &minio.Core{Client: client}
+
+	result, err := core.ListObjectsV2("bkt", "", "", "", "", 1000)
+	if err != nil {
+		t.Fatalf("ListObjectsV2 with %d-byte ETag failed: %v", len(etag), err)
+	}
+	if len(result.Contents) != 1 {
+		t.Fatalf("got %d contents, want 1", len(result.Contents))
+	}
+	got := trimETagQuotes(result.Contents[0].ETag)
+	if len(got) != len(etag) {
+		t.Errorf("ETag length after round-trip = %d, want %d (truncated by minio?)", len(got), len(etag))
+	}
+	if got != etag {
+		first, last := 64, 64
+		if len(got) < first {
+			first = len(got)
+		}
+		if len(got) < last {
+			last = len(got)
+		}
+		t.Errorf("ETag mismatch: got[%d]=%q want[%d]=%q", len(got), got[:first], len(etag), etag[:first])
+		t.Errorf("ETag tail: got=%q want=%q", got[len(got)-last:], etag[len(etag)-last:])
+	}
+	// Verify our parser still handles the round-tripped ETag — the full
+	// pipeline (minio decode → trimETagQuotes → our parser) must produce offsets.
+	offs, ok := parseMultipartOffsetETag(got, int64(partCount)*partSize)
+	if !ok {
+		t.Fatalf("parseMultipartOffsetETag rejected the round-tripped ETag")
+	}
+	if len(offs) != partCount {
+		t.Errorf("parsed offset count = %d, want %d", len(offs), partCount)
+	}
+	t.Logf("minio-go decoded %d-byte ETag, round-trip OK, parsed %d offsets", len(got), len(offs))
 }

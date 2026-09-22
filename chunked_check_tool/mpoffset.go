@@ -89,10 +89,17 @@ func isListRequest(req *http.Request) bool {
 // strictness), partcnt >= 1 and equals the offset count, offsets are
 // non-negative, strictly increasing, and the first is 0.
 //
+// Each offset is also checked against the object's known size: any offset >
+// size means the ETag claims a part starting beyond the object's end, which
+// is invalid. size=0 is a legitimate object (empty multipart); the only
+// valid offset sequence for size=0 is single-part [0] (a multipart with
+// >1 parts would require a non-zero second offset, which exceeds size=0).
+//
 // Anything else — including a plain "<md5>-<N>" ETag from a server that does
 // not implement the header — returns (nil, false); the caller falls back to
-// routing the object into mp.txt unverified.
-func parseMultipartOffsetETag(etag string) ([]int64, bool) {
+// routing the object into list_parse_failed (mode=offset) or mp.txt
+// unverified.
+func parseMultipartOffsetETag(etag string, size int64) ([]int64, bool) {
 	parts := strings.SplitN(etag, "-", 3)
 	if len(parts) != 3 || !isNormalETag(parts[0]) {
 		return nil, false
@@ -118,6 +125,11 @@ func parseMultipartOffsetETag(etag string) ([]int64, bool) {
 	}
 	for i := 1; i < partcnt; i++ {
 		if offs[i] <= offs[i-1] {
+			return nil, false
+		}
+	}
+	for _, off := range offs {
+		if off > size {
 			return nil, false
 		}
 	}

@@ -60,6 +60,7 @@ type Output struct {
 	corruptedMultipartCh chan ownerLine
 	multipartOkCh        chan ownerLine
 	successCh            chan ownerLine
+	listParseFailedCh    chan ownerLine
 
 	// root-level channels (global, no ownerID)
 	listFailedCh    chan string
@@ -72,26 +73,29 @@ type Output struct {
 	mismatchCh      chan string
 
 	// slog loggers for the three .log files (root, concurrency-safe)
-	listLogger           *slog.Logger
-	listLogFile          *os.File
-	checkLogger          *slog.Logger
-	checkLogFile         *os.File
-	mpCheckFailedLogger  *slog.Logger
-	mpCheckFailedLogFile *os.File
-	backupFailedLogger   *slog.Logger
-	backupFailedLogFile  *os.File
-	mismatchLogger       *slog.Logger
-	mismatchLogFile      *os.File
+	listLogger             *slog.Logger
+	listLogFile            *os.File
+	checkLogger            *slog.Logger
+	checkLogFile           *os.File
+	mpCheckFailedLogger    *slog.Logger
+	mpCheckFailedLogFile   *os.File
+	listParseFailedLogger  *slog.Logger
+	listParseFailedLogFile *os.File
+	backupFailedLogger     *slog.Logger
+	backupFailedLogFile    *os.File
+	mismatchLogger         *slog.Logger
+	mismatchLogFile        *os.File
 
 	// enable flags — each gates one writer goroutine + file
 	corruptedEnabled          bool // is_check
-	multipartAllEnabled       bool // is_check && (mode=off || mode=offset)
+	multipartAllEnabled       bool // is_check && (mode=off || check-file type drift)
 	corruptedMultipartEnabled bool // is_check && (mode!=off || list-file)
 	multipartOkEnabled        bool // is_check && (mode!=off || list-file) && is_success_log
 	mpCheckFailedEnabled      bool // is_check && (mode!=off || list-file)
 	checkEnabled              bool // is_check
 	successEnabled            bool // is_check && is_success_log
 	backupEnabled             bool // backup mode: the three backup files
+	listParseFailedEnabled    bool // is_check && mode=offset && S3-list (not file-input)
 
 	wg    sync.WaitGroup
 	files []*os.File // root files only — per-owner files are owned by their goroutines
@@ -119,20 +123,28 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 	// boundaries.
 	mpOffsetLines := cfg.MultipartCheckMode == MultipartCheckModeOffset || fileInput != FileInputNone
 	// mp.txt gating:
-	//   - mode=off writes every multipart here; mode=offset writes the
-	//     unparseable-ETag fallback here. Segment mode disables it (offsets
-	//     always synthesized when Size>0).
+	//   - mode=off writes every multipart here.
+	//   - mode=offset routes ETag parse failures to list_parse_failed.txt
+	//     (not mp.txt), so mp.txt is disabled.
+	//   - mode=segment disables it (offsets always synthesized when Size>0;
+	//     Size==0 has no offsets and is silently dropped).
 	//   - -list-file tasks always carry offsets → no fallback role → off.
 	//   - -check-file accepts regular lines, and a regular line whose HEAD
 	//     reveals a multipart object (type drift) has no offsets → on.
+	// list_parse_failed.txt gating:
+	//   - mode=offset + S3 LIST only: the server returned a multipart ETag
+	//     whose offset suffix did not parse. File-input modes carry their
+	//     own offsets and never hit this path.
 	var multipartAll bool
+	var listParseFailed bool
 	switch fileInput {
 	case FileInputListFile:
 		multipartAll = false
 	case FileInputCheckFile:
 		multipartAll = isCheck
 	default:
-		multipartAll = isCheck && (!mpOutputs || cfg.MultipartCheckMode == MultipartCheckModeOffset)
+		multipartAll = isCheck && cfg.MultipartCheckMode == MultipartCheckModeOff
+		listParseFailed = isCheck && cfg.MultipartCheckMode == MultipartCheckModeOffset
 	}
 	format := cfg.ResultLineFormat
 	if format == "" {
@@ -151,6 +163,7 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 		corruptedMultipartCh:      make(chan ownerLine, chCap),
 		multipartOkCh:             make(chan ownerLine, chCap),
 		successCh:                 make(chan ownerLine, chCap),
+		listParseFailedCh:         make(chan ownerLine, chCap),
 		listFailedCh:              make(chan string, chCap),
 		parseFailedCh:             make(chan string, chCap),
 		invalidKeysCh:             make(chan string, chCap),
@@ -163,6 +176,7 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 		mpCheckFailedEnabled:      isCheck && mpOutputs,
 		checkEnabled:              isCheck,
 		successEnabled:            isCheck && cfg.IsSuccessLog,
+		listParseFailedEnabled:    listParseFailed,
 	}
 	// list_failed is written by the lister in both check and list-only modes,
 	// so it always opens. The object files are gated on is_check — in
@@ -172,6 +186,9 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 		return nil, err
 	}
 	if err := o.openAndStartRoot("parse_failed.txt", o.parseFailedCh); err != nil {
+		return nil, err
+	}
+	if err := o.openListParseFailedLog(); err != nil {
 		return nil, err
 	}
 	if err := o.openAndStartRoot("invalid_keys.txt", o.invalidKeysCh); err != nil {
@@ -187,6 +204,11 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 	}
 	if o.multipartAllEnabled {
 		if err := o.openAndStartOwner("mp.txt", o.multipartAllCh, o.renderLineFmt); err != nil {
+			return nil, err
+		}
+	}
+	if o.listParseFailedEnabled {
+		if err := o.openAndStartOwner("list_parse_failed.txt", o.listParseFailedCh, o.renderLineFmt); err != nil {
 			return nil, err
 		}
 	}
@@ -434,6 +456,24 @@ func (o *Output) openCheckFailedLog() error {
 	return nil
 }
 
+// openListParseFailedLog opens list_parse_failed.log at the root and wires it
+// to a *slog.Logger. Used for S3-side ETag parse failures in mode=offset —
+// the server returned a multipart ETag whose offset suffix did not parse, so
+// the object lands in list_parse_failed.txt unverified. Each entry becomes
+// one structured log record:
+//
+//	time=... level=WARN msg="multipart etag parse failed" key=... owner=... size=... etag_len=... etag=...
+func (o *Output) openListParseFailedLog() error {
+	f, err := os.OpenFile(filepath.Join(o.dir, "list_parse_failed.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("open list_parse_failed.log: %w", err)
+	}
+	o.listParseFailedLogFile = f
+	o.files = append(o.files, f)
+	o.listParseFailedLogger = slog.New(slog.NewTextHandler(f, nil))
+	return nil
+}
+
 // openMpCheckFailedLog opens mp_check_failed.log at the root
 // and wires it to a *slog.Logger. Each WriteMpCheckFailedLog call
 // becomes one structured log record:
@@ -487,6 +527,7 @@ func (o *Output) WriteCorrupted(ownerID, key string) {
 		o.corruptedCh <- ownerLine{ownerID, key, nil}
 	}
 }
+
 // WriteCorruptedMultipart records a corrupted multipart object. offsets are
 // the part boundaries the probes ran at; the corrupted_mp renderer decides
 // whether they appear in the line (offset/list-file mode) or are ignored in
@@ -576,6 +617,37 @@ func (o *Output) WriteListFailedLog(prefix string, statusCode int, s3Code, reqID
 // auto-resumable; they signal a bad input file needing manual fixing.
 func (o *Output) WriteParseFailed(line string) { o.parseFailedCh <- line }
 
+// WriteListParseFailedLog records a structured log entry when an S3-listed
+// multipart ETag's offset suffix did not parse in mode=offset. The object
+// lands in list_parse_failed.txt unverified; this log explains why. The full
+// ETag is logged — no truncation — so the operator can see the exact bytes
+// the server returned, even for 10000-part objects (~145 KB).
+func (o *Output) WriteListParseFailedLog(key, ownerID string, size int64, etag string) {
+	if o.listParseFailedLogger == nil {
+		return
+	}
+	attrs := []any{
+		slog.String("bucket", orDash(o.bucket)),
+		slog.String("key", key),
+		slog.String("owner", orDash(ownerID)),
+		slog.Int64("size", size),
+		slog.Int("etag_len", len(etag)),
+		slog.String("etag", etag),
+	}
+	o.listParseFailedLogger.Warn("multipart etag parse failed", attrs...)
+}
+
+// WriteListParseFailed records a multipart object whose S3-listed ETag did
+// not parse in mode=offset. Routed to <owner>/list_parse_failed.txt —
+// distinct from mp.txt (which is for mode=off / type drift) and from
+// parse_failed.txt (which is for malformed -list-file / -backup-file input
+// lines). Line format matches the other per-owner files: <bucket>|<key>.
+func (o *Output) WriteListParseFailed(ownerID, key string) {
+	if o.listParseFailedEnabled {
+		o.listParseFailedCh <- ownerLine{ownerID, key, nil}
+	}
+}
+
 // WriteInvalidKey records a key or prefix that violates the "no '|'"
 // contract — the byte stream cannot be safely split into fields. Routed to
 // invalid_keys.txt for manual handling. Called from the lister when a LIST
@@ -610,6 +682,7 @@ func (o *Output) WriteCheckFailedLog(key string, statusCode int, s3Code, reqID s
 	attrs = append(attrs, slog.Any("err", err))
 	o.checkLogger.Error("check failed", attrs...)
 }
+
 // WriteMpCheckFailed records a failed RangeGet on a multipart object's probe.
 // Line format `bkt|key|partcnt|off0|off1|...` — aligned with corrupted_mp.txt
 // (mode=1 offset / list-file mode) and -backup-file/-list-file multipart
@@ -725,7 +798,7 @@ func (o *Output) WriteMpCheckFailedLog(key string, statusCode int, s3Code, reqID
 // channel. Channels whose writer goroutine was not started (because the
 // corresponding mode is disabled) report 0. Called from
 // ProgressPrinter's queueSnapshot provider once per progress line.
-func (o *Output) ChannelSnapshot() (corrupted, multipartAll, corruptedMultipart, multipartOk, mpCheckFailed, listFailed, checkFailed, success int) {
+func (o *Output) ChannelSnapshot() (corrupted, multipartAll, corruptedMultipart, multipartOk, mpCheckFailed, listFailed, checkFailed, success, listParseFailed int) {
 	if o.corruptedEnabled {
 		corrupted = len(o.corruptedCh)
 	}
@@ -747,6 +820,9 @@ func (o *Output) ChannelSnapshot() (corrupted, multipartAll, corruptedMultipart,
 	}
 	if o.successEnabled {
 		success = len(o.successCh)
+	}
+	if o.listParseFailedEnabled {
+		listParseFailed = len(o.listParseFailedCh)
 	}
 	return
 }
@@ -779,6 +855,9 @@ func (o *Output) Close() error {
 	}
 	if o.multipartAllEnabled {
 		close(o.multipartAllCh)
+	}
+	if o.listParseFailedEnabled {
+		close(o.listParseFailedCh)
 	}
 	if o.corruptedMultipartEnabled {
 		close(o.corruptedMultipartCh)

@@ -202,12 +202,12 @@ var chunkSigBody = []byte("1000;chunk-signature=00000000000000000000000000000000
 // the given segment size. Used by the TestCheckerMultipartSegmentCheck* tests.
 func multipartCfg(dir string, segSize int64) *Config {
 	return &Config{
-		OutputDir:               dir,
-		IsCheck:                 true,
-		MultipartCheckMode: MultipartCheckModeSegment,
-		IsSuccessLog:            true,
-		IsMultipartSuccessLog:   true,
-		MultipartSegmentSize:    segSize,
+		OutputDir:             dir,
+		IsCheck:               true,
+		MultipartCheckMode:    MultipartCheckModeSegment,
+		IsSuccessLog:          true,
+		IsMultipartSuccessLog: true,
+		MultipartSegmentSize:  segSize,
 	}
 }
 
@@ -342,16 +342,17 @@ func TestCheckerOffsetModeCorruptedCarriesOffsets(t *testing.T) {
 	}
 }
 
-// TestCheckerOffsetModeFallbackWritesMpAll — offset mode with nil offsets
-// (ETag did not parse): the object is unverified and lands in mp.txt.
-func TestCheckerOffsetModeFallbackWritesMpAll(t *testing.T) {
+// TestCheckerOffsetModeFallbackWritesListParseFailed — offset mode with nil
+// offsets (ETag did not parse): the object lands in list_parse_failed.txt
+// (NOT mp.txt), with a structured log entry in list_parse_failed.log.
+func TestCheckerOffsetModeFallbackWritesListParseFailed(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
 	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	s := NewStats()
 	worker := &FakeS3{Body: chunkSigBody} // would match — but nothing is probed
 	c := NewChecker(context.Background(), worker, out, s, cfg)
-	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: nil})
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", ETag: "abc-def-ghi", IsMultipart: true, Offsets: nil})
 	if got := s.Snapshot().CorruptedMp; got != 0 {
 		t.Errorf("corrupted_mp=%d want 0 (unverified, not probed)", got)
 	}
@@ -361,12 +362,31 @@ func TestCheckerOffsetModeFallbackWritesMpAll(t *testing.T) {
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "mp.txt"))
+	// Object must land in list_parse_failed.txt, NOT mp.txt.
+	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "list_parse_failed.txt"))
 	if err != nil {
-		t.Fatalf("read mp.txt: %v", err)
+		t.Fatalf("read list_parse_failed.txt: %v", err)
 	}
 	if line := strings.TrimSpace(string(data)); line != "test-bkt|k" {
-		t.Errorf("mp.txt = %q, want %q", line, "test-bkt|k")
+		t.Errorf("list_parse_failed.txt = %q, want %q", line, "test-bkt|k")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "owner-A", "mp.txt")); !os.IsNotExist(err) {
+		t.Errorf("mp.txt should not exist in mode=offset; stat err=%v", err)
+	}
+	// list_parse_failed.log must record the unparseable ETag for diagnosis.
+	logData, err := os.ReadFile(filepath.Join(dir, "list_parse_failed.log"))
+	if err != nil {
+		t.Fatalf("read list_parse_failed.log: %v", err)
+	}
+	logLine := string(logData)
+	if !strings.Contains(logLine, "multipart etag parse failed") {
+		t.Errorf("list_parse_failed.log missing message: %q", logLine)
+	}
+	if !strings.Contains(logLine, `key=k`) {
+		t.Errorf("list_parse_failed.log missing key: %q", logLine)
+	}
+	if !strings.Contains(logLine, `etag=abc-def-ghi`) {
+		t.Errorf("list_parse_failed.log missing etag: %q", logLine)
 	}
 }
 

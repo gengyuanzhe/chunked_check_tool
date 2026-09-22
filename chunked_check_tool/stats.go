@@ -29,6 +29,7 @@ type Stats struct {
 	invalidKeysCount      atomic.Int64
 	checkFailedCount      atomic.Int64
 	mpCheckFailedCount    atomic.Int64
+	listParseFailedCount  atomic.Int64
 	listCalls             atomic.Int64
 	listLatencySumNs      atomic.Int64
 	getCalls              atomic.Int64
@@ -65,6 +66,7 @@ type StatsSnapshot struct {
 	InvalidKeys      int64
 	CheckFailed      int64
 	MpCheckFailed    int64
+	ListParseFailed  int64
 	ListCalls        int64
 	ListAvgLatencyMs float64
 	ListTotalSec     float64
@@ -93,6 +95,7 @@ func (s *Stats) IncrParseFailed()      { s.parseFailedCount.Add(1) }
 func (s *Stats) IncrInvalidKeys()      { s.invalidKeysCount.Add(1) }
 func (s *Stats) IncrCheckFailed()      { s.checkFailedCount.Add(1) }
 func (s *Stats) IncrMpCheckFailed()    { s.mpCheckFailedCount.Add(1) }
+func (s *Stats) IncrListParseFailed()  { s.listParseFailedCount.Add(1) }
 func (s *Stats) IncrBackupOk()         { s.backupOkCount.Add(1) }
 func (s *Stats) IncrBackupFailed()     { s.backupFailedCount.Add(1) }
 func (s *Stats) IncrBackupMismatch()   { s.backupMismatchCount.Add(1) }
@@ -143,6 +146,7 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		InvalidKeys:      s.invalidKeysCount.Load(),
 		CheckFailed:      s.checkFailedCount.Load(),
 		MpCheckFailed:    s.mpCheckFailedCount.Load(),
+		ListParseFailed:  s.listParseFailedCount.Load(),
 		ListCalls:        calls,
 		ListAvgLatencyMs: avgMs,
 		ListTotalSec:     time.Duration(s.listTotalDurationNs.Load()).Seconds(),
@@ -192,9 +196,9 @@ func (s *Stats) PrintSummary(w io.Writer, mode RunMode) {
 			snap.ListCalls, snap.ListAvgLatencyMs, snap.ListTotalSec)
 		fmt.Fprintf(w, "get_calls: %d avg_latency_ms: %.2f get_total_sec: %.2f\n",
 			snap.GetCalls, snap.GetAvgLatencyMs, snap.GetTotalSec)
-		fmt.Fprintf(w, "ok_obj: %d corrupt_obj: %d ok_mp: %d corrupt_mp: %d list_failed: %d check_failed: %d mp_check_failed: %d invalid_keys: %d\n",
+		fmt.Fprintf(w, "ok_obj: %d corrupt_obj: %d ok_mp: %d corrupt_mp: %d list_failed: %d list_parse_failed: %d check_failed: %d mp_check_failed: %d invalid_keys: %d\n",
 			snap.OkObjects, snap.CorruptedObjects, snap.OkMp, snap.CorruptedMp,
-			snap.ListFailed, snap.CheckFailed, snap.MpCheckFailed, snap.InvalidKeys)
+			snap.ListFailed, snap.ListParseFailed, snap.CheckFailed, snap.MpCheckFailed, snap.InvalidKeys)
 	default: // ModeListOnly
 		fmt.Fprintf(w, "list_all: %d (list_obj: %d list_mp: %d) total_sec: %.2f\n",
 			snap.ListedAll, snap.ListedObjects, snap.ListedMp, snap.TotalSec)

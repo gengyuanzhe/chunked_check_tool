@@ -297,7 +297,7 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 	q := NewQueue()
 	lister := NewLister(q, out, stats, cfg)
 	printer.SetQueueSnapshotProvider(func() QueueSnapshot {
-		cor, mpAll, cmp, mpOk, mcf, lf, cf, su := out.ChannelSnapshot()
+		cor, mpAll, cmp, mpOk, mcf, lf, cf, su, lpf := out.ChannelSnapshot()
 		return QueueSnapshot{
 			Prefix:           q.Len(),
 			ObjCh:            len(objCh),
@@ -307,6 +307,7 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 			ListFailed:       lf,
 			CheckFailed:      cf,
 			MpCheckFailed:    mcf,
+			ListParseFailed:  lpf,
 			OkObjects:        su,
 		}
 	})

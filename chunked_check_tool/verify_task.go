@@ -62,10 +62,11 @@ func resolveOffsets(obj ObjectInfo, cfg *Config) VerifyTask {
 		IsMultipart: true,
 	}
 	if cfg.MultipartCheckMode == MultipartCheckModeOffset {
-		if offs, ok := parseMultipartOffsetETag(obj.ETag); ok {
+		if offs, ok := parseMultipartOffsetETag(obj.ETag, obj.Size); ok {
 			task.Offsets = offs
 		}
-		// Unparseable ETag → Offsets stays nil → mp.txt fallback.
+		// Unparseable ETag (format error or offset > Size) → Offsets stays
+		// nil → list_parse_failed fallback.
 	} else if cfg.MultipartCheckMode == MultipartCheckModeSegment && cfg.MultipartSegmentSize > 0 && obj.Size > 0 {
 		seg := cfg.MultipartSegmentSize
 		numSegs := (obj.Size + seg - 1) / seg

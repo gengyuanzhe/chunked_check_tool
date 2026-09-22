@@ -113,19 +113,22 @@ func TestOutputSegmentModeCorruptedMultipartIgnoresOffsets(t *testing.T) {
 	}
 }
 
-// TestOutputOffsetModeMultipartAllFallback — offset mode: mp.txt stays
-// enabled as the fallback for multipart objects whose ETag did not parse
-// (server without the feature). Lines keep the result_line_format shape —
-// those objects have no offsets to write.
-func TestOutputOffsetModeMultipartAllFallback(t *testing.T) {
+// TestOutputOffsetModeListParseFailedFallback — offset mode: mp.txt is
+// disabled; multipart objects whose ETag did not parse (server without the
+// feature) land in list_parse_failed.txt instead. Lines keep the
+// result_line_format shape — those objects have no offsets to write.
+func TestOutputOffsetModeListParseFailedFallback(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
 	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
-	o.WriteMultipartAll("owner-A", "mp/nosupport")
+	o.WriteListParseFailed("owner-A", "mp/nosupport")
 	o.Close()
-	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "mp.txt"))
+	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "list_parse_failed.txt"))
 	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/nosupport" {
-		t.Errorf("mp.txt = %q, want %q", line, "test-bkt|mp/nosupport")
+		t.Errorf("list_parse_failed.txt = %q, want %q", line, "test-bkt|mp/nosupport")
+	}
+	if _, err := os.Stat(ownerSub(dir, "owner-A", "mp.txt")); !os.IsNotExist(err) {
+		t.Errorf("mp.txt should not exist in mode=offset; stat err=%v", err)
 	}
 }
 

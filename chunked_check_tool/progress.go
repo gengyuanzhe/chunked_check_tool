@@ -32,6 +32,7 @@ type QueueSnapshot struct {
 	ListFailed       int // → list_failed.txt
 	CheckFailed      int // → check_failed.txt
 	MpCheckFailed    int // → mp_check_failed.txt
+	ListParseFailed  int // → list_parse_failed.txt
 	OkObjects        int // → ok_objects.txt
 
 	// Backup-mode channels (-backup-file). ObjCh above carries the
@@ -87,11 +88,11 @@ func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
 			snap.GetCalls, snap.GetAvgLatencyMs, label, count)
 	default:
 		fmt.Fprintf(p.w,
-			"[progress] list_all=%d list_obj=%d list_mp=%d ok_obj=%d corrupt_obj=%d ok_mp=%d corrupt_mp=%d list_failed=%d check_failed=%d mp_check_failed=%d list_calls=%d list_avg_ms=%.2f get_calls=%d get_avg_ms=%.2f (%s=%d)",
+			"[progress] list_all=%d list_obj=%d list_mp=%d ok_obj=%d corrupt_obj=%d ok_mp=%d corrupt_mp=%d list_failed=%d list_parse_failed=%d check_failed=%d mp_check_failed=%d list_calls=%d list_avg_ms=%.2f get_calls=%d get_avg_ms=%.2f (%s=%d)",
 			snap.ListedAll, snap.ListedObjects, snap.ListedMp,
 			snap.OkObjects, snap.CorruptedObjects,
 			snap.OkMp, snap.CorruptedMp,
-			snap.ListFailed, snap.CheckFailed,
+			snap.ListFailed, snap.ListParseFailed, snap.CheckFailed,
 			snap.MpCheckFailed,
 			snap.ListCalls, snap.ListAvgLatencyMs,
 			snap.GetCalls, snap.GetAvgLatencyMs,

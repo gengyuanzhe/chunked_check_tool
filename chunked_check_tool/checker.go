@@ -171,7 +171,13 @@ func (c *Checker) Handle(task VerifyTask) {
 // (corrupted or failed) wins. All probes clean → ok_object / ok_mp.
 func (c *Checker) verify(task VerifyTask) {
 	if task.IsMultipart && len(task.Offsets) == 0 {
-		c.out.WriteMultipartAll(task.OwnerID, task.Key)
+		if c.cfg.MultipartCheckMode == MultipartCheckModeOffset {
+			c.out.WriteListParseFailedLog(task.Key, task.OwnerID, task.Size, task.ETag)
+			c.out.WriteListParseFailed(task.OwnerID, task.Key)
+			c.stats.IncrListParseFailed()
+		} else {
+			c.out.WriteMultipartAll(task.OwnerID, task.Key)
+		}
 		return
 	}
 	result, err := runProbes(c.ctx, c.worker, task, c.cfg.WholeObjectProbeThreshold)
