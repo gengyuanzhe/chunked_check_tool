@@ -27,7 +27,8 @@ const nodeRecoverSuccesses = 2
 // transport faults and 5xx (!isNodeFaultErr) do not — recovery requires the
 // faults that caused the isolation to have stopped.
 func probeNode(cfg *Config, bucket, endpoint string) bool {
-	client, err := NewMinioClient(endpoint, cfg.AK, cfg.SK, cfg.Scheme == "https", false)
+	client, err := NewMinioClient(endpoint, cfg.AK, cfg.SK, cfg.Scheme == "https", false,
+		time.Duration(cfg.DialTimeout)*time.Second, time.Duration(cfg.ResponseHeaderTimeout)*time.Second)
 	if err != nil {
 		return false
 	}

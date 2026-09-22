@@ -228,7 +228,7 @@ func TestS3ClientFailoverIsolateAfterThreshold(t *testing.T) {
 
 	// Two workers, both initially bound to node A.
 	mk := func() *S3Client {
-		client, err := NewMinioClient(nodeA.host(), "ak", "sk", false, false)
+		client, err := NewMinioClient(nodeA.host(), "ak", "sk", false, false, 0, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -269,7 +269,7 @@ func TestS3ClientTransientFaultRetriesOnOtherNode(t *testing.T) {
 	atomic.StoreInt64(&nodeA.failFirst, 1) // first LIST on A fails, then A is healthy
 	nodeB := newFailoverSrv(t, false)
 	pool := NewNodePool(&Config{Endpoints: []string{nodeA.host(), nodeB.host()}, Scheme: "http", NodeIsolateThreshold: 3})
-	client, err := NewMinioClient(nodeA.host(), "ak", "sk", false, false)
+	client, err := NewMinioClient(nodeA.host(), "ak", "sk", false, false, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestS3ClientTransientFaultSingleNodeSameNode(t *testing.T) {
 	nodeA := newFailoverSrv(t, false)
 	atomic.StoreInt64(&nodeA.failFirst, 1) // first LIST fails, then healthy
 	pool := NewNodePool(&Config{Endpoints: []string{nodeA.host()}, Scheme: "http", NodeIsolateThreshold: 3})
-	client, err := NewMinioClient(nodeA.host(), "ak", "sk", false, false)
+	client, err := NewMinioClient(nodeA.host(), "ak", "sk", false, false, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func newOpsTestClient(t *testing.T, h http.HandlerFunc) *S3Client {
 	}))
 	t.Cleanup(srv.Close)
 	host := strings.TrimPrefix(srv.URL, "http://")
-	client, err := NewMinioClient(host, "ak", "sk", false, false)
+	client, err := NewMinioClient(host, "ak", "sk", false, false, 0, 0)
 	if err != nil {
 		t.Fatalf("NewMinioClient: %v", err)
 	}
@@ -591,7 +591,7 @@ func TestS3ClientPutObjectLocalNodeFaultReopen(t *testing.T) {
 	host := strings.TrimPrefix(srv.URL, "http://")
 
 	pool := NewNodePool(&Config{Endpoints: []string{host}, Scheme: "http", NodeIsolateThreshold: 3})
-	client, err := NewMinioClient(host, "ak", "sk", false, false)
+	client, err := NewMinioClient(host, "ak", "sk", false, false, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

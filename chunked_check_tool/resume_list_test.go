@@ -87,12 +87,23 @@ func TestParseResumeListLine(t *testing.T) {
 	}
 }
 
-// TestParseResumeListLineEmpty — empty lines are rejected (not silently
-// treated as empty-prefix entries).
+// TestParseResumeListLineEmpty — empty line is a LEGAL root-prefix failure
+// record (prefix=="", token==""), not an error. Whitespace-only lines are
+// errors: WriteListFailed never emits them, so they indicate a manually
+// corrupted file.
 func TestParseResumeListLineEmpty(t *testing.T) {
-	for _, line := range []string{"", "   ", "\t"} {
+	// "" is legal: root prefix failed on first page.
+	e, err := parseResumeListLine("")
+	if err != nil {
+		t.Errorf("parseResumeListLine(\"\") err: %v (empty line is a legal root-prefix entry)", err)
+	}
+	if e.prefix != "" || e.token != "" {
+		t.Errorf("parseResumeListLine(\"\") = {%q, %q}, want {\"\", \"\"}", e.prefix, e.token)
+	}
+	// Whitespace-only lines are errors (manually corrupted file).
+	for _, line := range []string{"   ", "\t"} {
 		if _, err := parseResumeListLine(line); err == nil {
-			t.Errorf("parseResumeListLine(%q) should error on empty line", line)
+			t.Errorf("parseResumeListLine(%q) should error on whitespace-only line", line)
 		}
 	}
 }

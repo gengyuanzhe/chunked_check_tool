@@ -531,7 +531,8 @@ func newWorker(pool *NodePool, workerIdx int, cfg *Config, bucket string, stats 
 	if nodeIdx < 0 {
 		log.Fatalf("no available nodes for worker %d", workerIdx)
 	}
-	client, err := NewMinioClient(pool.Endpoint(nodeIdx), cfg.AK, cfg.SK, cfg.Scheme == "https", cfg.IsCheck && cfg.MultipartCheckMode == MultipartCheckModeOffset)
+	client, err := NewMinioClient(pool.Endpoint(nodeIdx), cfg.AK, cfg.SK, cfg.Scheme == "https", cfg.IsCheck && cfg.MultipartCheckMode == MultipartCheckModeOffset,
+		time.Duration(cfg.DialTimeout)*time.Second, time.Duration(cfg.ResponseHeaderTimeout)*time.Second)
 	if err != nil {
 		log.Fatalf("minio client (worker %d): %v", workerIdx, err)
 	}

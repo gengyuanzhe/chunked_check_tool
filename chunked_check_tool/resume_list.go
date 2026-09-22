@@ -16,8 +16,15 @@ type resumeEntry struct {
 
 // parseResumeListLine parses one line of list_failed.txt written by a prior
 // Mode 2 run. Format:
-//   - `prefix` (single field) — first page failed, no token
+//   - `` (empty line) — root prefix failed on its first page, no token
+//   - `prefix` (single field) — a non-root prefix failed on its first page
 //   - `prefix|token` — a later page failed; token is the cursor to resume from
+//
+// Empty line is a LEGAL entry: it records a root-prefix failure (prefix="",
+// token=""), which happens when the user ran with no -prefix and the very
+// first LIST against the bucket failed. Treating it as "empty line" error
+// (the old behavior) silently dropped the only resume entry, making the run
+// un-resumable. An empty line is therefore parsed as {prefix:"", token:""}.
 //
 // SplitN (not LastIndex): the contract is "prefix contains no |" (enforced on
 // the write side by WriteListFailed — prefix-with-| lines are routed to
@@ -29,8 +36,17 @@ type resumeEntry struct {
 // to invalid_keys.txt + parse_failed.txt by the caller — we return an error
 // instead of silently mis-splitting.
 func parseResumeListLine(line string) (resumeEntry, error) {
+	if line == "" {
+		// Root prefix failed on the first page: prefix=="", token=="".
+		// Legal resume entry — the run had no -prefix and its first LIST
+		// against the bucket failed.
+		return resumeEntry{prefix: "", token: ""}, nil
+	}
+	// Whitespace-only lines are errors: WriteListFailed never emits them
+	// (it writes the raw prefix, never padding), so they indicate a manually
+	// corrupted file. A real prefix like "data/2026/" has no leading space.
 	if strings.TrimSpace(line) == "" {
-		return resumeEntry{}, fmt.Errorf("empty line")
+		return resumeEntry{}, fmt.Errorf("whitespace-only line: %q", line)
 	}
 	if !strings.Contains(line, "|") {
 		return resumeEntry{prefix: line, token: ""}, nil

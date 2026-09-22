@@ -61,10 +61,10 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 | `config.go` | `Config` 结构体 + `LoadConfig`（YAML，带默认值） |
 | `nodepool.go` | `NodePool`：轮询 `Assign`/`AssignOther`、`RecordFault`（累积故障计数，达 `node_isolate_threshold` 才 `MarkFailed` 隔离）、`Unmark`/`FailedNodes`（恢复探测用）、`URL`/`Endpoint`（隔离全局共享、进程内单向——除非开了恢复探测） |
 | `noderecovery.go` | 后台节点恢复：`startNodeRecovery`（`node_recover_probe_interval`>0 时每轮对隔离节点做 HEAD bucket 探测，连续 2 次健康 → `Unmark` 重返轮询池并清零故障计数；探测健康标准 = `!isNodeFaultErr`，即 2xx/404/403 都算活、5xx/传输错误不算）、`recoveryRound`/`probeNode`（可单测的轮次逻辑） |
-| `s3client.go` | `S3API` 接口、`S3Client`（`minioCoreAPI` 接口包装 minio.Core + minio.Client，按 `cfg.ListAPIVersion` 分派 V1/V2）、`PutObjectLocal`（归档流式上传）/`PutObjectStream`（中转流式上传）的双流式设计（**任何路径不整文件缓冲**）、节点故障 failover。测试替身在各自 _test.go：`FakeS3`（fakes3_test.go）、`scriptedS3`（lister_test.go）、`countingS3`（walker_test.go）、`drainFake`（drain_test.go，ctx 感知） |
+| `s3client.go` | `S3API` 接口、`S3Client`（`minioCoreAPI` 接口包装 minio.Core + minio.Client，按 `cfg.ListAPIVersion` 分派 V1/V2）、`PutObjectLocal`（归档流式上传）/`PutObjectStream`（中转流式上传）的双流式设计（**任何路径不整文件缓冲**）、节点故障 failover。`NewMinioClient` 在 `http.Transport` 上绑 `DialContext`（`dial_timeout`，默认 10s 兜底黑洞 IP）和 `ResponseHeaderTimeout`（`response_header_timeout`，默认 0 不兜底）；所有 minio client 构造（worker client、`rebuildOn`、`noderecovery.probeNode`）共用同一对超时。测试替身在各自 _test.go：`FakeS3`（fakes3_test.go）、`scriptedS3`（lister_test.go）、`countingS3`（walker_test.go）、`drainFake`（drain_test.go，ctx 感知） |
 | `lister.go` | `Lister`（无 `s3` 字段；`Run`/`processPrefix` 接 `s3` 与双 ctx 参数）、无界队列 BFS、`inflight` atomic 计数、`recordListFailure`（graceful=下一页游标 / hard=当前页游标，见不变量 20） |
 | `walker.go` | `runRecursiveWalk`：Mode 3 信号量递归列举，`sync.WaitGroup` 终止，不用 queue/inflight；中断时未启动 walk 记录裸 prefix |
-| `resume_list.go` | `-resume-list` 模式：`parseResumeListLine` 解析 `prefix\|token` 行（SplitN，契约是 prefix 不含 `\|`）、`readResumeList` 逐行解析+违约分流（空行→parse_failed，prefix 含 `\|`→invalid_keys，正常→entries） |
+| `resume_list.go` | `-resume-list` 模式：`parseResumeListLine` 解析 `prefix\|token` 行（SplitN，契约是 prefix 不含 `\|`）、`readResumeList` 逐行解析+违约分流（whitespace-only 行→parse_failed，prefix 含 `\|`→invalid_keys，正常→entries）。**空行 `""` 是合法条目**（根 prefix 第一页失败，prefix=="", token==""），不丢——否则用户没配 `-prefix` 时第一页 LIST 失败的 run 无法 resume |
 | `checker.go` | `Checker`（ctx=hardCtx）、`isNormalETag`（严格 32 位小写 hex）、`chunkSigRe`/`trailerRe`、`runProbes`/`buildProbesStatic`（探测矩阵） |
 | `backup.go` | `BackupChecker`：HEAD → 判型门 → 中转 → ETag 终验（**不探测**，见不变量 19）；relayRegular/relayMultipart 流式中转 |
 | `file_source.go` | 泛型 `fileSource[T]`：三个文件输入模式（-check-file/-list-file/-backup-file）共用的逐行读取骨架（读行→parse→parse_failed 记录→push），`MalformedLineError` |
@@ -169,6 +169,8 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 | `is_multipart_success_log` | `false` | 是否记录干净的多段对象到 `<ownerID>/ok_mp.txt` |
 | `node_isolate_threshold` | `3` | 节点隔离阈值：进程级累积的节点故障数（连接错误/超时/5xx，4xx 业务错误不计）达到该值才隔离节点；`1`=旧的首次故障即隔离。计数无时间衰减，跨 worker 共享 |
 | `node_recover_probe_interval` | `60` | 隔离节点恢复探测间隔（秒）。后台 goroutine 每隔该值对隔离节点 HEAD bucket，连续 2 次健康（`!isNodeFaultErr`，即任何正常 S3 应答）→ 恢复进轮询池并清零故障计数；`0`=禁用恢复（隔离在进程内永久，旧行为） |
+| `dial_timeout` | `10` | 单次 TCP 建连超时（秒）。建连阶段（SYN→SYN-ACK→ACK）上限。黑洞 IP（不路由、不回 RST）OS 默认 SYN 重试 ~75s（macOS）/ ~127s（Linux），默认 10s 兜底；`0`=Go net/http 默认（无超时，走 OS 默认）。负值启动报错。只控制建连阶段，不影响已建立连接上的请求/响应传输。所有 minio client（含 `noderecovery.probeNode`）共用 |
+| `response_header_timeout` | `0` | 等服务端响应头超时（秒）。请求发出后等 HTTP 响应头（status line + headers）的上限，不含响应体传输。服务端 accept 了 TCP 但进程挂死不响应时，这是唯一能检测的兜底。默认 `0` 不兜底（Go net/http 默认 = 无超时），用户遇到挂死服务端时显式配。负值启动报错 |
 | `progress_interval` | `5000` | 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；`0` 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；`0` 走默认 |
@@ -190,9 +192,9 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 | 文件 | 内容 | 何时写 |
 |---|---|---|
-| `list_failed.txt` | 列举失败 `prefix\|token`（token 为失败页 continuationToken，第一页失败/未启动时为单字段 prefix） | list worker 调用失败（list-only 模式也写）；优雅中断时未启动 prefix 亦写入；可直喂 `-resume-list` 补跑 |
+| `list_failed.txt` | 列举失败 `prefix\|token`（token 为失败页 continuationToken，第一页失败/未启动时为单字段 prefix；未配 `-prefix` 时根 prefix 失败写空行，合法条目） | list worker 调用失败（list-only 模式也写）；优雅中断时未启动 prefix 亦写入；可直喂 `-resume-list` 补跑（空行 = 根 prefix） |
 | `list_failed.log` | 列举失败结构化错误（slog text，req_id/prefix/http_code/s3_code/err） | 同上 |
-| `parse_failed.txt` | 输入解析失败的原始行（-check-file / -list-file / -backup-file / -resume-list 坏行、bkt 不匹配、空行） | `fileSource`/`readResumeList` 解析失败时写；不可自动补跑，需人工修输入 |
+| `parse_failed.txt` | 输入解析失败的原始行（-check-file / -list-file / -backup-file / -resume-list 坏行、bkt 不匹配、whitespace-only 行） | `fileSource`/`readResumeList` 解析失败时写；不可自动补跑，需人工修输入 |
 | `list_parse_failed.txt` | mode=offset 下 ETag 解析失败的 multipart 对象 `bucket\|key` | **仅 mode=offset + S3 LIST**：服务端未实现 header / ETag 格式不符 / offset > Size。行格式对齐 check_failed.txt，可直喂 `-check-file` 补跑（retry HEAD 重新取 ETag/Size）。配套 `list_parse_failed.log`（slog，bucket/key/owner/size/etag_len/etag，完整 ETag 无截断） |
 | `invalid_keys.txt` | 违反 `\|` 字段分隔契约的 key/prefix（原始字节，不套格式） | lister LIST 拿到 key 含 `\|`（跳过对象不进 objCh）；`WriteListFailed` prefix 含 `\|`（不写 list_failed 改写此文件） |
 | `check_failed.txt` | 普通对象校验失败 `bkt\|key` | checker 普通对象 RangeGet/HEAD 失败；硬停时队列中未探测对象亦快速失败落此文件；可直喂 `-check-file`/`-backup-file` 普通对象输入补跑 |

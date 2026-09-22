@@ -71,6 +71,8 @@ multipart_segment_size: 0           # 模式 2 的段长度(字节)，需与上�
 is_multipart_success_log: false     # 是否记录干净的多段对象到 <ownerID>/ok_mp.txt
 node_isolate_threshold: 3           # 节点隔离阈值（累积节点故障数达到才隔离；1=旧即时隔离）
 node_recover_probe_interval: 60     # 隔离节点恢复探测间隔秒数（连续 2 次健康恢复；0=禁用）
+dial_timeout: 10                    # 单次 TCP 建连超时秒数（黑洞 IP 默认 10s 兜底；0=Go 默认无超时）
+response_header_timeout: 0           # 等服务端响应头超时秒数（0=Go 默认无超时，不兜底）
 progress_interval: 5000             # 进度记录间隔
 obj_ch_capacity: 0                  # lister→checker channel 容量；0=max(check_concurrency*4, 2000)
 output_ch_capacity: 0               # output writer channel 容量；0=1024
@@ -98,6 +100,8 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `is_multipart_success_log` | `false` | `true` 时把干净的多段对象 key 写入 `<ownerID>/ok_mp.txt` |
 | `node_isolate_threshold` | `3` | 节点隔离阈值：进程级累积节点故障数（连接错误/超时/5xx，4xx 不计）达到才隔离节点，跨 worker 共享、无时间衰减；`1` 恢复旧的首次故障即隔离；故障后的重试一律换节点（仅剩单节点时同节点重试），真死节点不丢工作项 |
 | `node_recover_probe_interval` | `60` | 隔离节点恢复探测间隔（秒）：后台每轮 HEAD bucket，连续 2 次健康应答 → 恢复进轮询池并清零故障计数；`0` 禁用恢复（隔离进程内永久） |
+| `dial_timeout` | `10` | 单次 TCP 建连超时（秒）：建连阶段（SYN→SYN-ACK→ACK）上限。黑洞 IP（不路由、不回 RST）场景 OS 默认 SYN 重试要 ~75s（macOS）/ ~127s（Linux），默认 10s 兜底；`0` = Go net/http 默认（无超时，走 OS 默认）。负值启动报错。只控制建连阶段，不影响已建立连接上的请求/响应传输 |
+| `response_header_timeout` | `0` | 等服务端响应头超时（秒）：请求发出后等 HTTP 响应头（status line + headers）的上限，不含响应体传输。服务端 accept 了 TCP 但进程挂死不响应时，这是唯一能检测的兜底。默认 `0` 不兜底（Go net/http 默认 = 无超时，永远等），用户遇到挂死服务端时显式配。负值启动报错 |
 | `progress_interval` | `5000` | stdout 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；0 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；0 走默认 |
@@ -178,9 +182,9 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 ```
 <output_dir>/
 ├── run.log                     # 进程运行日志
-├── list_failed.txt             # 列举失败 `prefix|token`；token 是失败页的 continuationToken（第一页失败/未启动时为单字段 prefix），可喂给 -resume-list 续跑
+├── list_failed.txt             # 列举失败 `prefix|token`；token 是失败页的 continuationToken（第一页失败/未启动时为单字段 prefix）。未配 `-prefix` 时根 prefix 失败写空行（合法条目，可喂 `-resume-list` 续跑）
 ├── list_failed.log             # 列举失败结构化错误
-├── parse_failed.txt            # -check-file / -list-file / -backup-file / -resume-list 输入解析失败的原始行（坏行、bkt 不匹配、空行等）；不可自动续跑，需人工修输入文件
+├── parse_failed.txt            # -check-file / -list-file / -backup-file / -resume-list 输入解析失败的原始行（坏行、bkt 不匹配、whitespace-only 行等）；不可自动续跑，需人工修输入文件
 ├── invalid_keys.txt            # 违反 `|` 字段分隔契约的 key/prefix（S3 key 含 `|`）；不可被工具处理，需人工修数据或改工具
 ├── check_failed.txt            # 普通对象 RangeGet 失败 `bkt|key`（可直喂 -check-file / -backup-file 普通对象输入）
 ├── check_failed.log            # 普通对象 RangeGet 失败结构化错误
@@ -208,7 +212,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | 文件 | 触发场景 | 是否可自动补跑 | 补跑方式 |
 |---|---|---|---|
 | `list_failed.txt` | S3 LIST 调用失败（节点故障/5xx/超时/中断未启动） | 是 | `-resume-list <list_failed.txt>`（Mode 2 BFS，从失败页 token 续页） |
-| `parse_failed.txt` | 输入文件解析失败（坏行/bkt 不匹配/空行） | 否 | 人工修输入文件后重跑 |
+| `parse_failed.txt` | 输入文件解析失败（坏行/bkt 不匹配/whitespace-only 行） | 否 | 人工修输入文件后重跑 |
 | `invalid_keys.txt` | S3 key/prefix 含 `\|`（违反字段分隔契约） | 否 | 人工修数据或改工具 |
 | `check_failed.txt` | 普通对象 RangeGet 失败（状态未知） | 是 | `-check-file check_failed.txt` 重查；确认损坏后再 `-backup-file` |
 | `mp_check_failed.txt` | 多段对象分段 RangeGet 失败（状态未知） | 是 | `-check-file mp_check_failed.txt` 重查 |

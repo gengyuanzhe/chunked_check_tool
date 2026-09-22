@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -116,10 +117,20 @@ type UploadedPart struct {
 // internal nodes with self-signed certs); set secure=false for plain HTTP.
 // mpOffsetList wraps the transport with mpOffsetTransport so every LIST
 // request carries internal-list-mp-offset: true (multipart_check_mode=1).
-func NewMinioClient(endpoint, ak, sk string, secure, mpOffsetList bool) (*minio.Client, error) {
+// dialTimeout caps a single TCP dial attempt (0 = net/http default);
+// headerTimeout caps waiting for response headers after the request is sent
+// (0 = net/http default). Both bound black-hole / hung-server scenarios that
+// the OS default SYN retries would otherwise hang for ~75-127s.
+func NewMinioClient(endpoint, ak, sk string, secure, mpOffsetList bool, dialTimeout, headerTimeout time.Duration) (*minio.Client, error) {
 	tr := &http.Transport{
 		MaxIdleConnsPerHost: 32,
 		IdleConnTimeout:     90 * time.Second,
+	}
+	if dialTimeout > 0 {
+		tr.DialContext = (&net.Dialer{Timeout: dialTimeout}).DialContext
+	}
+	if headerTimeout > 0 {
+		tr.ResponseHeaderTimeout = headerTimeout
 	}
 	if secure {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
@@ -346,7 +357,8 @@ func (c *S3Client) rebuild() bool {
 
 // rebuildOn rebinds the client to the given node index.
 func (c *S3Client) rebuildOn(newIdx int) bool {
-	client, err := NewMinioClient(c.pool.Endpoint(newIdx), c.cfg.AK, c.cfg.SK, c.cfg.Scheme == "https", c.mpOffsetList())
+	client, err := NewMinioClient(c.pool.Endpoint(newIdx), c.cfg.AK, c.cfg.SK, c.cfg.Scheme == "https", c.mpOffsetList(),
+		time.Duration(c.cfg.DialTimeout)*time.Second, time.Duration(c.cfg.ResponseHeaderTimeout)*time.Second)
 	if err != nil {
 		return false
 	}

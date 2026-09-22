@@ -56,9 +56,11 @@ type Config struct {
 	// than threshold fall back to the multi-probe matrix (head + boundary
 	// + tail). 0 disables the fast-path entirely (always multi-probe).
 	WholeObjectProbeThreshold int  `yaml:"whole_object_probe_threshold"`
-	NodeIsolateThreshold   int64  `yaml:"node_isolate_threshold"`
-	NodeRecoverProbeInterval int64 `yaml:"node_recover_probe_interval"`
-	ProgressInterval        int    `yaml:"progress_interval"`
+	NodeIsolateThreshold     int64  `yaml:"node_isolate_threshold"`
+	NodeRecoverProbeInterval int64  `yaml:"node_recover_probe_interval"`
+	DialTimeout              int64  `yaml:"dial_timeout"`
+	ResponseHeaderTimeout    int64  `yaml:"response_header_timeout"`
+	ProgressInterval         int    `yaml:"progress_interval"`
 	ObjChCapacity           int    `yaml:"obj_ch_capacity"`
 	OutputChCapacity        int    `yaml:"output_ch_capacity"`
 	ResultLineFormat        string `yaml:"result_line_format"`
@@ -161,6 +163,24 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.NodeRecoverProbeInterval < 0 {
 		return nil, fmt.Errorf("node_recover_probe_interval must be >= 0 seconds (got %d)", cfg.NodeRecoverProbeInterval)
+	}
+	// DialTimeout caps a single TCP dial attempt against an endpoint. Default
+	// 10s: without it, a black-hole IP (unrouted, no RST) hangs ~75s on macOS
+	// / ~127s on Linux (OS default SYN retries). 0 = use Go net/http default
+	// (no cap, fall back to OS). Negative is invalid.
+	if cfg.DialTimeout == 0 {
+		cfg.DialTimeout = 10
+	}
+	if cfg.DialTimeout < 0 {
+		return nil, fmt.Errorf("dial_timeout must be >= 0 seconds (got %d)", cfg.DialTimeout)
+	}
+	// ResponseHeaderTimeout caps how long the client waits for response headers
+	// after sending the request. Default 0 (no cap): a normal S3 server returns
+	// headers in milliseconds, and a stuck server is caught by dial_timeout on
+	// the next request's reconnect — so we don't impose a header timeout by
+	// default. Users with hung-acceptor symptoms can opt in explicitly.
+	if cfg.ResponseHeaderTimeout < 0 {
+		return nil, fmt.Errorf("response_header_timeout must be >= 0 seconds (got %d)", cfg.ResponseHeaderTimeout)
 	}
 	return &cfg, nil
 }
