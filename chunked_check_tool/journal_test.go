@@ -372,7 +372,7 @@ func startCheckpointLoop(t *testing.T, dir string, tr *JournalTracker) (journalP
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runJournalCheckpoints(ctx, tr, o, journalPath)
+		runJournalCheckpoints(ctx, tr, o, journalPath, nil)
 		close(done)
 	}()
 	return journalPath, o, func() {
@@ -846,7 +846,7 @@ func TestJournalResumeRoundTrip(t *testing.T) {
 	jDone := make(chan struct{})
 	t.Cleanup(func() { out.Close() })
 	go func() {
-		runJournalCheckpoints(jCtx, tr, out, journalPath)
+		runJournalCheckpoints(jCtx, tr, out, journalPath, nil)
 		close(jDone)
 	}()
 	t.Cleanup(func() { jCancel(); <-jDone })
@@ -1067,5 +1067,45 @@ func TestSnapshotSkipsCursorWhenTokenHasPipeOrNewline(t *testing.T) {
 	}
 	if !foundP1 || !foundP2 {
 		t.Errorf("discovered = %v, want p1 and p2 present (top-re-list fallback)", snap.Discovered)
+	}
+}
+
+// TestCheckpointPostSeedTrigger — production wiring starts the checkpoint
+// loop BEFORE seeding (main launches the goroutine, then runs the seeding
+// branches), so the startup checkpoint sees an empty tracker and the seed
+// would otherwise land only at the first tick (10 minutes later): an early
+// kill left an empty journal and an unresumable run. The synchronous
+// post-seed trigger must persist the seed immediately.
+func TestCheckpointPostSeedTrigger(t *testing.T) {
+	orig := journalCheckpointInterval
+	journalCheckpointInterval = 10 * time.Second
+	defer func() { journalCheckpointInterval = orig }()
+
+	dir := t.TempDir()
+	o, err := NewOutput(&Config{OutputDir: dir, IsCheck: true}, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { o.Close() })
+	journalPath := filepath.Join(dir, "journal.txt")
+
+	tr := NewJournalTracker()
+	// Production ordering: the loop is ALREADY running when seeds land.
+	r := StartJournalCheckpoints(tr, o, journalPath)
+	defer r.Stop()
+
+	tr.RecordSeed("", "")
+	tr.RecordSeed("media", "tok1")
+
+	r.CheckpointNow()
+
+	data, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"discovered|\n", "discovered|media\n", "cursor|media|tok1\n"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("journal after post-seed trigger missing %q (got %q) — early kill is unresumable", want, data)
+		}
 	}
 }

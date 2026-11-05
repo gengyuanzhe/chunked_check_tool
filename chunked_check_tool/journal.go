@@ -364,10 +364,11 @@ var journalCheckpointInterval = 10 * time.Minute
 
 // runJournalCheckpoints persists scan progress to journalPath until ctx is
 // cancelled, then once more (final state) and returns. One checkpoint runs
-// IMMEDIATELY at start, before any tick: the seed line lands in the journal
-// before listing begins, so a kill inside the FIRST interval still leaves a
-// resumable root (and a resume run killed before its first page keeps its
-// seed token).
+// IMMEDIATELY at start, before any tick — but production wiring starts this
+// loop BEFORE seeding, so that checkpoint sees an empty tracker. The seed
+// lands via the trigger channel instead: main calls JournalRunner's
+// CheckpointNow right after seeding, making the seed durable long before
+// the first tick (a kill seconds after seeding stays resumable).
 //
 // Each checkpoint is the ordering-invariant sequence from spec §5:
 //
@@ -381,7 +382,7 @@ var journalCheckpointInterval = 10 * time.Minute
 //
 // Lifecycle: cancel ctx after listing and checking have fully finished and
 // BEFORE out.Close() — FlushAndWait must never meet closed channels.
-func runJournalCheckpoints(ctx context.Context, tr *JournalTracker, out *Output, journalPath string) {
+func runJournalCheckpoints(ctx context.Context, tr *JournalTracker, out *Output, journalPath string, trigger <-chan chan struct{}) {
 	f, err := os.OpenFile(journalPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		// The scan itself stays correct without a journal; only kill -9
@@ -407,10 +408,59 @@ func runJournalCheckpoints(ctx context.Context, tr *JournalTracker, out *Output,
 		case <-ctx.Done():
 			checkpoint()
 			return
+		case reply := <-trigger:
+			checkpoint()
+			close(reply)
 		case <-ticker.C:
 			checkpoint()
 		}
 	}
+}
+
+// JournalRunner owns the checkpoint loop's lifecycle: the periodic ticker
+// plus on-demand synchronous checkpoints (the post-seed one above).
+type JournalRunner struct {
+	cancel  context.CancelFunc
+	trigger chan chan struct{}
+	done    chan struct{}
+}
+
+// StartJournalCheckpoints launches the loop. Stop cancels it and waits for
+// the final checkpoint; CheckpointNow forces one checkpoint synchronously.
+func StartJournalCheckpoints(tr *JournalTracker, out *Output, journalPath string) *JournalRunner {
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &JournalRunner{
+		cancel:  cancel,
+		trigger: make(chan chan struct{}),
+		done:    make(chan struct{}),
+	}
+	go func() {
+		runJournalCheckpoints(ctx, tr, out, journalPath, r.trigger)
+		close(r.done)
+	}()
+	return r
+}
+
+// CheckpointNow runs one checkpoint synchronously. No-op after the loop has
+// stopped (done guards the send against blocking on a dead select).
+func (r *JournalRunner) CheckpointNow() {
+	reply := make(chan struct{})
+	select {
+	case r.trigger <- reply:
+	case <-r.done:
+		return
+	}
+	select {
+	case <-reply:
+	case <-r.done:
+	}
+}
+
+// Stop cancels the loop and waits for its final checkpoint to finish. Call
+// after listing/checking are fully done and BEFORE out.Close().
+func (r *JournalRunner) Stop() {
+	r.cancel()
+	<-r.done
 }
 
 // journalAppendFile is the file surface appendJournalBatch needs; an

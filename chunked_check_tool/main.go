@@ -313,23 +313,14 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 	// -resume-list run is just as long and just as killable). File inputs
 	// and Mode 1/3 do not journal. Created before seeding (seeds are
 	// journaled) and before the check workers (they report terminals).
+	// CheckpointNow is fired right after seeding: the seed must be durable
+	// before the first 10-minute tick, not at it.
 	var journal *JournalTracker
-	var journalStop func()
+	var journalRun *JournalRunner
 	if cfg.ListType == 2 && fileInput == FileInputNone {
 		journal = NewJournalTracker()
 		lister.SetJournal(journal)
-		jCtx, jCancel := context.WithCancel(context.Background())
-		jDone := make(chan struct{})
-		go func() {
-			runJournalCheckpoints(jCtx, journal, out, filepath.Join(cfg.OutputDir, "journal.txt"))
-			close(jDone)
-		}()
-		// Synchronous stop: the final checkpoint's FlushAndWait must never
-		// overlap out.Close() (the writer goroutines it drains would be gone).
-		journalStop = func() {
-			jCancel()
-			<-jDone
-		}
+		journalRun = StartJournalCheckpoints(journal, out, filepath.Join(cfg.OutputDir, "journal.txt"))
 	}
 	printer.SetQueueSnapshotProvider(func() QueueSnapshot {
 		cor, mpAll, cmp, mpOk, mcf, lf, cf, su, lpf := out.ChannelSnapshot()
@@ -528,6 +519,12 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 		seeded = true
 	}
 
+	// The seed is durable NOW, not at the first tick: an early kill -9
+	// resumes instead of restarting the whole scan.
+	if journalRun != nil {
+		journalRun.CheckpointNow()
+	}
+
 	// If nothing was seeded, close the queue so list workers exit instead of
 	// blocking forever on Pop.
 	if !seeded {
@@ -559,8 +556,8 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 	// All work is terminal: stop the journal (its final checkpoint runs
 	// FlushAndWait, which needs the writer goroutines still alive) BEFORE
 	// closing the output.
-	if journalStop != nil {
-		journalStop()
+	if journalRun != nil {
+		journalRun.Stop()
 	}
 
 	if err := out.Close(); err != nil {

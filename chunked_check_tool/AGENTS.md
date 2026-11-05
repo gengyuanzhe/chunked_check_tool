@@ -136,10 +136,10 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 21. **Mode 2 journal：kill -9 断点续跑**（`journal.go`，spec `docs/superpowers/specs/2026-11-05-resume-journal-design.md`）：
   - **启用条件**：`list_type=2 ∧ 文件输入=无`——全新扫描、`-resume-list` 恢复轮、`-resume-journal` 恢复轮都记账（`-resume-list` 轮同样长跑、同样会被 kill）。`journal.txt` 落输出目录根，append-only；恢复后写新时间戳目录的新 journal。
-  - **三行格式**：`discovered|<prefix>` / `cursor|<prefix>|<token>` / `done|<prefix>`。解析规则：discovered/done 的 prefix = 整行余量（容 `|`）；cursor 在余量取**最后一个** `|` 切分（token 契约保证不含 `|`）；重放取每 prefix 最后一条事件；末尾无换行的残行丢弃（kill 撕裂批次，安全方向）；其他坏行报错（机器写的文件，中间坏 = 真损坏）。
+  - **三行格式**：`discovered|<prefix>` / `cursor|<prefix>|<token>` / `done|<prefix>`。解析规则：discovered/done 的 prefix = 整行余量（容 `|`）；cursor 在余量取**最后一个** `|` 切分（发射侧保证 token 不含 `|`/`\n`，含则跳过该游标行，见下"checkpoint 时机"）；重放取每 prefix 最后一条事件；末尾无换行的残行丢弃（kill 撕裂批次，安全方向）；其他坏行报错（机器写的文件，中间坏 = 真损坏）。
   - **"完成"的语义**（正确性核心）：prefix 的某页"完成" = 该页**全部**对象的结果行已推入输出 channel——不是"列举过"、不是"发射过"。页的待终态计数在 `ListPage` 成功时按 `len(objs)` **整页一次性登记**（硬停打断半页时计数永不归零 → 水位冻在该页前 → 恢复重列整页）；`Terminal` 由 checker `Handle` 的 **defer** 上报（体 = 结果行已推 channel）；lister 短路对象（key 含 `|`）与 list-only 分类即终态。
-  - **顺序不变量**（违反任意一条 = 覆盖漏洞）：① `AddDiscovered` 必须先于该页任何对象发射（否则"父页已终态、子前缀未记账"可同框快照，子树蒸发）；② checkpoint 固定顺序 = **快照 tracker → `Output.FlushAndWait` → 写批次（discovered 行在 cursor/done 行前）→ Commit**——先快照后 flush 的因果：Terminal 在行推入 channel 之后才计数，快照里的每个终态的行必在该次 flush 覆盖内；③ `journalStop`（同步等最终 checkpoint 完成）必须在 `out.Close()` **之前**——FlushAndWait 依赖 writer goroutine 存活。
-  - **checkpoint 时机**：`runJournalCheckpoints` 启动**立即首检**（种子行在列举开始前落盘——极早期 kill 也有可恢复的 scope），此后每 `journalCheckpointInterval`（10min 常量、包级 var）一次，ctx 取消时终检一次。恢复入口 `-resume-journal`：done 跳过、cursor 用 `SeedWithToken` 续、仅 discovered 裸列；**与 `-prefix` 互斥**（journal 即 scope）；空 journal 报错提示用原命令重跑（启动即首检后，空 = 路径错/手工清空）。
+  - **顺序不变量**（违反任意一条 = 覆盖漏洞）：① `AddDiscovered` 必须先于该页任何对象发射（否则"父页已终态、子前缀未记账"可同框快照，子树蒸发）；② checkpoint 固定顺序 = **快照 tracker → `Output.FlushAndWait` → 写批次（discovered 行在 cursor/done 行前；写短了回滚到批次前偏移，防撕裂残行被下批嫁接）→ Commit**——先快照后 flush 的因果：Terminal 在行推入 channel 之后才计数，快照里的每个终态的行必在该次 flush 覆盖内；③ `journalRun.Stop()`（同步等最终 checkpoint 完成）必须在 `out.Close()` **之前**——FlushAndWait 依赖 writer goroutine 存活。
+  - **checkpoint 时机**：种子落盘靠 **seeding 完成后立即触发的同步 checkpoint**（`JournalRunner.CheckpointNow`，main 在 seeding 分支链结束后调用）——checkpoint 循环先于 seeding 启动，其启动首检时刻 tracker 必为空；种子必须靠显式触发而非等首个 tick（否则头 10 分钟内 kill = 空 journal 不可恢复）。此后每 `journalCheckpointInterval`（10min 常量、包级 var）一次，ctx 取消时终检一次。游标行文法按余量**最后一个** `|` 切分，隐含 token 不含 `|`；V1 的 NextMarker 是真实 key、可能含 `|`（或 `\n`），此类 token **跳过游标行不写**（前缀仍是 discovered，恢复时整前缀重列——多做工作、不漏对象）。恢复入口 `-resume-journal`：done 跳过、cursor 用 `SeedWithToken` 续、仅 discovered 裸列；**与 `-prefix` 互斥**（journal 即 scope）；空 journal 报错提示用原命令重跑（CheckpointNow 之后仍空 = 路径错/手工清空）。
   - **内存**：Commit 后 done 前缀从内存 map 删除、水位以下簿记丢弃（journal 文件是权威全量）——活跃内存 = 一个周期的增量 + in-flight，不随桶规模增长。
   - **验收标准**：任何出错/竞态的后果只能是"恢复时多做工作"，不允许"有对象漏检"——单测钉死：`TestTrackerFrozenOnPartialPage`、`TestListerJournalHardAbortFreezesPosition`、`TestCheckpointOrderAndDurability`、`TestJournalResumeRoundTrip`。
 
@@ -469,7 +469,7 @@ sort $KILL_DIR/journal.txt | uniq -c | head   # 抽样看状态分布（discover
 
 期望：
 
-- kill -9 退出码 137；被 kill 轮的 `journal.txt` 存在且非空——启动即首检保证种子行在列举开始前就落盘，所以哪怕 kill 很早也有可恢复的 scope
+- kill -9 退出码 137；被 kill 轮的 `journal.txt` 存在且非空——seeding 完成后立即同步 checkpoint（`CheckpointNow`）保证种子行早于首个 tick 落盘，所以哪怕 kill 很早也有可恢复的 scope
 - 续跑轮 summary `list_failed: 0`；**两轮 `list_all` 之和 == `mc ls --recursive local/testbucket | wc -l`**（无丢失无重复的完备性证明，同 §7.3 判据）
 - journal 语义抽验：被 kill 轮 journal 里 `done|<p>` 的前缀，续跑轮不再列举；`cursor|<p>|<t>` 的前缀从 t 续列（续跑轮 run.log 的 config 快照含 `resume_journal:` 行）
 - 时序无要求：kill 早了 journal 里可能只有 discovered 行（未启动的裸前缀重列，安全）；kill 晚了 done 多一些——任何时点恢复都不漏对象，损失 ≤ 10 分钟工作量
