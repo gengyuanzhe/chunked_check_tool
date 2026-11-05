@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -771,5 +772,192 @@ func TestListerJournalListOnlyTerminals(t *testing.T) {
 
 	if snap := tr.Snapshot(); !containsString(snap.Dones, "root/") {
 		t.Errorf("done = false in list-only mode; snapshot: %+v", snap)
+	}
+}
+
+// TestSeedFromJournal — replayed states seed the BFS: done prefixes are
+// skipped, cursor entries continue from their token, discovered-only
+// prefixes list from the top.
+func TestSeedFromJournal(t *testing.T) {
+	l := NewLister(NewQueue(), nil, NewStats(), &Config{ListType: 2, IsCheck: true})
+	states := map[string]journalState{
+		"p1": {Discovered: true, Done: true},
+		"p2": {Discovered: true, Token: "T"},
+		"p3": {Discovered: true},
+	}
+	if !seedFromJournal(states, l) {
+		t.Fatal("seedFromJournal = false, want true (something to seed)")
+	}
+	seeds := l.queue.Drain()
+	if len(seeds) != 2 {
+		t.Fatalf("queue = %v, want 2 seeds", seeds)
+	}
+	got := map[string]bool{}
+	for _, s := range seeds {
+		got[s] = true
+	}
+	if !got["p2\x00T"] || !got["p3"] {
+		t.Errorf("seeds = %v, want {p2\\x00T, p3} (done p1 skipped)", seeds)
+	}
+}
+
+// TestLoadJournalForResumeEmpty — an empty journal cannot be resumed: the
+// run died before its first checkpoint (or the path is wrong). Scanning
+// nothing silently would look like a completed scan.
+func TestLoadJournalForResumeEmpty(t *testing.T) {
+	if _, err := loadJournalForResume(writeJournal(t, "")); err == nil {
+		t.Errorf("empty journal = nil error, want error")
+	}
+}
+
+// TestLoadJournalForResumeMissing — a missing journal file is an operator
+// error, surfaced before any scan work.
+func TestLoadJournalForResumeMissing(t *testing.T) {
+	if _, err := loadJournalForResume(filepath.Join(t.TempDir(), "nope.txt")); err == nil {
+		t.Errorf("missing journal = nil error, want error")
+	}
+}
+
+// TestJournalResumeRoundTrip — the kill -9 recovery loop end to end: a
+// pipeline killed with pages emitted-but-unprobed leaves a journal whose
+// replayed frontier seeds EXACTLY the un-done remainder.
+func TestJournalResumeRoundTrip(t *testing.T) {
+	orig := journalCheckpointInterval
+	journalCheckpointInterval = 5 * time.Millisecond
+	defer func() { journalCheckpointInterval = orig }()
+
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, ListType: 2, IsCheck: true}
+	out, err := NewOutput(cfg, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := NewJournalTracker()
+	l := NewLister(NewQueue(), out, NewStats(), cfg)
+	l.SetJournal(tr)
+	c := NewChecker(context.Background(), &scriptedS3{}, out, NewStats(), cfg)
+	c.SetJournal(tr)
+
+	// Checkpoint loop mirrors run()'s wiring; registered cleanups replicate
+	// run()'s shutdown order (stop the loop, then close the output).
+	journalPath := filepath.Join(dir, "journal.txt")
+	jCtx, jCancel := context.WithCancel(context.Background())
+	jDone := make(chan struct{})
+	t.Cleanup(func() { out.Close() })
+	go func() {
+		runJournalCheckpoints(jCtx, tr, out, journalPath)
+		close(jDone)
+	}()
+	t.Cleanup(func() { jCancel(); <-jDone })
+
+	const normal = "0123456789abcdef0123456789abcdef"
+	fake := &scriptedS3{pages: map[string][]pageResult{
+		"root/": {
+			{objs: []ObjectInfo{{Key: "root/a", ETag: normal}, {Key: "root/b", ETag: normal}}, prefixes: []string{"root/sub/"}, nextToken: "tok2"},
+			{objs: []ObjectInfo{{Key: "root/c", ETag: normal}, {Key: "root/d", ETag: normal}}, nextToken: "tok3"},
+			{objs: []ObjectInfo{{Key: "root/e", ETag: normal}, {Key: "root/f", ETag: normal}}, nextToken: ""},
+		},
+	}}
+
+	l.Seed("root/")
+	objCh := make(chan VerifyTask, 8)
+	prefixDone := make(chan struct{})
+	go func() {
+		defer close(prefixDone)
+		l.processPrefix(context.Background(), context.Background(), "root/", "", objCh, fake, nil)
+	}()
+	// Checkers probe the first page's objects (terminals flow, page 0
+	// completes). The rest are emitted but never probed — the kill window.
+	for i := 0; i < 2; i++ {
+		select {
+		case task := <-objCh:
+			c.Handle(task)
+		case <-time.After(2 * time.Second):
+			t.Fatal("page 0 task never arrived")
+		}
+	}
+	<-prefixDone
+	time.Sleep(50 * time.Millisecond) // let ticks commit the quiesced state
+
+	// The "killed process's" journal, replayed cold.
+	states, err := ReplayJournal(journalPath)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	root := states["root/"]
+	if !root.Discovered || root.Done || root.Token != "tok2" {
+		t.Errorf("root/ = %+v, want {Discovered, Token: tok2, !Done} (cursor frozen at the last fully-probed page)", root)
+	}
+	sub := states["root/sub/"]
+	if !sub.Discovered || sub.Done || sub.Token != "" {
+		t.Errorf("root/sub/ = %+v, want {Discovered only}", sub)
+	}
+
+	// Seed the next run from the replayed frontier.
+	l2 := NewLister(NewQueue(), nil, NewStats(), &Config{ListType: 2, IsCheck: true})
+	seedFromJournal(states, l2)
+	seeds := map[string]bool{}
+	for _, s := range l2.queue.Drain() {
+		seeds[s] = true
+	}
+	if !seeds["root/\x00tok2"] || !seeds["root/sub/"] || len(seeds) != 2 {
+		t.Errorf("resume seeds = %v, want {root/\\x00tok2, root/sub/} — exactly the un-done remainder", seeds)
+	}
+}
+
+// TestJournalEnabledOnlyMode2S3List — the journal only exists for Mode 2
+// S3-listing runs: Mode 1 and file-input modes must not create journal.txt.
+func TestJournalEnabledOnlyMode2S3List(t *testing.T) {
+	runWithCfg := func(t *testing.T, cfgYAML string, args string) string {
+		t.Helper()
+		dir := t.TempDir()
+		cfgPath := filepath.Join(dir, "cfg.yaml")
+		if err := os.WriteFile(cfgPath, []byte(cfgYAML+"output_dir: "+dir+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadConfig(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		// args carries the mode-specific flag payload; unused here for Mode 1.
+		_ = args
+		listCtx, cancel := context.WithCancel(context.Background())
+		cancel() // pre-cancelled: no network, no listing, run returns errInterrupted
+		_ = run(listCtx, context.Background(), cfg, "mybucket", "", "", "", "", "", "", "", &buf)
+		return cfg.OutputDir
+	}
+
+	base := "endpoints:\n  - 127.0.0.1:1\nscheme: http\nak: test\nsk: test\n" +
+		"list_concurrency: 2\ncheck_concurrency: 2\nis_check: true\nprogress_interval: 1000\n"
+
+	outDir := runWithCfg(t, base+"list_type: 1\n", "")
+	if _, err := os.Stat(filepath.Join(outDir, "journal.txt")); !os.IsNotExist(err) {
+		t.Errorf("Mode 1 created journal.txt (err=%v), want none", err)
+	}
+
+	// -check-file: file input, no journal even though list_type=2.
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "cfg.yaml")
+	cfgContent := "endpoints:\n  - 127.0.0.1:1\nscheme: http\nak: test\nsk: test\n" +
+		"list_type: 2\nlist_concurrency: 2\ncheck_concurrency: 2\noutput_dir: " + dir + "\n" +
+		"is_check: true\nprogress_interval: 1000\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkPath := filepath.Join(dir, "check.txt")
+	if err := os.WriteFile(checkPath, []byte("wrongbucket|k\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := run(context.Background(), context.Background(), cfg, "mybucket", "", "", checkPath, "", "", "", "", &buf); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.OutputDir, "journal.txt")); !os.IsNotExist(err) {
+		t.Errorf("check-file mode created journal.txt (err=%v), want none", err)
 	}
 }

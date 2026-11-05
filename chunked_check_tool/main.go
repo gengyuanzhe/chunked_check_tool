@@ -33,6 +33,7 @@ func main() {
 	checkFile := flag.String("check-file", "", "check file path: mixed lines of bkt|key (regular) or bkt|key|partcnt|offset0|... (multipart); re-checks the failure files of a prior run (check_failed.txt / mp_check_failed.txt / mismatch.txt); requires is_check=true")
 	backupFile := flag.String("backup-file", "", "backup list file path: mixed lines of bkt|key (regular) or bkt|key|partcnt|offset0|... (multipart); heads each object, validates the type against the HEAD ETag, and relays it into backup_bucket without probing")
 	resumeList := flag.String("resume-list", "", "resume file path: lines of prefix|token (or prefix) from a prior run's list_failed.txt; re-enumerates from each failed page's cursor. Mode 2 only; mutually exclusive with the other file flags")
+	resumeJournal := flag.String("resume-journal", "", "resume file path: journal.txt from a prior Mode 2 run killed by kill -9; replays the scan frontier (done prefixes skipped, in-flight prefixes continued from their cursor). Mode 2 only; mutually exclusive with the other file flags; -prefix must be empty (the journal defines the scope)")
 	flag.Parse()
 
 	if *cfgPath == "" || *bucket == "" {
@@ -49,15 +50,15 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	// The four file flags are mutually exclusive input sources.
+	// The five file flags are mutually exclusive input sources.
 	fileFlags := 0
-	for _, s := range []string{*listFile, *checkFile, *backupFile, *resumeList} {
+	for _, s := range []string{*listFile, *checkFile, *backupFile, *resumeList, *resumeJournal} {
 		if s != "" {
 			fileFlags++
 		}
 	}
 	if fileFlags > 1 {
-		fmt.Fprintln(os.Stderr, "usage: -list-file / -check-file / -backup-file / -resume-list are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "usage: -list-file / -check-file / -backup-file / -resume-list / -resume-journal are mutually exclusive")
 		os.Exit(2)
 	}
 	if (*listFile != "" || *checkFile != "") && !cfg.IsCheck {
@@ -70,8 +71,14 @@ func main() {
 	// to; Mode 3's recursive walk exposes no per-prefix cursor). Listing
 	// failures under Mode 1/3 are retried by re-running the original scan
 	// (idempotent; the cross-run union absorbs duplicates).
-	if *resumeList != "" && cfg.ListType != 2 {
-		fmt.Fprintln(os.Stderr, "usage: -resume-list requires list_type=2 (BFS)")
+	if (*resumeList != "" || *resumeJournal != "") && cfg.ListType != 2 {
+		fmt.Fprintln(os.Stderr, "usage: -resume-list / -resume-journal require list_type=2 (BFS)")
+		os.Exit(2)
+	}
+	// -resume-journal defines its own scan scope (the journal's prefix set);
+	// a -prefix on the same command line would silently disagree with it.
+	if *resumeJournal != "" && *prefix != "" {
+		fmt.Fprintln(os.Stderr, "usage: -resume-journal cannot be combined with -prefix (the journal defines the scan scope)")
 		os.Exit(2)
 	}
 	if *backupFile != "" && cfg.BackupBucket == "" {
@@ -105,12 +112,12 @@ func main() {
 	mwErr := io.MultiWriter(os.Stderr, runLog)
 	log.SetOutput(mwErr)
 
-	printConfig(mwOut, *cfgPath, cfg, *bucket, *prefix, *startAfter, *listFile, *checkFile, *backupFile, *resumeList, runLogPath)
+	printConfig(mwOut, *cfgPath, cfg, *bucket, *prefix, *startAfter, *listFile, *checkFile, *backupFile, *resumeList, *resumeJournal, runLogPath)
 
 	listCtx, hardCtx, stopSignals := installSignalHandler()
 	defer stopSignals()
 
-	if err := run(listCtx, hardCtx, cfg, *bucket, *prefix, *startAfter, *listFile, *checkFile, *backupFile, *resumeList, mwOut); err != nil {
+	if err := run(listCtx, hardCtx, cfg, *bucket, *prefix, *startAfter, *listFile, *checkFile, *backupFile, *resumeList, *resumeJournal, mwOut); err != nil {
 		log.Fatalf("run: %v", err)
 	}
 }
@@ -164,7 +171,7 @@ func installSignalHandler() (listCtx, hardCtx context.Context, stop func()) {
 // run.log (which persists) doesn't leak the secret; ak is shown in clear.
 // Each line is indented 4 spaces for readability against the progress/summary
 // lines that surround it in run.log.
-func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, startAfter, listFile, checkFile, backupFile, resumeList, runLogPath string) {
+func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, startAfter, listFile, checkFile, backupFile, resumeList, resumeJournal, runLogPath string) {
 	fmt.Fprintf(w, "=== config ===\n")
 	fmt.Fprintf(w, "    config: %s\n", cfgPath)
 	fmt.Fprintf(w, "    bucket: %s\n", bucket)
@@ -174,6 +181,7 @@ func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, start
 	fmt.Fprintf(w, "    check_file: %s\n", orEmpty(checkFile))
 	fmt.Fprintf(w, "    backup_file: %s\n", orEmpty(backupFile))
 	fmt.Fprintf(w, "    resume_list: %s\n", orEmpty(resumeList))
+	fmt.Fprintf(w, "    resume_journal: %s\n", orEmpty(resumeJournal))
 	fmt.Fprintf(w, "    backup_bucket: %s\n", orEmpty(cfg.BackupBucket))
 	fmt.Fprintf(w, "    endpoints: %s\n", strings.Join(cfg.Endpoints, ", "))
 	fmt.Fprintf(w, "    scheme: %s\n", cfg.Scheme)
@@ -254,7 +262,7 @@ func drainQueuedPrefixes(listCtx context.Context, q *Queue, out *Output, stats *
 // The two contexts come from installSignalHandler: listCtx stops listing
 // (graceful drain begins), hardCtx aborts in-flight work (see Checker /
 // BackupChecker / Lister comments).
-func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAfter, listFile, checkFile, backupFile, resumeList string, stdout io.Writer) error {
+func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAfter, listFile, checkFile, backupFile, resumeList, resumeJournal string, stdout io.Writer) error {
 	// Backup mode: an entirely separate pipeline (HEAD + type gate + relay);
 	// see runBackup. Dispatched before any list/check wiring.
 	if backupFile != "" {
@@ -299,6 +307,30 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 	objCh := make(chan VerifyTask, objChCap)
 	q := NewQueue()
 	lister := NewLister(q, out, stats, cfg)
+
+	// Journal: kill -9 resumability for every Mode 2 S3-listing run (fresh
+	// scans, -resume-list recovery, -resume-journal recovery alike — a
+	// -resume-list run is just as long and just as killable). File inputs
+	// and Mode 1/3 do not journal. Created before seeding (seeds are
+	// journaled) and before the check workers (they report terminals).
+	var journal *JournalTracker
+	var journalStop func()
+	if cfg.ListType == 2 && fileInput == FileInputNone {
+		journal = NewJournalTracker()
+		lister.SetJournal(journal)
+		jCtx, jCancel := context.WithCancel(context.Background())
+		jDone := make(chan struct{})
+		go func() {
+			runJournalCheckpoints(jCtx, journal, out, filepath.Join(cfg.OutputDir, "journal.txt"))
+			close(jDone)
+		}()
+		// Synchronous stop: the final checkpoint's FlushAndWait must never
+		// overlap out.Close() (the writer goroutines it drains would be gone).
+		journalStop = func() {
+			jCancel()
+			<-jDone
+		}
+	}
 	printer.SetQueueSnapshotProvider(func() QueueSnapshot {
 		cor, mpAll, cmp, mpOk, mcf, lf, cf, su, lpf := out.ChannelSnapshot()
 		return QueueSnapshot{
@@ -326,6 +358,9 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 			go func(w S3API, lc *localCounter) {
 				defer checkWg.Done()
 				c := NewChecker(hardCtx, w, out, stats, cfg)
+				if journal != nil {
+					c.SetJournal(journal)
+				}
 				for obj := range objCh {
 					c.Handle(obj)
 					lc.incr(stats, "checked")
@@ -462,6 +497,17 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 			stats.SetListDuration(time.Since(listStart))
 		}()
 		seeded = true
+	} else if resumeJournal != "" {
+		// Mode 2 + -resume-journal: replay the killed run's journal and seed
+		// the un-done frontier — done prefixes skipped, cursor entries
+		// continued from their token, discovered-only prefixes listed from
+		// the top. No re-walk of the completed tree: the frontier IS the seed.
+		states, err := loadJournalForResume(resumeJournal)
+		if err != nil {
+			seedErr = err
+		} else {
+			seeded = seedFromJournal(states, lister)
+		}
 	} else if resumeList != "" {
 		// Mode 2 + -resume-list: read list_failed.txt lines of "prefix|token"
 		// (or "prefix" when the first page failed), seed each (prefix, token)
@@ -508,6 +554,13 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 		// locally in list-only mode and main does not send to objCh).
 		for range objCh {
 		}
+	}
+
+	// All work is terminal: stop the journal (its final checkpoint runs
+	// FlushAndWait, which needs the writer goroutines still alive) BEFORE
+	// closing the output.
+	if journalStop != nil {
+		journalStop()
 	}
 
 	if err := out.Close(); err != nil {

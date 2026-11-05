@@ -433,3 +433,41 @@ func appendJournalBatch(f *os.File, snap journalSnapshot) error {
 	_, err := f.Write(b)
 	return err
 }
+
+// loadJournalForResume reads and sanity-checks a journal for resuming. An
+// empty journal means the run died before its first checkpoint (with the
+// loop's immediate startup checkpoint, that takes a kill within the very
+// first moments) or the path is wrong: silently scanning nothing would look
+// like a completed scan, so fail with guidance to re-run the original
+// command instead.
+func loadJournalForResume(path string) (map[string]journalState, error) {
+	states, err := ReplayJournal(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(states) == 0 {
+		return nil, fmt.Errorf("journal %q has no entries: the run died before its first checkpoint or the path is wrong — re-run the original scan command", path)
+	}
+	return states, nil
+}
+
+// seedFromJournal seeds the BFS from a replayed journal state table: done
+// prefixes are skipped, cursor entries continue from their token, anything
+// else lists from the top. Returns whether anything was seeded (drives the
+// empty-queue close, same as the other seed paths).
+func seedFromJournal(states map[string]journalState, lister *Lister) bool {
+	seeded := false
+	for prefix, st := range states {
+		switch {
+		case st.Done:
+			// fully covered by the killed run — skip
+		case st.Token != "":
+			lister.SeedWithToken(prefix, st.Token)
+			seeded = true
+		default:
+			lister.Seed(prefix)
+			seeded = true
+		}
+	}
+	return seeded
+}

@@ -290,7 +290,7 @@ func TestRunInterruptedDrainsQueue(t *testing.T) {
 	listCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var buf strings.Builder
-	err = run(listCtx, context.Background(), cfg, "mybucket", "scanscope/", "", "", "", "", "", &buf)
+	err = run(listCtx, context.Background(), cfg, "mybucket", "scanscope/", "", "", "", "", "", "", &buf)
 	if !errors.Is(err, errInterrupted) {
 		t.Fatalf("run err = %v, want errInterrupted", err)
 	}

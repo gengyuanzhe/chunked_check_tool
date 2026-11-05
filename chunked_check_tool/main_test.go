@@ -45,7 +45,7 @@ func TestRunEndToEnd_smoke(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var buf bytes.Buffer
-	if err := run(ctx, ctx, cfg, os.Getenv("S3_BUCKET"), os.Getenv("S3_PREFIX"), "", "", "", "", "", &buf); err != nil {
+	if err := run(ctx, ctx, cfg, os.Getenv("S3_BUCKET"), os.Getenv("S3_PREFIX"), "", "", "", "", "", "", &buf); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -82,7 +82,7 @@ func TestRunCheckFileDispatch(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err = run(context.Background(), context.Background(), cfg, "mybucket", "", "", "", checkPath, "", "", &buf)
+	err = run(context.Background(), context.Background(), cfg, "mybucket", "", "", "", checkPath, "", "", "", &buf)
 	if err != nil {
 		t.Fatalf("run returned err: %v (want nil)", err)
 	}
@@ -147,7 +147,7 @@ func TestRunCheckFileEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", "", checkPath, "", "", &buf); err != nil {
+	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", "", checkPath, "", "", "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 
@@ -216,7 +216,7 @@ func TestRunListFileDispatch(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err = run(context.Background(), context.Background(), cfg, "mybucket", "", "", listPath, "", "", "", &buf)
+	err = run(context.Background(), context.Background(), cfg, "mybucket", "", "", listPath, "", "", "", "", &buf)
 	if err != nil {
 		t.Fatalf("run returned err: %v (want nil — list-file mode returns nil on completion)", err)
 	}
@@ -278,7 +278,7 @@ func TestRunListFileMultipartResultsEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", listPath, "", "", "", &buf); err != nil {
+	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", listPath, "", "", "", "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 
@@ -322,7 +322,7 @@ func TestRunListFileProgressLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", listPath, "", "", "", &buf); err != nil {
+	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", listPath, "", "", "", "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 	out := buf.String()
