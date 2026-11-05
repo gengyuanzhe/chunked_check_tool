@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -408,12 +409,26 @@ func runJournalCheckpoints(ctx context.Context, tr *JournalTracker, out *Output,
 	}
 }
 
+// journalAppendFile is the file surface appendJournalBatch needs; an
+// interface lets tests inject short-write/rollback behavior.
+type journalAppendFile interface {
+	io.Writer
+	io.Seeker
+	Truncate(size int64) error
+}
+
 // appendJournalBatch writes one checkpoint batch: all discovered lines
 // first, then cursors, then dones. The within-batch order matters for the
 // torn mid-batch kill: "child discovered, parent not done" is recoverable
 // (re-list the parent), while the reverse would drop the subtree from the
 // replayed frontier entirely.
-func appendJournalBatch(f *os.File, snap journalSnapshot) error {
+//
+// A short write (ENOSPC, EIO) would leave a mid-line fragment that the
+// NEXT batch appends onto; replay would merge the two half-lines and
+// silently eat a discovered line — a subtree vanishing from the frontier.
+// So on a short write the file is truncated back to the pre-batch offset
+// and the error is returned: the next checkpoint re-sends the whole batch.
+func appendJournalBatch(f journalAppendFile, snap journalSnapshot) error {
 	var b []byte
 	for _, p := range snap.Discovered {
 		b = append(b, formatJournalEvent(p, "", journalEventDiscovered)...)
@@ -430,8 +445,18 @@ func appendJournalBatch(f *os.File, snap journalSnapshot) error {
 	if len(b) == 0 {
 		return nil
 	}
-	_, err := f.Write(b)
-	return err
+	off, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	n, err := f.Write(b)
+	if n != len(b) || err != nil {
+		if terr := f.Truncate(off); terr != nil {
+			return fmt.Errorf("write: %v (rollback truncate: %v)", err, terr)
+		}
+		return err
+	}
+	return nil
 }
 
 // loadJournalForResume reads and sanity-checks a journal for resuming. An

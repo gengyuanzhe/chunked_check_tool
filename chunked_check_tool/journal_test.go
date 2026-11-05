@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -959,5 +960,74 @@ func TestJournalEnabledOnlyMode2S3List(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cfg.OutputDir, "journal.txt")); !os.IsNotExist(err) {
 		t.Errorf("check-file mode created journal.txt (err=%v), want none", err)
+	}
+}
+
+// shortWriteFile wraps a real file whose Write short-writes once past a
+// byte limit, recording Truncate calls — the C1 regression harness.
+type shortWriteFile struct {
+	*os.File
+	limit     int64
+	truncates []int64
+}
+
+func (s *shortWriteFile) Write(b []byte) (int, error) {
+	if int64(len(b)) > s.limit {
+		n := s.limit
+		s.limit = 1 << 30
+		return int(n), io.ErrShortWrite
+	}
+	return s.File.Write(b)
+}
+
+func (s *shortWriteFile) Truncate(size int64) error {
+	s.truncates = append(s.truncates, size)
+	return s.File.Truncate(size)
+}
+
+// TestAppendJournalBatchRollsBackShortWrite — a partial batch write must
+// roll the file back to the batch boundary: a surviving mid-line fragment
+// would merge with the NEXT batch's first line on replay, silently eating
+// a discovered line (a subtree vanishes from the resume frontier = the
+// forbidden coverage hole). Truncate-to-offset + re-send next batch.
+func TestAppendJournalBatchRollsBackShortWrite(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "journal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString("done|early\n"); err != nil {
+		t.Fatal(err)
+	}
+	swf := &shortWriteFile{File: f, limit: 7} // "discovered|p" is 12 bytes: writes 7, fails
+	snap := journalSnapshot{
+		Discovered: []string{"p"},
+		Cursors:    []journalCursorEntry{{Prefix: "p", Token: "T"}},
+	}
+	if err := appendJournalBatch(swf, snap); err == nil {
+		t.Fatal("short write returned nil error")
+	}
+	if len(swf.truncates) != 1 {
+		t.Fatalf("truncate calls = %v, want exactly one rollback to the batch boundary", swf.truncates)
+	}
+	if want := int64(len("done|early\n")); swf.truncates[0] != want {
+		t.Errorf("truncate offset = %d, want %d (pre-batch boundary)", swf.truncates[0], want)
+	}
+	data, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "done|early\n" {
+		t.Errorf("file after rollback = %q, want %q (fragment gone)", data, "done|early\n")
+	}
+	// The next batch (full write) must land cleanly: no merge with ghosts.
+	swf.limit = 1 << 30
+	if err := appendJournalBatch(swf, snap); err != nil {
+		t.Fatalf("retry append: %v", err)
+	}
+	data, _ = os.ReadFile(f.Name())
+	want := "done|early\ndiscovered|p\ncursor|p|T\n"
+	if string(data) != want {
+		t.Errorf("file after retry = %q, want %q", data, want)
 	}
 }
