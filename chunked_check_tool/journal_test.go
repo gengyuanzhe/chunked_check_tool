@@ -182,3 +182,172 @@ func writeJournal(t *testing.T, content string) string {
 	}
 	return path
 }
+
+// findCursor returns the snapshot's cursor entry for prefix, or nil.
+func findCursor(snap journalSnapshot, prefix string) *journalCursorEntry {
+	for i := range snap.Cursors {
+		if snap.Cursors[i].Prefix == prefix {
+			return &snap.Cursors[i]
+		}
+	}
+	return nil
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// TestTrackerPageCompletesWhenAllTerminals — a page's completion requires
+// every object's terminal event; the cursor then points past it.
+func TestTrackerPageCompletesWhenAllTerminals(t *testing.T) {
+	tr := NewJournalTracker()
+	tr.RegisterPage("p", 3, "T1")
+	snap := tr.Snapshot()
+	if c := findCursor(snap, "p"); c != nil {
+		t.Errorf("cursor before any terminal = %+v, want none", c)
+	}
+	tr.Terminal("p", 0)
+	tr.Terminal("p", 0)
+	snap = tr.Snapshot()
+	if c := findCursor(snap, "p"); c != nil {
+		t.Errorf("cursor at 2/3 terminals = %+v, want none", c)
+	}
+	tr.Terminal("p", 0)
+	snap = tr.Snapshot()
+	if c := findCursor(snap, "p"); c == nil || c.Token != "T1" {
+		t.Errorf("cursor at 3/3 terminals = %+v, want {p, T1}", c)
+	}
+}
+
+// TestTrackerConsecutivePagesRequired — the completion position only moves
+// across fully completed pages: page 2 half-done pins the cursor at page 1.
+func TestTrackerConsecutivePagesRequired(t *testing.T) {
+	tr := NewJournalTracker()
+	tr.RegisterPage("p", 2, "T1") // page 0
+	tr.RegisterPage("p", 2, "T2") // page 1
+	tr.Terminal("p", 0)
+	tr.Terminal("p", 0)
+	tr.Terminal("p", 1) // page 1: 1/2 done
+	snap := tr.Snapshot()
+	if c := findCursor(snap, "p"); c == nil || c.Token != "T1" {
+		t.Errorf("cursor = %+v, want {p, T1} (page 1 incomplete pins position at page 0)", c)
+	}
+}
+
+// TestTrackerFrozenOnPartialPage — the core kill -9 invariant: a page whose
+// objects were only partially emitted (hard abort mid-page) never reaches
+// zero outstanding, so the cursor freezes BEFORE it. Registering the full
+// page count up front is what makes this hold.
+func TestTrackerFrozenOnPartialPage(t *testing.T) {
+	tr := NewJournalTracker()
+	tr.RegisterPage("p", 1, "T1")     // page 0 completes fully
+	tr.Terminal("p", 0)
+	seq := tr.RegisterPage("p", 1000, "T2") // page 1: hard abort after 400 pushes
+	for i := 0; i < 400; i++ {
+		tr.Terminal("p", seq)
+	}
+	snap := tr.Snapshot()
+	if c := findCursor(snap, "p"); c == nil || c.Token != "T1" {
+		t.Errorf("cursor at 400/1000 = %+v, want {p, T1} (frozen before the partial page)", c)
+	}
+	for i := 0; i < 600; i++ {
+		tr.Terminal("p", seq)
+	}
+	snap = tr.Snapshot()
+	if c := findCursor(snap, "p"); c == nil || c.Token != "T2" {
+		t.Errorf("cursor at 1000/1000 = %+v, want {p, T2}", c)
+	}
+}
+
+// TestTrackerDoneRequiresPaginationDoneAndAllPages — done = listing ended
+// AND every page complete.
+func TestTrackerDoneRequiresPaginationDoneAndAllPages(t *testing.T) {
+	tr := NewJournalTracker()
+	tr.RegisterPage("p", 1, "")
+	tr.Terminal("p", 0)
+	if snap := tr.Snapshot(); containsString(snap.Dones, "p") {
+		t.Errorf("done before pagination end = true, want false")
+	}
+	tr.MarkPaginationDone("p")
+	if snap := tr.Snapshot(); !containsString(snap.Dones, "p") {
+		t.Errorf("done after pagination end + all pages = false, want true")
+	}
+}
+
+// TestTrackerSeedTokenPreservedBeforeFirstPage — a seeded resume token
+// survives in snapshots even before the first page completes, so a run
+// killed early does not fall back to listing the prefix from the top.
+func TestTrackerSeedTokenPreservedBeforeFirstPage(t *testing.T) {
+	tr := NewJournalTracker()
+	tr.RecordSeed("p", "T0")
+	snap := tr.Snapshot()
+	if c := findCursor(snap, "p"); c == nil || c.Token != "T0" {
+		t.Errorf("cursor before first page = %+v, want {p, T0} (base token)", c)
+	}
+}
+
+// TestTrackerDiscoveredDeltaAndCommit — discovered entries are delta: they
+// appear once, and Commit (the write landed) removes them from the pending
+// set so later snapshots do not repeat them.
+func TestTrackerDiscoveredDeltaAndCommit(t *testing.T) {
+	tr := NewJournalTracker()
+	tr.AddDiscovered("x")
+	snap := tr.Snapshot()
+	if !containsString(snap.Discovered, "x") {
+		t.Errorf("snapshot after AddDiscovered misses x: %+v", snap.Discovered)
+	}
+	tr.Commit(snap)
+	snap = tr.Snapshot()
+	if containsString(snap.Discovered, "x") {
+		t.Errorf("snapshot after Commit repeats x: %+v", snap.Discovered)
+	}
+}
+
+// TestTrackerDropAfterCommit — committed done prefixes leave the in-memory
+// map (journal file is the authoritative state); in-flight prefixes stay.
+func TestTrackerDropAfterCommit(t *testing.T) {
+	tr := NewJournalTracker()
+	tr.AddDiscovered("inflight")
+	tr.RegisterPage("p", 1, "")
+	tr.Terminal("p", 0)
+	tr.MarkPaginationDone("p")
+	before := tr.trackedPrefixes()
+	snap := tr.Snapshot()
+	tr.Commit(snap)
+	after := tr.trackedPrefixes()
+	if after != before-1 {
+		t.Errorf("trackedPrefixes after Commit = %d, want %d (done prefix dropped)", after, before-1)
+	}
+}
+
+// TestTrackerEmptyPrefixDoneInOnePage — an empty prefix registers a
+// zero-object page, completes instantly, and is done once pagination ends.
+func TestTrackerEmptyPrefixDoneInOnePage(t *testing.T) {
+	tr := NewJournalTracker()
+	tr.RegisterPage("p", 0, "")
+	tr.MarkPaginationDone("p")
+	snap := tr.Snapshot()
+	if !containsString(snap.Dones, "p") {
+		t.Errorf("empty prefix done = false, want true (snapshot: %+v)", snap)
+	}
+}
+
+// TestTrackerLateTerminalIgnored — terminals for unknown/dropped prefixes
+// are ignored (safe direction: at most delays the position).
+func TestTrackerLateTerminalIgnored(t *testing.T) {
+	tr := NewJournalTracker()
+	tr.Terminal("ghost", 0) // must not panic
+	tr.RegisterPage("p", 1, "")
+	tr.Terminal("p", 0)
+	tr.Terminal("p", 0) // duplicate terminal must not push outstanding negative
+	tr.Terminal("p", 5) // unknown page must not panic
+	tr.MarkPaginationDone("p")
+	if snap := tr.Snapshot(); !containsString(snap.Dones, "p") {
+		t.Errorf("done = false after duplicate/unknown terminals, want true")
+	}
+}

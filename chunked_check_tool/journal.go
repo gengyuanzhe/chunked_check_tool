@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 )
 
 // journal.go — kill-9 resumable scan progress for Mode 2.
@@ -139,4 +140,211 @@ func applyJournalEvent(states map[string]journalState, line string) error {
 	}
 	states[ev.Prefix] = st
 	return nil
+}
+
+// JournalTracker accumulates scan progress at page granularity. It is a
+// pure accounting side-channel: nothing in the scan pipeline blocks on it.
+//
+// The completion position of a prefix is the highest page seq whose objects
+// have ALL reported terminal (checker Handle returned, result line pushed
+// into an output channel) — consecutive from page 0. The cursor the journal
+// persists is the continuation token AT that position (the next token the
+// page at that position returned), or the seed token when no page has
+// completed yet. Because the position never crosses a page with unreported
+// objects, a hard abort mid-page (objects pushed but never probed) freezes
+// the cursor BEFORE that page: recovery re-lists it. That is the load-bearing
+// safety property — see TestTrackerFrozenOnPartialPage.
+//
+// Memory is bounded by drop-after-commit: prefixes whose done state has
+// been persisted (Commit) leave the map, and per-page bookkeeping below the
+// completion position is discarded as the position advances. The journal
+// file is the authoritative full state; the map only ever holds one
+// checkpoint interval of delta plus in-flight work.
+type JournalTracker struct {
+	mu sync.Mutex
+	// states holds prefixes with listing activity (seeded or pages
+	// registered) that have not been persisted as done yet.
+	states map[string]*journalPrefixState
+	// pendingDiscovered holds discovery events not yet persisted by a
+	// checkpoint Commit (the Discovered delta).
+	pendingDiscovered map[string]struct{}
+}
+
+type journalPrefixState struct {
+	baseToken      string
+	paginationDone bool
+	maxSeq         int32            // highest registered page seq
+	position       int32            // highest page seq fully terminal, consecutive from 0; -1 = none
+	outstanding    map[int32]int    // pageSeq -> terminals still expected
+	nextTokens     map[int32]string // pageSeq -> the page's returned next token
+}
+
+func NewJournalTracker() *JournalTracker {
+	return &JournalTracker{
+		states:            make(map[string]*journalPrefixState),
+		pendingDiscovered: make(map[string]struct{}),
+	}
+}
+
+func (t *JournalTracker) stateFor(prefix string) *journalPrefixState {
+	st, ok := t.states[prefix]
+	if !ok {
+		st = &journalPrefixState{
+			maxSeq:      -1,
+			position:    -1,
+			outstanding: make(map[int32]int),
+			nextTokens:  make(map[int32]string),
+		}
+		t.states[prefix] = st
+	}
+	return st
+}
+
+// RecordSeed records a prefix entering the scan (root seed or a resume
+// seed). token is the continuation token listing starts from ("" = from the
+// top). The seed line lands in the next checkpoint's Discovered batch; the
+// token survives in cursor snapshots even before the first page completes,
+// so a run killed early does not fall back to re-listing from the top.
+func (t *JournalTracker) RecordSeed(prefix, token string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pendingDiscovered[prefix] = struct{}{}
+	t.stateFor(prefix).baseToken = token
+}
+
+// AddDiscovered records a sub-prefix discovered by a parent page's LIST.
+// Callers MUST call this before pushing that page's objects to objCh: the
+// parent's position may only cross the page once the discovery is visible
+// here (otherwise a checkpoint could persist the parent's progress past the
+// page while the discovered prefix was never recorded — the subtree would
+// vanish from the replayed frontier).
+func (t *JournalTracker) AddDiscovered(prefix string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pendingDiscovered[prefix] = struct{}{}
+}
+
+// RegisterPage records a successfully listed page: objCount objects will
+// report terminal states, nextToken is the page's returned continuation.
+// The count is the FULL page length, registered once — it never shrinks
+// with partial emission, which is what freezes the position on hard abort.
+// Returns the page seq tasks must carry for their Terminal reports.
+func (t *JournalTracker) RegisterPage(prefix string, objCount int, nextToken string) int32 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	st := t.stateFor(prefix)
+	st.maxSeq++
+	seq := st.maxSeq
+	st.outstanding[seq] = objCount
+	st.nextTokens[seq] = nextToken
+	st.advance()
+	return seq
+}
+
+// Terminal reports one object finished processing. Late or duplicate
+// reports are ignored (safe direction: at most they delay the position).
+func (t *JournalTracker) Terminal(prefix string, seq int32) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	st, ok := t.states[prefix]
+	if !ok {
+		return
+	}
+	if n, ok := st.outstanding[seq]; ok && n > 0 {
+		st.outstanding[seq] = n - 1
+	}
+	st.advance()
+}
+
+// MarkPaginationDone records that the prefix's listing returned next=="".
+func (t *JournalTracker) MarkPaginationDone(prefix string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if st, ok := t.states[prefix]; ok {
+		st.paginationDone = true
+	}
+}
+
+// advance moves the completion position forward while consecutive pages
+// are fully terminal, discarding the bookkeeping it passes (bounded memory).
+func (st *journalPrefixState) advance() {
+	for st.position < st.maxSeq && st.outstanding[st.position+1] == 0 {
+		st.position++
+		delete(st.outstanding, st.position)
+		delete(st.nextTokens, st.position-1)
+	}
+}
+
+// continuation returns the token listing should resume from: the last
+// fully-terminal page's next token, or the seed token when no page has
+// completed. "" means "from the top".
+func (st *journalPrefixState) continuation() string {
+	if st.position >= 0 {
+		return st.nextTokens[st.position]
+	}
+	return st.baseToken
+}
+
+// isDone reports pagination ended with every page terminal.
+func (st *journalPrefixState) isDone() bool {
+	return st.paginationDone && st.maxSeq >= 0 && st.position == st.maxSeq
+}
+
+type journalCursorEntry struct {
+	Prefix string
+	Token  string
+}
+
+// journalSnapshot is one checkpoint's delta: new discoveries, the current
+// cursor of every in-flight prefix (re-sent each checkpoint; replay keeps
+// the last), and newly-done prefixes.
+type journalSnapshot struct {
+	Discovered []string
+	Cursors    []journalCursorEntry
+	Dones      []string
+}
+
+// Snapshot takes the current delta. Call before flushing outputs, persist
+// after (see runJournalCheckpoints); the snapshot-then-flush order is what
+// guarantees every terminal counted here has its result line flushed.
+func (t *JournalTracker) Snapshot() journalSnapshot {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var snap journalSnapshot
+	for p := range t.pendingDiscovered {
+		snap.Discovered = append(snap.Discovered, p)
+	}
+	for prefix, st := range t.states {
+		if st.isDone() {
+			snap.Dones = append(snap.Dones, prefix)
+			continue
+		}
+		if tok := st.continuation(); tok != "" {
+			snap.Cursors = append(snap.Cursors, journalCursorEntry{Prefix: prefix, Token: tok})
+		}
+	}
+	return snap
+}
+
+// Commit drops the state the snapshot persisted: the discovered delta
+// entries and prefixes recorded as done. Call only after the journal batch
+// was successfully written; a lost Commit at most re-sends duplicate lines
+// (replay is last-event-wins, so duplicates are harmless).
+func (t *JournalTracker) Commit(snap journalSnapshot) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, p := range snap.Discovered {
+		delete(t.pendingDiscovered, p)
+	}
+	for _, p := range snap.Dones {
+		delete(t.states, p)
+	}
+}
+
+// trackedPrefixes reports the live in-memory prefix count (test hook for
+// the drop-after-commit memory bound).
+func (t *JournalTracker) trackedPrefixes() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.states)
 }
