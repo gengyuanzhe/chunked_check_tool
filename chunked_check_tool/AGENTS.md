@@ -139,9 +139,9 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
   - **三行格式**：`discovered|<prefix>` / `cursor|<prefix>|<token>` / `done|<prefix>`。解析规则：discovered/done 的 prefix = 整行余量（容 `|`）；cursor 在余量取**最后一个** `|` 切分（发射侧保证 token 不含 `|`/`\n`，含则跳过该游标行，见下"checkpoint 时机"）；重放取每 prefix 最后一条事件；末尾无换行的残行丢弃（kill 撕裂批次，安全方向）；其他坏行报错（机器写的文件，中间坏 = 真损坏）。
   - **"完成"的语义**（正确性核心）：prefix 的某页"完成" = 该页**全部**对象的结果行已推入输出 channel——不是"列举过"、不是"发射过"。页的待终态计数在 `ListPage` 成功时按 `len(objs)` **整页一次性登记**（硬停打断半页时计数永不归零 → 水位冻在该页前 → 恢复重列整页）；`Terminal` 由 checker `Handle` 的 **defer** 上报（体 = 结果行已推 channel）；lister 短路对象（key 含 `|`）与 list-only 分类即终态。
   - **顺序不变量**（违反任意一条 = 覆盖漏洞）：① `AddDiscovered` 必须先于该页任何对象发射（否则"父页已终态、子前缀未记账"可同框快照，子树蒸发）；② checkpoint 固定顺序 = **快照 tracker → `Output.FlushAndWait` → 写批次（discovered 行在 cursor/done 行前；写短了回滚到批次前偏移，防撕裂残行被下批嫁接）→ Commit**——先快照后 flush 的因果：Terminal 在行推入 channel 之后才计数，快照里的每个终态的行必在该次 flush 覆盖内；③ `journalRun.Stop()`（同步等最终 checkpoint 完成）必须在 `out.Close()` **之前**——FlushAndWait 依赖 writer goroutine 存活。
-  - **checkpoint 时机**：种子落盘靠 **seeding 完成后立即触发的同步 checkpoint**（`JournalRunner.CheckpointNow`，main 在 seeding 分支链结束后调用）——checkpoint 循环先于 seeding 启动，其启动首检时刻 tracker 必为空；种子必须靠显式触发而非等首个 tick（否则头 10 分钟内 kill = 空 journal 不可恢复）。此后每 `journalCheckpointInterval`（10min 常量、包级 var）一次，ctx 取消时终检一次。游标行文法按余量**最后一个** `|` 切分，隐含 token 不含 `|`；V1 的 NextMarker 是真实 key、可能含 `|`（或 `\n`），此类 token **跳过游标行不写**（前缀仍是 discovered，恢复时整前缀重列——多做工作、不漏对象）。恢复入口 `-resume-journal`：done 跳过、cursor 用 `SeedWithToken` 续、仅 discovered 裸列；**与 `-prefix` 互斥**（journal 即 scope）；空 journal 报错提示用原命令重跑（CheckpointNow 之后仍空 = 路径错/手工清空）。
+  - **checkpoint 时机**：种子落盘靠 **seeding 完成后立即触发的同步 checkpoint**（`JournalRunner.CheckpointNow`，main 在 seeding 分支链结束后调用）——checkpoint 循环先于 seeding 启动，其启动首检时刻 tracker 必为空；种子必须靠显式触发而非等首个 tick（否则头 10 分钟内 kill = 空 journal 不可恢复）。此后每 `journalCheckpointInterval`（10min 常量、包级 var）一次，ctx 取消时终检一次；环境变量 `JOURNAL_INTERVAL_SEC`（正整数秒，非法值启动报错）是 §7.5 烟囱专用覆盖杠杆——本地 minio 秒级跑完等不到首 tick。游标行文法按余量**最后一个** `|` 切分，隐含 token 不含 `|`；V1 的 NextMarker 是真实 key、可能含 `|`（或 `\n`），此类 token **跳过游标行不写**（前缀仍是 discovered，恢复时整前缀重列——多做工作、不漏对象）。恢复入口 `-resume-journal`：done 跳过、cursor 用 `SeedWithToken` 续、仅 discovered 裸列；**与 `-prefix` 互斥**（journal 即 scope）；空 journal 报错提示用原命令重跑（CheckpointNow 之后仍空 = 路径错/手工清空）。
   - **内存**：Commit 后 done 前缀从内存 map 删除、水位以下簿记丢弃（journal 文件是权威全量）——活跃内存 = 一个周期的增量 + in-flight，不随桶规模增长。
-  - **验收标准**：任何出错/竞态的后果只能是"恢复时多做工作"，不允许"有对象漏检"——单测钉死：`TestTrackerFrozenOnPartialPage`、`TestListerJournalHardAbortFreezesPosition`、`TestCheckpointOrderAndDurability`、`TestJournalResumeRoundTrip`。
+  - **验收标准**：任何出错/竞态的后果只能是"恢复时多做工作"，不允许"有对象漏检"——单测钉死：`TestTrackerFrozenOnPartialPage`、`TestListerJournalHardAbortFreezesPosition`、`TestCheckpointOrderAndDurability`、`TestJournalResumeRoundTrip`；端到端冒烟见 §7.5（kill -9 → 三态 journal → 续跑 → 并集完备性，2026-11-05 实跑通过）。
 
 ## 5. CLI 与配置
 
@@ -452,28 +452,45 @@ wc -l /tmp/retry.txt   # 期望：远小于原输入行数
 
 ### 7.5 kill -9 + -resume-journal 冒烟（复用 7.1/7.3 环境）
 
-验证 Mode 2 扫描被 SIGKILL 后从 journal 断点续跑的闭环（`kill -9` 完全绕过两段式信号与所有收尾代码，是 journal 唯一的真实触发场景）。复用 7.1 的 9008 对象 + 7.3 的 bulk2 数据。**本 runbook 尚未实跑**（当前机器无 minio 环境），步骤与断言按 §7.3 的验证标准书写，首次执行时按实跑结果修订：
+验证 Mode 2 扫描被 SIGKILL 后从 journal 断点续跑的闭环（`kill -9` 完全绕过两段式信号与所有收尾代码，是 journal 唯一的真实触发场景）。**实跑记录 2026-11-05（17,006 对象，17k 对象本地 minio 全程 ~2.4s）**，步骤与断言均为实跑验证过的版本：
 
 ```bash
-# 后台全量扫描，2s 后 kill -9（两段式信号完全不参与——进程没有机会写任何现场）
-/tmp/chunked_check_tool -c cfg-sig.yaml -bkt testbucket > /tmp/chunked-e2e/kill.log 2>&1 &
-PID=$!; sleep 2; kill -9 $PID; wait $PID; echo "exit=$?"    # 期望 137
+# 数据准备（在 7.1 基础 6 对象 + 7.3 bulk2 6000 之上）：
+#   data/2026/02/ 单前缀 3000 对象（3 页，练分页）+ 000multi/ 单前缀 8000 对象（8 页，练中途 cursor）
+#   —— mc cp --recursive . 会把 "." 目录本身嵌一层，实际键为 000multi/000multi/obj_*，无碍
+# cfg 需 is_check: true + is_success_log: true（完备性并集要 ok_objects.txt 的逐对象行）
 
-KILL_DIR=<被 kill 那轮的输出目录>       # 时间戳最新的 out_*（cfg 的 output_dir 加时间戳后缀）
-head -5 $KILL_DIR/journal.txt            # 期望非空：种子 discovered 行 + cursor 行
-sort $KILL_DIR/journal.txt | uniq -c | head   # 抽样看状态分布（discovered/cursor/done 三类）
+# 本地 minio 太快，10 分钟首 tick 永远等不到：JOURNAL_INTERVAL_SEC=1 缩短 checkpoint 间隔
+# （烟囱专用环境变量，非法值启动报错；不设 = 默认 10 分钟）
+JOURNAL_INTERVAL_SEC=1 /tmp/chunked_check_tool -c cfg-kill.yaml -bkt testbucket > /tmp/chunked-e2e/kill.log 2>&1 &
+PID=$!; sleep 3; kill -9 $PID; wait $PID; echo "exit=$?"    # 期望 137
 
-# 从 journal 续跑（注意：-prefix 必须为空，journal 即扫描范围）
-/tmp/chunked_check_tool -c cfg.yaml -bkt testbucket -resume-journal $KILL_DIR/journal.txt
+KILL_DIR=<被 kill 那轮的输出目录>       # 时间戳最新的 out_*
+awk -F'|' '{print $1}' $KILL_DIR/journal.txt | sort | uniq -c
+#   期望三类行齐备：done（扫完前缀）+ cursor（分页中途）+ discovered（种子/未启动）
+
+# 从 journal 续跑（-prefix 必须为空，journal 即扫描范围）
+/tmp/chunked_check_tool -c cfg-kill.yaml -bkt testbucket -resume-journal $KILL_DIR/journal.txt
+
+# 完备性并集（按文件处理撕裂尾行：被 kill 轮输出文件最后一行可能没有换行——
+# P0 周期 flush ≤3s 尾部损失的设计内行为；该对象由恢复轮重列补回）
+for f in $KILL_DIR/minio/ok_objects.txt $KILL_DIR/minio/corrupted_objects.txt \
+         <RESUME_DIR>/minio/ok_objects.txt <RESUME_DIR>/minio/corrupted_objects.txt; do
+  if [ -n "$(tail -c 1 "$f")" ]; then sed '$d' "$f" > /tmp/f.tmp; else cp "$f" /tmp/f.tmp; fi
+  cut -d'|' -f2 /tmp/f.tmp
+done | sort -u > union.txt
+mc ls --recursive local/testbucket | awk '{print $NF}' | sort > mckeys.txt
+diff union.txt mckeys.txt      # 期望空（有 mp.txt/invalid_keys.txt 的配置把它们也并进 union）
 ```
 
-期望：
+期望（实跑值）：
 
-- kill -9 退出码 137；被 kill 轮的 `journal.txt` 存在且非空——seeding 完成后立即同步 checkpoint（`CheckpointNow`）保证种子行早于首个 tick 落盘，所以哪怕 kill 很早也有可恢复的 scope
-- 续跑轮 summary `list_failed: 0`；**两轮 `list_all` 之和 == `mc ls --recursive local/testbucket | wc -l`**（无丢失无重复的完备性证明，同 §7.3 判据）
-- journal 语义抽验：被 kill 轮 journal 里 `done|<p>` 的前缀，续跑轮不再列举；`cursor|<p>|<t>` 的前缀从 t 续列（续跑轮 run.log 的 config 快照含 `resume_journal:` 行）
-- 时序无要求：kill 早了 journal 里可能只有 discovered 行（未启动的裸前缀重列，安全）；kill 晚了 done 多一些——任何时点恢复都不漏对象，损失 ≤ 10 分钟工作量
-- 恢复轮自己写新 journal（新时间戳目录），可再次被 kill / 再次恢复（用同样的命令指向新目录）
+- kill -9 退出码 137；journal 非空三态混合（实测 5 done + 8 discovered + 2 cursor；cursor 同前缀每 tick 重发一行，重放取最后一条）；不设 `JOURNAL_INTERVAL_SEC` 时 kill 落在首 tick 前则 journal 只有种子行（`CheckpointNow` 保证非空）——恢复退化为整轮重扫，损失 ≤ 一个间隔，设计内
+- 续跑轮 summary `list_failed: 0`；**完备性判据 = 两轮对象结果行（撕裂尾行丢弃后）去重并集 == `mc ls` 键集**（实测 17,006 == 17,006，diff 空）。**不要用"两轮 `list_all` 求和 == mc 数"**：恢复轮重列在途页会双计（实测两轮结果行 19,396 行，重叠 2,390）——这是 journal"冻结在半页前、恢复重列整页"设计的必然副作用
+- 数学自洽断言：续跑 `list_all` = 总对象数 −（cursor 前已终态页的对象数 + done 前缀的对象数）（实测 13,005 = 17,006 − 4,000 − 1）
+- done 跳过抽验：done 前缀的对象不出现在续跑轮任何输出文件（实测 corrupted/corrupted.bin）；cursor 续列抽验：撕裂行所属对象（如 obj_6391）出现在续跑轮 ok_objects.txt
+- 续跑轮 run.log 的 config 快照含 `resume_journal:` 行；续跑轮自己写新 journal（终态全 done；中途 tick 的 cursor 行被更晚的 done 行覆盖，行序保证重放 last-wins 正确）
+- 恢复轮可再次被 kill / 再次恢复（用同样的命令指向新目录的 journal.txt）
 
 ## 8. 已知遗留项（改动时留意，非阻塞）
 
