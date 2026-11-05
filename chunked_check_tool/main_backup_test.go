@@ -289,7 +289,7 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 	// (shape-compatible with -backup-file input). cfg.OutputDir carries the
 	// timestamp suffix (default-on output_dir_timestamp), which runBackup
 	// created.
-	assertFileContent(t, cfg.OutputDir, "backup_ok.txt",
+	assertFileContentUnordered(t, cfg.OutputDir, "backup_ok.txt",
 		"srcbucket|reg1\n"+fmt.Sprintf("srcbucket|mp1|2|0|%d\n", len(corruptBody))+"srcbucket|mpclean|1|0\n")
 	assertFileContent(t, cfg.OutputDir, "mismatch.txt", "srcbucket|mm1\n")
 	assertFileContent(t, cfg.OutputDir, "parse_failed.txt", "srcbucket|bad|1|100\n")

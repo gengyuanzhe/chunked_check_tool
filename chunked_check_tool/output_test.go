@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -382,6 +383,25 @@ func assertFileContent(t *testing.T, dir, name, want string) {
 	}
 	if string(data) != want {
 		t.Errorf("%s = %q, want %q", name, string(data), want)
+	}
+}
+
+// assertFileContentUnordered compares file content line-by-line after
+// sorting both sides. Use it for files written by concurrent workers
+// (backup_ok.txt etc.): the landing order of lines from parallel workers
+// is nondeterministic, so an exact-string assert flakes by design.
+func assertFileContentUnordered(t *testing.T, dir, name, want string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	gotLines := strings.Split(string(data), "\n")
+	wantLines := strings.Split(want, "\n")
+	sort.Strings(gotLines)
+	sort.Strings(wantLines)
+	if strings.Join(gotLines, "\n") != strings.Join(wantLines, "\n") {
+		t.Errorf("%s = %q, want %q (line set)", name, string(data), want)
 	}
 }
 
