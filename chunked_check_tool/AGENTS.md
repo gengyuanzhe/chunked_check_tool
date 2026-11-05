@@ -128,11 +128,20 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 19. **backup 模式不探测损坏**（`-backup-file`）：`BackupChecker.Handle` = HEAD → 判型门（mismatch）→ 中转 → ETag 终验。**不调用 runProbes**——输入列表是检查阶段的产物（corrupted_objects/corrupted_mp 跨轮并集），是否损坏已判定，备份只保字节。历史上 backup 曾在多段行上先探测"确认损坏才中转、干净跳过（backup_skipped_clean）"，该路径已整体删除：它会静默跳过检查阶段已标记的对象（backup 侧探测矩阵不如检查侧完整时即漏备份）。`backup_skipped_clean` 文件/channel/stats/progress 字段全链路不存在。mismatch 判型门保留（HEAD 顺手可得、零成本；拦"检查后对象被改写"——stale offsets 中转必然 ETag 终验失败），mismatch.txt 行可直喂 `-check-file` 重查。HEAD 保留是必须的：中转需要 Size，ETag 终验需要源 ETag。`BackupChecker` 的 ctx 是 hard ctx：第二次信号中止 in-flight 中转（多段 AbortMultipart 清理），失败任务落 backup_failed（本模式自己的补跑输入）。
 
 20. **两段式信号与失败文件即断点**（断点续传的总体设计）：
-  - **架构原则**：不做进程内 checkpoint/journal（per-object done-set 对十亿级对象是写放大灾难；probe 幂等；LIST 天然带 continuation token；append-only 文件 + 每轮新时间戳目录已构成检查点）。**每个失败文件有且仅有一个补跑入口**：`list_failed.txt` → `-resume-list`（仅 Mode 2；Mode 1 根/子前缀游标语义在行内不可区分、Mode 3 递归无游标——这两类列举失败重试 = 原命令重跑，union 吸收重复）；`check_failed.txt`/`mp_check_failed.txt`/`list_parse_failed.txt`/`mismatch.txt` → `-check-file`（循环喂回至收敛；list_parse_failed.txt 行格式 `bucket|key` 对齐 check_failed.txt，retry HEAD 重新取 ETag/Size）；`backup_failed.txt` → `-backup-file` 自喂；`parse_failed.txt`/`invalid_keys.txt` → 人工；`mp.txt` → 人工补 offsets。跨轮逻辑结果 = 各 run 目录并集（`sort -u` 去重），收敛判据 = 最新一轮失败文件为空。
+  - **架构原则**：不做 per-object done-set（十亿级对象的逐对象记账是写放大灾难；probe 幂等；LIST 天然带 continuation token；append-only 文件 + 每轮新时间戳目录构成检查点。例外：Mode 2 的**页级** journal——1 行/1000 对象，见不变量 21）。**每个失败文件有且仅有一个补跑入口**：`list_failed.txt` → `-resume-list`（仅 Mode 2；Mode 1 根/子前缀游标语义在行内不可区分、Mode 3 递归无游标——这两类列举失败重试 = 原命令重跑，union 吸收重复）；`check_failed.txt`/`mp_check_failed.txt`/`list_parse_failed.txt`/`mismatch.txt` → `-check-file`（循环喂回至收敛；list_parse_failed.txt 行格式 `bucket|key` 对齐 check_failed.txt，retry HEAD 重新取 ETag/Size）；`backup_failed.txt` → `-backup-file` 自喂；`parse_failed.txt`/`invalid_keys.txt` → 人工；`mp.txt` → 人工补 offsets。跨轮逻辑结果 = 各 run 目录并集（`sort -u` 去重），收敛判据 = 最新一轮失败文件为空。
   - **第一次 SIGINT/SIGTERM**（`installSignalHandler` cancel listCtx）：停止 S3 LIST 与输入文件读取；in-flight 页的 ListPage 返回 ctx 错误 → 现有失败路径写 `list_failed(prefix, 本页游标)`——记录的是**未完成页**的 cursor，已成功的页不重列；队列里未弹出的 prefix 由 `drainQueuedPrefixes`（在 `listWg.Wait` 后、`close(objCh)` 前）写入 list_failed（裸 prefix = 从头列；`-resume-list` 种子 `prefix\x00token` 原样往返其游标，`Queue.Drain()` 取残余）；objCh 中已入队任务继续被 check worker 消费至完成。**不变量：run 目录是完备检查点**——每个 prefix 要么列完且每个对象都有终态，要么带可续游标。run 返回 `errInterrupted`（非零退出，数据无损失）。
   - **第二次信号**（cancel hardCtx）：in-flight 探测/中转中止（`Checker`/`BackupChecker`/relay 全走 hard ctx），objCh/ch 中剩余任务快速失败落 `check_failed`/`mp_check_failed`/`backup_failed`（即各自的补跑输入）——**硬停也不静默丢对象**。多段中转 Abort 清理。
   - **硬停 mid-page 的游标语义**：lister/walker/Mode-1 根循环的 objCh 发送 select 在 hardCtx.Done 分支记录**当前页**的 continuationToken（不是下一页）——resume 重列本页即可找回未发送的对象；已发送对象在 check worker 侧因 ctx 取消落 check_failed，同样可补跑。
-  - **kill -9 是唯一有损路径**：未处理部分无记录，补救 = 同 prefix 重跑全量（幂等 + union）。已写管线的尾部丢失由 writer 周期 Flush 兜底（`outputFlushInterval`=3s，见 §6）：kill -9 每文件最多丢最后 ≤3s 的行（含失败文件即补跑输入本身），不再丢整个 64KB bufio 尾巴。无 fsync：write() 落 page cache 即扛进程死，fsync 只防整机断电（另一级耐久性，不需要）。备份侧另有 comm diff 去已完成的续跑 runbook（§7.4）。
+  - **kill -9 兜底分两层**：Mode 2 扫描由 journal 兜底（不变量 21）——损失 ≤ 一个 checkpoint 间隔（默认 10 分钟工作量），恢复入口 `-resume-journal`，零重走；Mode 1/3 与文件输入模式仍是"未处理部分无记录，补救 = 原命令重跑（幂等 + union）"。已写管线的尾部丢失由 writer 周期 Flush 兜底（`outputFlushInterval`=3s，见 §6）：kill -9 每文件最多丢最后 ≤3s 的行（含失败文件即补跑输入本身）。无 fsync：write() 落 page cache 即扛进程死，fsync 只防整机断电（另一级耐久性，不需要）。备份侧另有 comm diff 去已完成的续跑 runbook（§7.4）。
+
+21. **Mode 2 journal：kill -9 断点续跑**（`journal.go`，spec `docs/superpowers/specs/2026-11-05-resume-journal-design.md`）：
+  - **启用条件**：`list_type=2 ∧ 文件输入=无`——全新扫描、`-resume-list` 恢复轮、`-resume-journal` 恢复轮都记账（`-resume-list` 轮同样长跑、同样会被 kill）。`journal.txt` 落输出目录根，append-only；恢复后写新时间戳目录的新 journal。
+  - **三行格式**：`discovered|<prefix>` / `cursor|<prefix>|<token>` / `done|<prefix>`。解析规则：discovered/done 的 prefix = 整行余量（容 `|`）；cursor 在余量取**最后一个** `|` 切分（token 契约保证不含 `|`）；重放取每 prefix 最后一条事件；末尾无换行的残行丢弃（kill 撕裂批次，安全方向）；其他坏行报错（机器写的文件，中间坏 = 真损坏）。
+  - **"完成"的语义**（正确性核心）：prefix 的某页"完成" = 该页**全部**对象的结果行已推入输出 channel——不是"列举过"、不是"发射过"。页的待终态计数在 `ListPage` 成功时按 `len(objs)` **整页一次性登记**（硬停打断半页时计数永不归零 → 水位冻在该页前 → 恢复重列整页）；`Terminal` 由 checker `Handle` 的 **defer** 上报（体 = 结果行已推 channel）；lister 短路对象（key 含 `|`）与 list-only 分类即终态。
+  - **顺序不变量**（违反任意一条 = 覆盖漏洞）：① `AddDiscovered` 必须先于该页任何对象发射（否则"父页已终态、子前缀未记账"可同框快照，子树蒸发）；② checkpoint 固定顺序 = **快照 tracker → `Output.FlushAndWait` → 写批次（discovered 行在 cursor/done 行前）→ Commit**——先快照后 flush 的因果：Terminal 在行推入 channel 之后才计数，快照里的每个终态的行必在该次 flush 覆盖内；③ `journalStop`（同步等最终 checkpoint 完成）必须在 `out.Close()` **之前**——FlushAndWait 依赖 writer goroutine 存活。
+  - **checkpoint 时机**：`runJournalCheckpoints` 启动**立即首检**（种子行在列举开始前落盘——极早期 kill 也有可恢复的 scope），此后每 `journalCheckpointInterval`（10min 常量、包级 var）一次，ctx 取消时终检一次。恢复入口 `-resume-journal`：done 跳过、cursor 用 `SeedWithToken` 续、仅 discovered 裸列；**与 `-prefix` 互斥**（journal 即 scope）；空 journal 报错提示用原命令重跑（启动即首检后，空 = 路径错/手工清空）。
+  - **内存**：Commit 后 done 前缀从内存 map 删除、水位以下簿记丢弃（journal 文件是权威全量）——活跃内存 = 一个周期的增量 + in-flight，不随桶规模增长。
+  - **验收标准**：任何出错/竞态的后果只能是"恢复时多做工作"，不允许"有对象漏检"——单测钉死：`TestTrackerFrozenOnPartialPage`、`TestListerJournalHardAbortFreezesPosition`、`TestCheckpointOrderAndDurability`、`TestJournalResumeRoundTrip`。
 
 ## 5. CLI 与配置
 
@@ -146,6 +155,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 -list-file <path>  # 列表文件，可选；旧模式，多段-only 格式跳过 S3 LIST 按行校验（与其他文件 flag 互斥，需 is_check=true）
 -backup-file <path># 备份列表文件，可选；HEAD 判型+中转+ETag 终验，不探测损坏（与其他文件 flag 互斥，需配置 backup_bucket + backup_output_dir）
 -resume-list <path># 断点续跑文件，可选；读 list_failed.txt 格式 `prefix|token` 把 (prefix, token) seed 进 BFS（与其他文件 flag 互斥，仅 list_type=2 生效；Mode 1/3 的列举失败重试 = 原命令重跑）
+-resume-journal <path> # kill -9 断点续跑文件，可选；读被 kill 轮的 journal.txt 重放扫描现场（done 前缀跳过、在途前缀从游标续列、未启动前缀从头列，恢复零重走）；与其他文件 flag 互斥，仅 list_type=2，-prefix 必须为空（journal 即扫描范围）
 ```
 
 ### config.yaml 字段
@@ -207,6 +217,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 | `backup_failed.txt` | 备份失败的原始输入行（可自喂重试） | `-backup-file`：HEAD 失败（stage=head）/中转失败（stage=upload）/ETag 终验失败（stage=etag，坏副本保留）；硬停时队列中未处理对象快速失败落此文件 |
 | `backup_failed.log` | 备份失败结构化错误（stage/head→upload→etag） | 同上 |
 | `mismatch.txt` | 输入类型校验失败的原始行（对象在检查后被改写） | `-backup-file`：行声明类型与 HEAD 判型不一致；可直喂 `-check-file` 重查当前状态 |
+| `journal.txt` | Mode 2 扫描进度三行格式：`discovered\|<prefix>` / `cursor\|<prefix>\|<token>` / `done\|<prefix>`（append-only，每 10 分钟 checkpoint 批次，批内 discovered 行先于 cursor/done） | `list_type=2 ∧ 非文件输入`的运行（含 -resume-list/-resume-journal 恢复轮）；恢复 = `-resume-journal` 直喂，重放取每 prefix 最后一条；详见 §4.21 |
 
 `is_check=false` 时不校验普通对象，不写任何对象文件，不创建 owner 目录，仅写 `list_failed.*`。`is_check=true && multipart_check_mode=0`（非文件检查模式）时 `corrupted_mp.txt` / `ok_mp.txt` / `mp_check_failed.*` 不创建。文件输入模式的 owner 恒为空 → 结果全落 `_unknown/`。
 
@@ -438,6 +449,31 @@ wc -l /tmp/retry.txt   # 期望：远小于原输入行数
 - 收敛判据 = 最新一轮失败文件为空（§4.20 闭环）
 - kill -9 还会在备份桶遗留**未完成的 multipart upload**（kill 时 `AbortMultipart` 不会执行）——普通 LIST 不可见，需 ListMultipartUploads 排查清理，当前无工具入口
 - 命令管道经合成数据验证（12 行输入 10 唯一 − 7 done = 3 行 retry）；kill 场景的端到端复验待 §7.1 环境
+
+### 7.5 kill -9 + -resume-journal 冒烟（复用 7.1/7.3 环境）
+
+验证 Mode 2 扫描被 SIGKILL 后从 journal 断点续跑的闭环（`kill -9` 完全绕过两段式信号与所有收尾代码，是 journal 唯一的真实触发场景）。复用 7.1 的 9008 对象 + 7.3 的 bulk2 数据。**本 runbook 尚未实跑**（当前机器无 minio 环境），步骤与断言按 §7.3 的验证标准书写，首次执行时按实跑结果修订：
+
+```bash
+# 后台全量扫描，2s 后 kill -9（两段式信号完全不参与——进程没有机会写任何现场）
+/tmp/chunked_check_tool -c cfg-sig.yaml -bkt testbucket > /tmp/chunked-e2e/kill.log 2>&1 &
+PID=$!; sleep 2; kill -9 $PID; wait $PID; echo "exit=$?"    # 期望 137
+
+KILL_DIR=<被 kill 那轮的输出目录>       # 时间戳最新的 out_*（cfg 的 output_dir 加时间戳后缀）
+head -5 $KILL_DIR/journal.txt            # 期望非空：种子 discovered 行 + cursor 行
+sort $KILL_DIR/journal.txt | uniq -c | head   # 抽样看状态分布（discovered/cursor/done 三类）
+
+# 从 journal 续跑（注意：-prefix 必须为空，journal 即扫描范围）
+/tmp/chunked_check_tool -c cfg.yaml -bkt testbucket -resume-journal $KILL_DIR/journal.txt
+```
+
+期望：
+
+- kill -9 退出码 137；被 kill 轮的 `journal.txt` 存在且非空——启动即首检保证种子行在列举开始前就落盘，所以哪怕 kill 很早也有可恢复的 scope
+- 续跑轮 summary `list_failed: 0`；**两轮 `list_all` 之和 == `mc ls --recursive local/testbucket | wc -l`**（无丢失无重复的完备性证明，同 §7.3 判据）
+- journal 语义抽验：被 kill 轮 journal 里 `done|<p>` 的前缀，续跑轮不再列举；`cursor|<p>|<t>` 的前缀从 t 续列（续跑轮 run.log 的 config 快照含 `resume_journal:` 行）
+- 时序无要求：kill 早了 journal 里可能只有 discovered 行（未启动的裸前缀重列，安全）；kill 晚了 done 多一些——任何时点恢复都不漏对象，损失 ≤ 10 分钟工作量
+- 恢复轮自己写新 journal（新时间戳目录），可再次被 kill / 再次恢复（用同样的命令指向新目录）
 
 ## 8. 已知遗留项（改动时留意，非阻塞）
 
