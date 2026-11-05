@@ -500,7 +500,7 @@ func TestCheckpointFinalOnStop(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	tr.AddDiscovered("late-sub") // arrives after the startup checkpoint
-	stop()                        // cancel -> final checkpoint must include it
+	stop()                       // cancel -> final checkpoint must include it
 	data, err := os.ReadFile(journalPath)
 	if err != nil || !strings.Contains(string(data), "discovered|late-sub") {
 		t.Fatalf("final checkpoint missed post-tick state: %q err=%v", data, err)
