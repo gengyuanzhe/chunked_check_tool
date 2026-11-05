@@ -132,7 +132,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
   - **第一次 SIGINT/SIGTERM**（`installSignalHandler` cancel listCtx）：停止 S3 LIST 与输入文件读取；in-flight 页的 ListPage 返回 ctx 错误 → 现有失败路径写 `list_failed(prefix, 本页游标)`——记录的是**未完成页**的 cursor，已成功的页不重列；队列里未弹出的 prefix 由 `drainQueuedPrefixes`（在 `listWg.Wait` 后、`close(objCh)` 前）写入 list_failed（裸 prefix = 从头列；`-resume-list` 种子 `prefix\x00token` 原样往返其游标，`Queue.Drain()` 取残余）；objCh 中已入队任务继续被 check worker 消费至完成。**不变量：run 目录是完备检查点**——每个 prefix 要么列完且每个对象都有终态，要么带可续游标。run 返回 `errInterrupted`（非零退出，数据无损失）。
   - **第二次信号**（cancel hardCtx）：in-flight 探测/中转中止（`Checker`/`BackupChecker`/relay 全走 hard ctx），objCh/ch 中剩余任务快速失败落 `check_failed`/`mp_check_failed`/`backup_failed`（即各自的补跑输入）——**硬停也不静默丢对象**。多段中转 Abort 清理。
   - **硬停 mid-page 的游标语义**：lister/walker/Mode-1 根循环的 objCh 发送 select 在 hardCtx.Done 分支记录**当前页**的 continuationToken（不是下一页）——resume 重列本页即可找回未发送的对象；已发送对象在 check worker 侧因 ctx 取消落 check_failed，同样可补跑。
-  - **kill -9 是唯一有损路径**：未处理部分无记录，补救 = 同 prefix 重跑全量（幂等 + union）。
+  - **kill -9 是唯一有损路径**：未处理部分无记录，补救 = 同 prefix 重跑全量（幂等 + union）。已写管线的尾部丢失由 writer 周期 Flush 兜底（`outputFlushInterval`=3s，见 §6）：kill -9 每文件最多丢最后 ≤3s 的行（含失败文件即补跑输入本身），不再丢整个 64KB bufio 尾巴。无 fsync：write() 落 page cache 即扛进程死，fsync 只防整机断电（另一级耐久性，不需要）。备份侧另有 comm diff 去已完成的续跑 runbook（§7.4）。
 
 ## 5. CLI 与配置
 
@@ -177,6 +177,8 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 | `result_line_format` | `<bucket>\|<key>` | 结果文件每行格式，支持 `<bucket>`/`<key>`/`<owner>` 占位符；只影响 per-owner 结果文件，处理文件始终只存 key/prefix |
 
 ## 6. 输出文件（append 模式）
+
+所有 `.txt` 结果/处理文件走 channel(1024) → bufio(64KB) → fd 的 writer goroutine；除 64KB 攒满与 Close 时 Flush 外，每 `outputFlushInterval`（3s，`output.go`）周期 Flush 一次——kill -9 的每文件损失上界从 64KB 缓冲压到 ≤3s 的行（失败文件即补跑输入，不能整段蒸发）。`.log` 文件走 slog 逐条直写（每条一次 write()），天然无此窗口。
 
 ### 结果文件（按 OwnerID 分目录，`<output_dir>/<ownerID>/<filename>`；OwnerID 为空 → `_unknown/`）
 
@@ -403,6 +405,39 @@ PID=$!; sleep 1.2; kill -INT $PID; wait $PID; echo "exit=$?"
 - `list_failed.txt` 非空：未启动前缀为**裸 prefix**，`list_failed.log` 记 `err="interrupted before listing started: context canceled"`；worker 恰在分页中时会记 `prefix|token`（时序相关，本次未命中——该路径由 `TestListerGracefulCancelRecordsNextPageToken` 单测钉死）
 - **闭环验证**：`/tmp/chunked_check_tool -c cfg -bkt testbucket -resume-list <中断轮目录>/list_failed.txt` 跑完 `list_failed: 0`，且两轮 `list_all` 之和 == `mc ls --recursive local/testbucket | wc -l`（无丢失无重复的完备性证明）
 - 第二次信号（硬停）时序难在真机稳定触发，由单测覆盖（`TestListerHardAbortMidPageRecordsCurrentPageToken` + `TestRunInterruptedDrainsQueue`）
+
+### 7.4 kill -9 后备份续跑：comm diff 构造重跑输入
+
+场景：`-backup-file` 运行中被 kill -9 / OOM 打断。优雅中断走 `backup_failed.txt` 自喂；kill -9 下未处理任务不在任何文件里，恢复入口是**原输入重跑**——但全量重跑会把已完成的大头重新中转一遍。本 runbook 用差集剔掉已完成对象。
+
+可行的三个代码事实（`backup.go` / `output.go`）：
+
+- `WriteBackupOk`/`WriteMismatch` 写 `task.RawLine`——**原始输入行逐字节原样**，与输入文件可直接对齐；
+- `backup_ok.txt` 行在 ETag 终验通过后才写——是"真完成集合"的**子集**（周期 Flush 窗口 ≤3s 的丢行只会导致多备几个、幂等覆盖，不会漏备）；
+- `backup_failed.txt` **不在**排除集——失败的行保留在重跑输入中自动重试。
+
+```bash
+# <kill 轮目录> = backup_output_dir（output_dir_timestamp=true 时为 backup_output_dir_<时间戳>）
+export LC_ALL=C   # sort 与 comm 必须同一字典序；macOS/Linux 默认 locale 排序不同，不加会静默漏行
+cd <kill 轮目录>
+sort -u backup_ok.txt mismatch.txt > /tmp/done.txt
+sort -u <原输入文件> > /tmp/input.sorted.txt
+comm -23 /tmp/input.sorted.txt /tmp/done.txt > /tmp/retry.txt
+wc -l /tmp/retry.txt   # 期望：远小于原输入行数
+# 用重跑输入续跑（落新的时间戳目录，其 backup_failed.txt 继续自喂）：
+# /tmp/chunked_check_tool -c cfg.yaml -bkt <bucket> -backup-file /tmp/retry.txt
+```
+
+期望与验证：
+
+- `retry.txt` = 原输入唯一行 − (backup_ok ∪ mismatch)：kill 时未处理的任务 + 已失败的任务 + Flush 窗口（≤3s）内已完成但行未落盘的对象——第三类重跑是幂等覆盖，方向安全
+- **排除 mismatch 行**：这些对象的行类型与 HEAD 判型不符（检查后被改写），出路是 `mismatch.txt` 直喂 `-check-file` 重查；硬按旧行中转，ETag 终验必失败
+- 行必须逐字节一致：输入文件在两轮之间不能被修改（工具写行是 RawLine 原样，天然满足）
+- 输入行重复被 `sort -u` 归并——同一对象本就只需备份一次
+- 历史多轮（含优雅中断轮）都算数时：`sort -u <各轮目录>/backup_ok.txt <各轮目录>/mismatch.txt ... > /tmp/done.txt`
+- 收敛判据 = 最新一轮失败文件为空（§4.20 闭环）
+- kill -9 还会在备份桶遗留**未完成的 multipart upload**（kill 时 `AbortMultipart` 不会执行）——普通 LIST 不可见，需 ListMultipartUploads 排查清理，当前无工具入口
+- 命令管道经合成数据验证（12 行输入 10 唯一 − 7 done = 3 行 retry）；kill 场景的端到端复验待 §7.1 环境
 
 ## 8. 已知遗留项（改动时留意，非阻塞）
 

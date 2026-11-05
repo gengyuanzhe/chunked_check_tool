@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ownerLine pairs the ownerID (drives per-owner output routing) with the
@@ -326,9 +327,21 @@ func ownerDirName(ownerID string) string {
 	return ownerID
 }
 
+// outputFlushInterval is how often each output writer goroutine flushes its
+// bufio buffer into the file. Without it, lines sit in the 64KB buffer until
+// the channel closes at run end — a kill -9 (SIGKILL, OOM) then evaporates
+// them even though they were "written", up to ~64KB per file, tail of the
+// failure files that ARE the resume inputs. Periodic flush bounds the loss
+// window to ≤ this interval. A var (not const) so tests can shrink it;
+// no fsync — write() into the page cache already survives process death,
+// fsync would only guard machine crashes (a different durability class).
+var outputFlushInterval = 3 * time.Second
+
 // openAndStartRoot opens <dir>/<name> (append mode) and starts a writer
-// goroutine that writes one channel value per line. Used for the global
-// root .txt files (list_failed, check_failed, mp_check_failed).
+// goroutine that writes one channel value per line, flushing buffered lines
+// every outputFlushInterval so a kill -9 loses at most one interval of tail
+// lines instead of the whole bufio buffer. Used for the global root .txt
+// files (list_failed, check_failed, mp_check_failed).
 func (o *Output) openAndStartRoot(name string, ch chan string) error {
 	f, err := os.OpenFile(filepath.Join(o.dir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -339,11 +352,21 @@ func (o *Output) openAndStartRoot(name string, ch chan string) error {
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
-		for line := range ch {
-			w.WriteString(line)
-			w.WriteByte('\n')
+		ticker := time.NewTicker(outputFlushInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case line, ok := <-ch:
+				if !ok {
+					w.Flush()
+					return
+				}
+				w.WriteString(line)
+				w.WriteByte('\n')
+			case <-ticker.C:
+				w.Flush()
+			}
 		}
-		w.Flush()
 	}()
 	return nil
 }
@@ -354,7 +377,8 @@ func (o *Output) openAndStartRoot(name string, ch chan string) error {
 // map[ownerID]*os.File + map[ownerID]*bufio.Writer; on Close (channel close)
 // it flushes + closes every opened file. This way we pay one goroutine per
 // result file regardless of how many owners appear, instead of one goroutine
-// per owner.
+// per owner. Every outputFlushInterval all opened writers flush, bounding
+// kill -9 tail loss per file to one interval of lines.
 func (o *Output) openAndStartOwner(name string, ch chan ownerLine, render ownerRenderer) error {
 	o.wg.Add(1)
 	go func() {
@@ -369,24 +393,36 @@ func (o *Output) openAndStartOwner(name string, ch chan ownerLine, render ownerR
 				f.Close()
 			}
 		}()
-		for ol := range ch {
-			dirName := ownerDirName(ol.ownerID)
-			w, ok := writers[dirName]
-			if !ok {
-				subDir := filepath.Join(o.dir, dirName)
-				if err := os.MkdirAll(subDir, 0755); err != nil {
-					continue
+		ticker := time.NewTicker(outputFlushInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case ol, ok := <-ch:
+				if !ok {
+					return
 				}
-				f, err := os.OpenFile(filepath.Join(subDir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-				if err != nil {
-					continue
+				dirName := ownerDirName(ol.ownerID)
+				w, exists := writers[dirName]
+				if !exists {
+					subDir := filepath.Join(o.dir, dirName)
+					if err := os.MkdirAll(subDir, 0755); err != nil {
+						continue
+					}
+					f, err := os.OpenFile(filepath.Join(subDir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+					if err != nil {
+						continue
+					}
+					files[dirName] = f
+					w = bufio.NewWriterSize(f, 64*1024)
+					writers[dirName] = w
 				}
-				files[dirName] = f
-				w = bufio.NewWriterSize(f, 64*1024)
-				writers[dirName] = w
+				render(w, o.bucket, ol)
+				w.WriteByte('\n')
+			case <-ticker.C:
+				for _, w := range writers {
+					w.Flush()
+				}
 			}
-			render(w, o.bucket, ol)
-			w.WriteByte('\n')
 		}
 	}()
 	return nil

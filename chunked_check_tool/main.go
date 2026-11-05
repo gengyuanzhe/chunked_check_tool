@@ -135,7 +135,10 @@ func main() {
 //
 // A hard crash (kill -9, OOM) is the only lossy path: nothing is recorded
 // for the unprocessed remainder. Recovery is re-running the same scan scope
-// — probes are idempotent reads and outputs are append-only unions.
+// — probes are idempotent reads and outputs are append-only unions. The
+// output writer goroutines flush every outputFlushInterval, so a hard
+// crash loses at most one interval of tail lines per file (the failure
+// files are the resume inputs) instead of the full 64KB bufio buffer.
 func installSignalHandler() (listCtx, hardCtx context.Context, stop func()) {
 	listCtx, listCancel := context.WithCancel(context.Background())
 	hardCtx, hardCancel := context.WithCancel(context.Background())
@@ -615,7 +618,7 @@ func runBackup(listCtx, hardCtx context.Context, cfg *Config, bucket, backupFile
 	// An interrupted run is reported after the flush; backup_failed.txt is
 	// the retry input (already-processed objects can be excluded with a
 	// comm diff against backup_ok/mismatch since every output line is the
-	// raw input line).
+	// raw input line — the verified runbook is AGENTS §7.4).
 	if listCtx.Err() != nil {
 		return errInterrupted
 	}

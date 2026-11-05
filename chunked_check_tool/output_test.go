@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 )
@@ -428,5 +429,76 @@ func TestNewOutputListFileModeOkMpOptIn(t *testing.T) {
 	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "test-bkt|mp-bad|2|0|1024\n")
 	if _, err := os.Stat(filepath.Join(dir, "_unknown", "ok_mp.txt")); !os.IsNotExist(err) {
 		t.Errorf("ok_mp.txt should require is_multipart_success_log=true")
+	}
+}
+
+// TestOutputPeriodicFlushRoot — kill -9 safety of the resume inputs: a line
+// pushed to a root writer channel must reach the file WITHOUT Close(),
+// within outputFlushInterval. Before periodic flush, lines sat in the 64KB
+// bufio buffer until channel close at run end — a SIGKILL then lost the
+// tail of check_failed.txt (a -check-file retry input) even though the
+// lines had already been "written".
+func TestOutputPeriodicFlushRoot(t *testing.T) {
+	orig := outputFlushInterval
+	outputFlushInterval = 10 * time.Millisecond
+	defer func() { outputFlushInterval = orig }()
+
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true}
+	o, err := NewOutput(cfg, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close()
+	o.WriteCheckFailed("obj/k1")
+
+	path := filepath.Join(dir, "check_failed.txt")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil && strings.TrimSpace(string(data)) == "test-bkt|obj/k1" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("line not flushed to %s without Close within deadline (kill -9 would lose it): content=%q err=%v", path, data, err)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestOutputPeriodicFlushOwner — same kill -9 bound for per-owner files: the
+// single fan-out goroutine must flush EVERY opened owner's writer on the
+// interval, not only on channel close.
+func TestOutputPeriodicFlushOwner(t *testing.T) {
+	orig := outputFlushInterval
+	outputFlushInterval = 10 * time.Millisecond
+	defer func() { outputFlushInterval = orig }()
+
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true}
+	o, err := NewOutput(cfg, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close()
+	o.WriteCorrupted("owner-A", "obj/a1")
+	o.WriteCorrupted("owner-B", "obj/b1")
+
+	for _, c := range []struct{ ownerID, key string }{
+		{"owner-A", "obj/a1"},
+		{"owner-B", "obj/b1"},
+	} {
+		path := ownerSub(dir, c.ownerID, "corrupted_objects.txt")
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			data, err := os.ReadFile(path)
+			if err == nil && strings.TrimSpace(string(data)) == "test-bkt|"+c.key {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("line not flushed to %s without Close within deadline (kill -9 would lose it): content=%q err=%v", path, data, err)
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
 	}
 }
