@@ -272,6 +272,17 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 	pool := NewNodePool(cfg)
 	startNodeRecovery(hardCtx, pool, cfg, bucket)
 
+	// Journal interval env override (smoke runbook lever — see
+	// journalIntervalFromEnv). Resolved before anything starts so a bad
+	// value fails the run cleanly.
+	if cfg.ListType == 2 {
+		d, err := journalIntervalFromEnv(os.Getenv, journalCheckpointInterval)
+		if err != nil {
+			return err
+		}
+		journalCheckpointInterval = d
+	}
+
 	fileInput := FileInputNone
 	switch {
 	case checkFile != "":

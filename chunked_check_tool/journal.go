@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -360,7 +361,27 @@ func (t *JournalTracker) trackedPrefixes() int {
 // journalCheckpointInterval is how often scan progress is persisted to the
 // journal; a kill -9 loses at most one interval of work. Package var (not
 // config) so tests can shrink it — same pattern as outputFlushInterval.
+// The JOURNAL_INTERVAL_SEC env var (see journalIntervalFromEnv) exists for
+// the kill -9 smoke runbook: local-minio scans finish in seconds, long
+// before the first 10-minute tick, so the runbook shrinks the interval to
+// exercise mid-run checkpoints.
 var journalCheckpointInterval = 10 * time.Minute
+
+// journalIntervalFromEnv resolves JOURNAL_INTERVAL_SEC (seconds). Unset or
+// empty keeps def. Anything but a positive integer is a loud error: a bad
+// value must never be silently ignored, since it silently changes the
+// kill -9 loss bound.
+func journalIntervalFromEnv(getenv func(string) string, def time.Duration) (time.Duration, error) {
+	v := getenv("JOURNAL_INTERVAL_SEC")
+	if v == "" {
+		return def, nil
+	}
+	sec, err := strconv.Atoi(v)
+	if err != nil || sec < 1 {
+		return 0, fmt.Errorf("JOURNAL_INTERVAL_SEC=%q: want an integer >= 1 (seconds)", v)
+	}
+	return time.Duration(sec) * time.Second, nil
+}
 
 // runJournalCheckpoints persists scan progress to journalPath until ctx is
 // cancelled, then once more (final state) and returns. One checkpoint runs

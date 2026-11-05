@@ -1109,3 +1109,39 @@ func TestCheckpointPostSeedTrigger(t *testing.T) {
 		}
 	}
 }
+
+// TestJournalIntervalFromEnv — the smoke-runbook override lever
+// JOURNAL_INTERVAL_SEC: unset keeps the default, a positive integer (seconds)
+// overrides, anything else is a loud error — a bad value must never be
+// silently ignored (that would silently change the kill -9 loss bound).
+func TestJournalIntervalFromEnv(t *testing.T) {
+	def := 10 * time.Minute
+	cases := []struct {
+		env    string
+		want   time.Duration
+		wantEr bool
+	}{
+		{"", def, false},
+		{"3", 3 * time.Second, false},
+		{"1", 1 * time.Second, false},
+		{"0", 0, true},
+		{"-1", 0, true},
+		{"abc", 0, true},
+		{"3.5", 0, true},
+	}
+	for _, c := range cases {
+		got, err := journalIntervalFromEnv(func(string) string { return c.env }, def)
+		if c.wantEr {
+			if err == nil {
+				t.Errorf("env %q: err = nil, want error", c.env)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("env %q: err = %v, want nil", c.env, err)
+		}
+		if got != c.want {
+			t.Errorf("env %q: interval = %v, want %v", c.env, got, c.want)
+		}
+	}
+}
