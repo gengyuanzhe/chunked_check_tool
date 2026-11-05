@@ -27,6 +27,12 @@ type VerifyTask struct {
 	// both). Backup mode HEADs in its own Handle, so it does not set
 	// HeadFirst.
 	HeadFirst bool
+	// JournalPrefix/PageSeq carry the journal accounting identity (Mode 2
+	// S3 listing only): the prefix the object was listed under and the page
+	// within that prefix, reported back via JournalTracker.Terminal when the
+	// checker finishes. Zero values in every other mode (journal off).
+	JournalPrefix string
+	PageSeq       int32
 }
 
 // resolveOffsets builds a VerifyTask from an S3-listed object. Four cases:

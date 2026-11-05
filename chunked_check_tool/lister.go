@@ -44,16 +44,28 @@ type Lister struct {
 	stats    *Stats
 	cfg      *Config
 	inflight atomic.Int64
+	// journal tracks scan progress for kill -9 resume (Mode 2 S3 listing
+	// only; nil = off, every bookkeeping call is guarded by a nil check).
+	journal *JournalTracker
 }
 
 func NewLister(queue *Queue, out *Output, stats *Stats, cfg *Config) *Lister {
 	return &Lister{queue: queue, out: out, stats: stats, cfg: cfg}
 }
 
+// SetJournal wires the progress tracker. Setter (not a constructor param)
+// to keep the dozens of existing test constructions untouched.
+func (l *Lister) SetJournal(j *JournalTracker) {
+	l.journal = j
+}
+
 // Seed pushes a starting prefix and bumps inflight so the first worker does
 // not observe inflight==0 (and spuriously close the queue) before the
 // prefix has been processed.
 func (l *Lister) Seed(prefix string) {
+	if l.journal != nil {
+		l.journal.RecordSeed(prefix, "")
+	}
 	l.inflight.Add(1)
 	l.queue.Push(prefix)
 }
@@ -67,6 +79,9 @@ func (l *Lister) Seed(prefix string) {
 // NUL (S3 keys are arbitrary UTF-8 bytes but not NUL). processPrefix splits
 // the queue value back into prefix+token.
 func (l *Lister) SeedWithToken(prefix, token string) {
+	if l.journal != nil {
+		l.journal.RecordSeed(prefix, token)
+	}
 	l.inflight.Add(1)
 	l.queue.Push(prefix + "\x00" + token)
 }
@@ -145,6 +160,22 @@ func (l *Lister) processPrefix(listCtx, hardCtx context.Context, prefix, initial
 			l.recordListFailure(prefix, continuationToken, err)
 			return
 		}
+		// Register the page's FULL object count and record this page's
+		// discoveries BEFORE any object of the page can reach a terminal
+		// state (the first objCh send). Two load-bearing orderings:
+		//   - full count: a hard abort mid-page leaves the count short, so
+		//     the journal cursor freezes before the page (recovery re-lists
+		//     it instead of silently skipping the unsent objects);
+		//   - discoveries first: the parent's cursor may only cross this
+		//     page once the sub-prefixes it revealed are visible to the
+		//     tracker, or a checkpoint could drop a subtree.
+		var pageSeq int32 = -1
+		if l.journal != nil {
+			pageSeq = l.journal.RegisterPage(prefix, len(objs), next)
+			for _, p := range prefixes {
+				l.journal.AddDiscovered(p)
+			}
+		}
 		for _, o := range objs {
 			// Reject keys containing '|' — they violate the field-separator
 			// contract and would corrupt corrupted_objects/corrupted_mp output
@@ -153,6 +184,12 @@ func (l *Lister) processPrefix(listCtx, hardCtx context.Context, prefix, initial
 			if strings.Contains(o.Key, "|") {
 				l.out.WriteInvalidKey(o.Key)
 				l.stats.IncrInvalidKeys()
+				if l.journal != nil {
+					// Short-circuited object: it never becomes a task, so
+					// the lister reports its terminal itself and the page
+					// can still complete.
+					l.journal.Terminal(prefix, pageSeq)
+				}
 				continue
 			}
 			if l.cfg.IsCheck {
@@ -160,6 +197,10 @@ func (l *Lister) processPrefix(listCtx, hardCtx context.Context, prefix, initial
 				// file-input sources do not go through this path, so their summary
 				// shows list_all: 0 — see fileSource.
 				task := resolveOffsets(o, l.cfg)
+				if l.journal != nil {
+					task.JournalPrefix = prefix
+					task.PageSeq = pageSeq
+				}
 				if task.IsMultipart {
 					l.stats.IncrListedMp()
 				} else {
@@ -181,6 +222,11 @@ func (l *Lister) processPrefix(listCtx, hardCtx context.Context, prefix, initial
 				} else {
 					l.stats.IncrListedObject()
 				}
+				if l.journal != nil {
+					// No checker in list-only mode: the classification IS
+					// the terminal event.
+					l.journal.Terminal(prefix, pageSeq)
+				}
 			}
 			if onObject != nil {
 				onObject()
@@ -196,6 +242,9 @@ func (l *Lister) processPrefix(listCtx, hardCtx context.Context, prefix, initial
 			}
 		}
 		if next == "" {
+			if l.journal != nil {
+				l.journal.MarkPaginationDone(prefix)
+			}
 			return
 		}
 		continuationToken = next

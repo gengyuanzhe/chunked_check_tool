@@ -528,3 +528,248 @@ func TestCheckpointCommitClearsDelta(t *testing.T) {
 		t.Errorf("discovered|x appears %d times, want exactly 1 (Commit clears the delta): %q", n, data)
 	}
 }
+
+// TestListerJournalRegistersPages — the lister registers every page with
+// its FULL object count, tasks carry (prefix, pageSeq), and a fully
+// processed prefix reaches done.
+func TestListerJournalRegistersPages(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, ListType: 2, IsCheck: true}
+	out, err := NewOutput(cfg, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	l := NewLister(NewQueue(), out, NewStats(), cfg)
+	tr := NewJournalTracker()
+	l.SetJournal(tr)
+
+	const normal = "0123456789abcdef0123456789abcdef"
+	fake := &scriptedS3{pages: map[string][]pageResult{
+		"root/": {
+			{objs: []ObjectInfo{{Key: "root/a", ETag: normal}, {Key: "root/b", ETag: normal}}, nextToken: "tok2"},
+			{objs: []ObjectInfo{{Key: "root/c", ETag: normal}, {Key: "root/d", ETag: normal}}, nextToken: ""},
+		},
+	}}
+	objCh := make(chan VerifyTask, 8)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.processPrefix(context.Background(), context.Background(), "root/", "", objCh, fake, nil)
+	}()
+	var tasks []VerifyTask
+	for len(tasks) < 4 {
+		select {
+		case task := <-objCh:
+			tasks = append(tasks, task)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d tasks arrived, want 4", len(tasks))
+		}
+	}
+	<-done
+
+	for i, task := range tasks {
+		if task.JournalPrefix != "root/" {
+			t.Errorf("task %d JournalPrefix = %q, want root/", i, task.JournalPrefix)
+		}
+		wantSeq := int32(0)
+		if i >= 2 {
+			wantSeq = 1
+		}
+		if task.PageSeq != wantSeq {
+			t.Errorf("task %d PageSeq = %d, want %d", i, task.PageSeq, wantSeq)
+		}
+	}
+	for _, task := range tasks {
+		tr.Terminal(task.JournalPrefix, task.PageSeq)
+	}
+	if snap := tr.Snapshot(); !containsString(snap.Dones, "root/") {
+		t.Errorf("done = false after all terminals + pagination end; snapshot: %+v", snap)
+	}
+}
+
+// TestListerJournalHardAbortFreezesPosition — the pipeline-level form of
+// the core invariant: a second-signal abort mid-page leaves the page's
+// outstanding count short, so the journal cursor freezes on the LAST
+// completed page and recovery re-lists the aborted page.
+func TestListerJournalHardAbortFreezesPosition(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, ListType: 2, IsCheck: true}
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+	defer out.Close()
+	l := NewLister(NewQueue(), out, NewStats(), cfg)
+	tr := NewJournalTracker()
+	l.SetJournal(tr)
+
+	const normal = "0123456789abcdef0123456789abcdef"
+	hardCtx, hardCancel := context.WithCancel(context.Background())
+	defer hardCancel()
+	fake := &scriptedS3{pages: map[string][]pageResult{
+		"root/": {
+			{objs: []ObjectInfo{{Key: "root/a", ETag: normal}}, nextToken: "tok2"},
+			{objs: []ObjectInfo{{Key: "root/b", ETag: normal}, {Key: "root/c", ETag: normal}}, nextToken: ""},
+		},
+	}}
+	objCh := make(chan VerifyTask, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.processPrefix(context.Background(), hardCtx, "root/", "", objCh, fake, nil)
+	}()
+	// Consume page 0's only object as a checker would and report its
+	// terminal: page 0 completes, cursor moves to its token.
+	select {
+	case task := <-objCh:
+		tr.Terminal(task.JournalPrefix, task.PageSeq)
+	case <-time.After(2 * time.Second):
+		t.Fatal("page 0 task never arrived")
+	}
+	// Page 1: root/b fills the capacity-1 channel, root/c's send blocks.
+	waitFor(t, func() bool { return len(objCh) == 1 }, 2*time.Second)
+	hardCancel() // second signal: abort the mid-page send
+	<-done
+
+	snap := tr.Snapshot()
+	if c := findCursor(snap, "root/"); c == nil || c.Token != "tok2" {
+		t.Errorf("cursor after mid-page hard abort = %+v, want {root/, tok2} (frozen at last completed page)", c)
+	}
+	if containsString(snap.Dones, "root/") {
+		t.Errorf("done = true after hard abort, want false")
+	}
+}
+
+// TestListerJournalShortCircuitKeysTerminal — objects whose keys contain
+// "|" never become tasks; the lister reports their terminal itself so the
+// page can still complete.
+func TestListerJournalShortCircuitKeysTerminal(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, ListType: 2, IsCheck: true}
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+	defer out.Close()
+	l := NewLister(NewQueue(), out, NewStats(), cfg)
+	tr := NewJournalTracker()
+	l.SetJournal(tr)
+
+	const normal = "0123456789abcdef0123456789abcdef"
+	fake := &scriptedS3{pages: map[string][]pageResult{
+		"root/": {
+			{objs: []ObjectInfo{{Key: "root/ok", ETag: normal}, {Key: "root/ba|d", ETag: normal}}, nextToken: ""},
+		},
+	}}
+	objCh := make(chan VerifyTask, 8)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.processPrefix(context.Background(), context.Background(), "root/", "", objCh, fake, nil)
+	}()
+	select {
+	case task := <-objCh:
+		tr.Terminal(task.JournalPrefix, task.PageSeq)
+	case <-time.After(2 * time.Second):
+		t.Fatal("task never arrived")
+	}
+	<-done
+	out.FlushAndWait() // the invalid_keys line is still queued; put it on disk
+
+	if snap := tr.Snapshot(); !containsString(snap.Dones, "root/") {
+		t.Errorf("done = false with short-circuited key in page; snapshot: %+v", snap)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "invalid_keys.txt"))
+	if err != nil || !strings.Contains(string(data), "root/ba|d") {
+		t.Errorf("invalid_keys.txt = %q err=%v, want the pipe key recorded", data, err)
+	}
+}
+
+// TestListerJournalDiscoversBeforeEmission — when the parent's cursor
+// crosses a page, the sub-prefixes that page discovered are visible in the
+// SAME snapshot: the checkpoint batch can never claim the parent's progress
+// past the page while the discoveries are missing.
+func TestListerJournalDiscoversBeforeEmission(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, ListType: 2, IsCheck: true}
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+	defer out.Close()
+	l := NewLister(NewQueue(), out, NewStats(), cfg)
+	tr := NewJournalTracker()
+	l.SetJournal(tr)
+
+	const normal = "0123456789abcdef0123456789abcdef"
+	fake := &scriptedS3{pages: map[string][]pageResult{
+		"root/": {
+			{objs: []ObjectInfo{{Key: "root/a", ETag: normal}}, prefixes: []string{"root/sub/"}, nextToken: "tok2"},
+			{objs: []ObjectInfo{{Key: "root/c", ETag: normal}}, nextToken: ""},
+		},
+	}}
+	objCh := make(chan VerifyTask, 8)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l.processPrefix(context.Background(), context.Background(), "root/", "", objCh, fake, nil)
+	}()
+	var tasks []VerifyTask
+	for len(tasks) < 2 {
+		select {
+		case task := <-objCh:
+			tasks = append(tasks, task)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d tasks arrived, want 2", len(tasks))
+		}
+	}
+	<-done
+	tr.Terminal(tasks[0].JournalPrefix, tasks[0].PageSeq) // page 0 completes
+
+	snap := tr.Snapshot()
+	if c := findCursor(snap, "root/"); c == nil || c.Token != "tok2" {
+		t.Errorf("cursor after page 0 complete = %+v, want {root/, tok2}", c)
+	}
+	if !containsString(snap.Discovered, "root/sub/") {
+		t.Errorf("page 0's discovery missing from the same snapshot as its cursor: %+v", snap.Discovered)
+	}
+}
+
+// TestCheckerJournalTerminalAfterHandle — Checker.Handle reports the
+// terminal AFTER the body pushed the result line (deferred), so the page
+// completes through the real checker path.
+func TestCheckerJournalTerminalAfterHandle(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true}
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+	defer out.Close()
+	c := NewChecker(context.Background(), &scriptedS3{}, out, NewStats(), cfg)
+	tr := NewJournalTracker()
+	c.SetJournal(tr)
+	tr.RegisterPage("root/", 1, "T1")
+
+	const normal = "0123456789abcdef0123456789abcdef"
+	c.Handle(VerifyTask{Key: "root/a", ETag: normal, Size: 16, JournalPrefix: "root/", PageSeq: 0})
+
+	snap := tr.Snapshot()
+	if c := findCursor(snap, "root/"); c == nil || c.Token != "T1" {
+		t.Errorf("cursor after Handle = %+v, want {root/, T1} (terminal deferred to after the result push)", c)
+	}
+}
+
+// TestListerJournalListOnlyTerminals — list-only mode has no checkers; the
+// lister's local classification is the terminal event, so pages complete.
+func TestListerJournalListOnlyTerminals(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, ListType: 2, IsCheck: false}
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+	defer out.Close()
+	l := NewLister(NewQueue(), out, NewStats(), cfg)
+	tr := NewJournalTracker()
+	l.SetJournal(tr)
+
+	const normal = "0123456789abcdef0123456789abcdef"
+	fake := &scriptedS3{pages: map[string][]pageResult{
+		"root/": {
+			{objs: []ObjectInfo{{Key: "root/a", ETag: normal}, {Key: "root/b", ETag: normal}}, nextToken: ""},
+		},
+	}}
+	objCh := make(chan VerifyTask, 8)
+	l.processPrefix(context.Background(), context.Background(), "root/", "", objCh, fake, nil)
+
+	if snap := tr.Snapshot(); !containsString(snap.Dones, "root/") {
+		t.Errorf("done = false in list-only mode; snapshot: %+v", snap)
+	}
+}

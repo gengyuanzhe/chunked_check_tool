@@ -104,10 +104,19 @@ type Checker struct {
 	out    *Output
 	stats  *Stats
 	cfg    *Config
+	// journal tracks scan progress for kill -9 resume (Mode 2 S3 listing
+	// only; nil = off).
+	journal *JournalTracker
 }
 
 func NewChecker(ctx context.Context, worker S3API, out *Output, stats *Stats, cfg *Config) *Checker {
 	return &Checker{ctx: ctx, worker: worker, out: out, stats: stats, cfg: cfg}
+}
+
+// SetJournal wires the progress tracker. Setter (not a constructor param)
+// to keep existing test constructions untouched.
+func (c *Checker) SetJournal(j *JournalTracker) {
+	c.journal = j
 }
 
 // Handle routes task to verify. The size==0 normal-object shortcut stays
@@ -130,6 +139,14 @@ func NewChecker(ctx context.Context, worker S3API, out *Output, stats *Stats, cf
 //   - drift to multipart (line regular, HEAD multipart ETag): no offsets
 //     available → verify() routes to mp.txt unverified (never claim clean).
 func (c *Checker) Handle(task VerifyTask) {
+	if c.journal != nil {
+		// Terminal AFTER the body pushed the result line into its output
+		// channel: the deferred call runs after every write in Handle, so
+		// the tracker only counts terminals whose lines are already queued
+		// — the precondition of the checkpoint's snapshot-then-flush
+		// ordering (see runJournalCheckpoints).
+		defer c.journal.Terminal(task.JournalPrefix, task.PageSeq)
+	}
 	if task.HeadFirst {
 		etag, size, err := c.worker.HeadObject(c.ctx, task.Key)
 		if err != nil {
