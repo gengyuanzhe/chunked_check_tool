@@ -245,7 +245,7 @@ func TestTrackerConsecutivePagesRequired(t *testing.T) {
 // page count up front is what makes this hold.
 func TestTrackerFrozenOnPartialPage(t *testing.T) {
 	tr := NewJournalTracker()
-	tr.RegisterPage("p", 1, "T1")     // page 0 completes fully
+	tr.RegisterPage("p", 1, "T1") // page 0 completes fully
 	tr.Terminal("p", 0)
 	seq := tr.RegisterPage("p", 1000, "T2") // page 1: hard abort after 400 pushes
 	for i := 0; i < 400; i++ {
