@@ -1031,3 +1031,41 @@ func TestAppendJournalBatchRollsBackShortWrite(t *testing.T) {
 		t.Errorf("file after retry = %q, want %q", data, want)
 	}
 }
+
+// TestSnapshotSkipsCursorWhenTokenHasPipeOrNewline — the cursor line
+// grammar ("cursor|<prefix>|<token>", split at the LAST pipe) assumes the
+// token has no "|". A V1 NextMarker is a real key and may contain "|":
+// emitting "cursor|p1|tok|pipe" would replay as prefix "p1|tok" token
+// "pipe" — a phantom prefix plus a lost cursor (a coverage risk when the
+// phantom prefix really exists). A token with "\n" corrupts the line
+// format outright. Skip the cursor line for both: the prefix stays
+// discovered, so a resume re-lists it from the top (redo work, never a
+// hole).
+func TestSnapshotSkipsCursorWhenTokenHasPipeOrNewline(t *testing.T) {
+	tr := NewJournalTracker()
+	tr.RecordSeed("p1", "")
+	seq1 := tr.RegisterPage("p1", 1, "tok|pipe")
+	tr.Terminal("p1", seq1)
+	tr.RecordSeed("p2", "")
+	seq2 := tr.RegisterPage("p2", 1, "tok\nnl")
+	tr.Terminal("p2", seq2)
+
+	snap := tr.Snapshot()
+	for _, c := range snap.Cursors {
+		if strings.ContainsAny(c.Token, "|\n") {
+			t.Errorf("cursor emitted for token %q — grammar cannot round-trip it", c.Token)
+		}
+	}
+	foundP1, foundP2 := false, false
+	for _, p := range snap.Discovered {
+		if p == "p1" {
+			foundP1 = true
+		}
+		if p == "p2" {
+			foundP2 = true
+		}
+	}
+	if !foundP1 || !foundP2 {
+		t.Errorf("discovered = %v, want p1 and p2 present (top-re-list fallback)", snap.Discovered)
+	}
+}

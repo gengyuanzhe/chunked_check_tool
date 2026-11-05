@@ -323,7 +323,11 @@ func (t *JournalTracker) Snapshot() journalSnapshot {
 			snap.Dones = append(snap.Dones, prefix)
 			continue
 		}
-		if tok := st.continuation(); tok != "" {
+		if tok := st.continuation(); tok != "" && !strings.ContainsAny(tok, "|\n") {
+			// A token with "|" breaks the cursor grammar's last-pipe split
+			// (V1 NextMarker is a key and can contain it); "\n" breaks the
+			// line format. Skipping costs a full prefix re-list on resume —
+			// redo work, never a coverage hole.
 			snap.Cursors = append(snap.Cursors, journalCursorEntry{Prefix: prefix, Token: tok})
 		}
 	}
