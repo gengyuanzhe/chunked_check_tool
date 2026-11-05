@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -520,5 +521,92 @@ func TestOutputPeriodicFlushOwner(t *testing.T) {
 			}
 			time.Sleep(2 * time.Millisecond)
 		}
+	}
+}
+
+// TestOutputFlushAndWaitRoot — FlushAndWait must put every previously
+// pushed line into the file WITHOUT Close: the writer drains the channel
+// backlog (up to 1024 lines never touched by the bufio ticker) and only
+// then flushes. Without the drain, lines sitting in the channel buffer
+// would be invisible to the flush and the journal's ordering guarantee
+// (spec §5) would have a hole.
+func TestOutputFlushAndWaitRoot(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true}
+	o, err := NewOutput(cfg, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close()
+	for i := 0; i < 1500; i++ { // more than the 1024 channel capacity
+		o.WriteCheckFailed(fmt.Sprintf("obj/k%04d", i))
+	}
+	o.FlushAndWait()
+	data, err := os.ReadFile(filepath.Join(dir, "check_failed.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(data), "\n"); got != 1500 {
+		t.Errorf("lines on disk without Close = %d, want 1500 (drain + flush)", got)
+	}
+}
+
+// TestOutputFlushAndWaitOwner — the per-owner fan-out goroutine drains and
+// flushes EVERY opened owner's writer, not just the most recent one.
+func TestOutputFlushAndWaitOwner(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true}
+	o, err := NewOutput(cfg, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close()
+	for i := 0; i < 300; i++ {
+		o.WriteCorrupted("owner-A", fmt.Sprintf("obj/a%04d", i))
+		o.WriteCorrupted("owner-B", fmt.Sprintf("obj/b%04d", i))
+	}
+	o.FlushAndWait()
+	for _, owner := range []string{"owner-A", "owner-B"} {
+		data, err := os.ReadFile(ownerSub(dir, owner, "corrupted_objects.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Count(string(data), "\n"); got != 300 {
+			t.Errorf("%s lines on disk without Close = %d, want 300", owner, got)
+		}
+	}
+}
+
+// TestOutputFlushAndWaitLiveProducer — FlushAndWait while a producer is
+// still pushing must not deadlock, and once the producer finishes and one
+// more FlushAndWait runs, every line is durable. Run with -race.
+func TestOutputFlushAndWaitLiveProducer(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true}
+	o, err := NewOutput(cfg, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close()
+	const N = 2000
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < N; i++ {
+			o.WriteCheckFailed(fmt.Sprintf("obj/k%04d", i))
+			if i%100 == 0 {
+				o.FlushAndWait() // concurrent flusher vs producer
+			}
+		}
+	}()
+	o.FlushAndWait() // races the producer on purpose
+	<-done
+	o.FlushAndWait()
+	data, err := os.ReadFile(filepath.Join(dir, "check_failed.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(data), "\n"); got != N {
+		t.Errorf("lines on disk after producer done + FlushAndWait = %d, want %d", got, N)
 	}
 }

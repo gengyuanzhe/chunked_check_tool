@@ -100,6 +100,12 @@ type Output struct {
 
 	wg    sync.WaitGroup
 	files []*os.File // root files only — per-owner files are owned by their goroutines
+
+	// flushCtrls hands FlushAndWait to every writer goroutine (one entry per
+	// openAndStart* call). All entries are appended while NewOutput is still
+	// single-threaded, before any goroutine starts — the slice is immutable
+	// once serving and needs no lock.
+	flushCtrls []*flushCtrl
 }
 
 // NewOutput builds the Output for list/check modes. fileInput selects the
@@ -349,6 +355,8 @@ func (o *Output) openAndStartRoot(name string, ch chan string) error {
 	}
 	o.files = append(o.files, f)
 	w := bufio.NewWriterSize(f, 64*1024)
+	ctrl := &flushCtrl{req: make(chan chan struct{})}
+	o.flushCtrls = append(o.flushCtrls, ctrl)
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
@@ -365,10 +373,35 @@ func (o *Output) openAndStartRoot(name string, ch chan string) error {
 				w.WriteByte('\n')
 			case <-ticker.C:
 				w.Flush()
+			case reply := <-ctrl.req:
+				o.drainRoot(ch, w)
+				w.Flush()
+				close(reply)
 			}
 		}
 	}()
 	return nil
+}
+
+// drainRoot empties ch's current backlog into w without blocking. FlushAndWait
+// semantics (see FlushAndWait): a line pushed before the flush started is
+// either already in w's bufio or still queued in ch — draining covers both,
+// and the channel's FIFO order makes that airtight. Lines pushed during the
+// drain are extra (a later flush or the ticker covers them).
+func (o *Output) drainRoot(ch chan string, w *bufio.Writer) {
+drain:
+	for {
+		select {
+		case line, ok := <-ch:
+			if !ok {
+				break drain
+			}
+			w.WriteString(line)
+			w.WriteByte('\n')
+		default:
+			break drain
+		}
+	}
 }
 
 // openAndStartOwner opens <dir>/<ownerID>/<name> lazily per ownerID and
@@ -378,8 +411,11 @@ func (o *Output) openAndStartRoot(name string, ch chan string) error {
 // it flushes + closes every opened file. This way we pay one goroutine per
 // result file regardless of how many owners appear, instead of one goroutine
 // per owner. Every outputFlushInterval all opened writers flush, bounding
-// kill -9 tail loss per file to one interval of lines.
+// kill -9 tail loss per file to one interval of lines; FlushAndWait drains
+// the channel backlog first and flushes every owner's writer.
 func (o *Output) openAndStartOwner(name string, ch chan ownerLine, render ownerRenderer) error {
+	ctrl := &flushCtrl{req: make(chan chan struct{})}
+	o.flushCtrls = append(o.flushCtrls, ctrl)
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
@@ -393,6 +429,25 @@ func (o *Output) openAndStartOwner(name string, ch chan ownerLine, render ownerR
 				f.Close()
 			}
 		}()
+		writeLine := func(ol ownerLine) {
+			dirName := ownerDirName(ol.ownerID)
+			w, exists := writers[dirName]
+			if !exists {
+				subDir := filepath.Join(o.dir, dirName)
+				if err := os.MkdirAll(subDir, 0755); err != nil {
+					return
+				}
+				f, err := os.OpenFile(filepath.Join(subDir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+				if err != nil {
+					return
+				}
+				files[dirName] = f
+				w = bufio.NewWriterSize(f, 64*1024)
+				writers[dirName] = w
+			}
+			render(w, o.bucket, ol)
+			w.WriteByte('\n')
+		}
 		ticker := time.NewTicker(outputFlushInterval)
 		defer ticker.Stop()
 		for {
@@ -401,31 +456,60 @@ func (o *Output) openAndStartOwner(name string, ch chan ownerLine, render ownerR
 				if !ok {
 					return
 				}
-				dirName := ownerDirName(ol.ownerID)
-				w, exists := writers[dirName]
-				if !exists {
-					subDir := filepath.Join(o.dir, dirName)
-					if err := os.MkdirAll(subDir, 0755); err != nil {
-						continue
-					}
-					f, err := os.OpenFile(filepath.Join(subDir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-					if err != nil {
-						continue
-					}
-					files[dirName] = f
-					w = bufio.NewWriterSize(f, 64*1024)
-					writers[dirName] = w
-				}
-				render(w, o.bucket, ol)
-				w.WriteByte('\n')
+				writeLine(ol)
 			case <-ticker.C:
 				for _, w := range writers {
 					w.Flush()
 				}
+			case reply := <-ctrl.req:
+			drain:
+				for {
+					select {
+					case ol, ok := <-ch:
+						if !ok {
+							break drain
+						}
+						writeLine(ol)
+					default:
+						break drain
+					}
+				}
+				for _, w := range writers {
+					w.Flush()
+				}
+				close(reply)
 			}
 		}
 	}()
 	return nil
+}
+
+// flushCtrl is one writer goroutine's flush handoff: FlushAndWait sends a
+// reply channel on req, the writer drains its data channel's backlog,
+// flushes its bufio, then closes the reply.
+type flushCtrl struct {
+	req chan chan struct{}
+}
+
+// FlushAndWait returns when every line pushed into any output data channel
+// BEFORE this call is written into its file. Each writer goroutine drains
+// its channel's current backlog before flushing — the channel's FIFO order
+// guarantees a line pushed before the call is covered whether it was still
+// queued in the channel or already sitting in the bufio buffer. Producers
+// may keep pushing during the flush; those later lines land on the next
+// flush or the periodic ticker. The journal checkpoint relies on exactly
+// this guarantee (snapshot -> FlushAndWait -> write journal). Must not be
+// called concurrently with Close.
+func (o *Output) FlushAndWait() {
+	replies := make([]chan struct{}, len(o.flushCtrls))
+	for i, ctrl := range o.flushCtrls {
+		reply := make(chan struct{})
+		ctrl.req <- reply
+		replies[i] = reply
+	}
+	for _, r := range replies {
+		<-r
+	}
 }
 
 // renderLineFmt renders via the configured result_line_format.
