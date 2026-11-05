@@ -2,10 +2,13 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 // journal.go — kill-9 resumable scan progress for Mode 2.
@@ -347,4 +350,86 @@ func (t *JournalTracker) trackedPrefixes() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return len(t.states)
+}
+
+// journalCheckpointInterval is how often scan progress is persisted to the
+// journal; a kill -9 loses at most one interval of work. Package var (not
+// config) so tests can shrink it — same pattern as outputFlushInterval.
+var journalCheckpointInterval = 10 * time.Minute
+
+// runJournalCheckpoints persists scan progress to journalPath until ctx is
+// cancelled, then once more (final state) and returns. One checkpoint runs
+// IMMEDIATELY at start, before any tick: the seed line lands in the journal
+// before listing begins, so a kill inside the FIRST interval still leaves a
+// resumable root (and a resume run killed before its first page keeps its
+// seed token).
+//
+// Each checkpoint is the ordering-invariant sequence from spec §5:
+//
+//	snapshot tracker -> Output.FlushAndWait -> append batch -> Commit
+//
+// Snapshot BEFORE flushing: Terminal is counted after the result line was
+// pushed into an output channel, so everything counted in the snapshot was
+// pushed before the flush started and is guaranteed to be written by
+// FlushAndWait's drain. Write failure skips Commit — the next checkpoint
+// re-sends the delta (replay is last-event-wins, duplicates are harmless).
+//
+// Lifecycle: cancel ctx after listing and checking have fully finished and
+// BEFORE out.Close() — FlushAndWait must never meet closed channels.
+func runJournalCheckpoints(ctx context.Context, tr *JournalTracker, out *Output, journalPath string) {
+	f, err := os.OpenFile(journalPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		// The scan itself stays correct without a journal; only kill -9
+		// resumability degrades. Log and continue rather than kill the run.
+		log.Printf("journal: open %s: %v (journal disabled, kill -9 will not be resumable)", journalPath, err)
+		return
+	}
+	defer f.Close()
+	ticker := time.NewTicker(journalCheckpointInterval)
+	defer ticker.Stop()
+	checkpoint := func() {
+		snap := tr.Snapshot()
+		out.FlushAndWait()
+		if err := appendJournalBatch(f, snap); err != nil {
+			log.Printf("journal: append batch to %s: %v", journalPath, err)
+			return
+		}
+		tr.Commit(snap)
+	}
+	checkpoint()
+	for {
+		select {
+		case <-ctx.Done():
+			checkpoint()
+			return
+		case <-ticker.C:
+			checkpoint()
+		}
+	}
+}
+
+// appendJournalBatch writes one checkpoint batch: all discovered lines
+// first, then cursors, then dones. The within-batch order matters for the
+// torn mid-batch kill: "child discovered, parent not done" is recoverable
+// (re-list the parent), while the reverse would drop the subtree from the
+// replayed frontier entirely.
+func appendJournalBatch(f *os.File, snap journalSnapshot) error {
+	var b []byte
+	for _, p := range snap.Discovered {
+		b = append(b, formatJournalEvent(p, "", journalEventDiscovered)...)
+		b = append(b, '\n')
+	}
+	for _, c := range snap.Cursors {
+		b = append(b, formatJournalEvent(c.Prefix, c.Token, journalEventCursor)...)
+		b = append(b, '\n')
+	}
+	for _, p := range snap.Dones {
+		b = append(b, formatJournalEvent(p, "", journalEventDone)...)
+		b = append(b, '\n')
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	_, err := f.Write(b)
+	return err
 }

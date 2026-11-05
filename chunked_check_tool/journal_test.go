@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // TestParseJournalLineDiscoveredRestOfLine — discovered lines carry the
@@ -349,5 +352,179 @@ func TestTrackerLateTerminalIgnored(t *testing.T) {
 	tr.MarkPaginationDone("p")
 	if snap := tr.Snapshot(); !containsString(snap.Dones, "p") {
 		t.Errorf("done = false after duplicate/unknown terminals, want true")
+	}
+}
+
+// startCheckpointLoop launches runJournalCheckpoints on a fresh Output in
+// dir, with the interval already shrunk by the caller. Returns the journal
+// path, the Output (closed by t.Cleanup), and the stop function (cancels the
+// loop and waits for its final checkpoint).
+func startCheckpointLoop(t *testing.T, dir string, tr *JournalTracker) (journalPath string, o *Output, stop func()) {
+	t.Helper()
+	o, err := NewOutput(&Config{OutputDir: dir, IsCheck: true}, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { o.Close() })
+	journalPath = filepath.Join(dir, "journal.txt")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runJournalCheckpoints(ctx, tr, o, journalPath)
+		close(done)
+	}()
+	return journalPath, o, func() {
+		cancel()
+		<-done
+	}
+}
+
+// TestCheckpointImmediateFirstWrite — the loop's first checkpoint runs at
+// startup, not at the first tick: a kill during the FIRST interval must
+// still leave the seeded root in the journal (otherwise early kills are
+// unresumable and the resume loader cannot even know the scan scope).
+func TestCheckpointImmediateFirstWrite(t *testing.T) {
+	orig := journalCheckpointInterval
+	journalCheckpointInterval = 10 * time.Second
+	defer func() { journalCheckpointInterval = orig }()
+
+	tr := NewJournalTracker()
+	tr.RecordSeed("", "")
+	journalPath, _, stop := startCheckpointLoop(t, t.TempDir(), tr)
+	defer stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(journalPath)
+		if err == nil && strings.Contains(string(data), "discovered|\n") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("root seed line not journaled before the first tick: content=%q err=%v", data, err)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestCheckpointOrderAndDurability — the functional form of the ordering
+// invariant: once the journal claims a page complete (cursor line), the
+// result lines for that page's objects are already IN THE FILE, without
+// Close. snapshot -> FlushAndWait -> write is what makes this hold.
+func TestCheckpointOrderAndDurability(t *testing.T) {
+	orig := journalCheckpointInterval
+	journalCheckpointInterval = 10 * time.Millisecond
+	defer func() { journalCheckpointInterval = orig }()
+
+	dir := t.TempDir()
+	tr := NewJournalTracker()
+	tr.RecordSeed("p", "")
+	tr.RegisterPage("p", 1, "T1")
+	journalPath, o, stop := startCheckpointLoop(t, dir, tr)
+	defer stop()
+
+	// Push the result line BEFORE the terminal report — the checker-side
+	// invariant (terminal-after-push) exercised end to end.
+	o.WriteCheckFailed("obj/k1")
+	tr.Terminal("p", 0)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		jdata, _ := os.ReadFile(journalPath)
+		fdata, ferr := os.ReadFile(filepath.Join(dir, "check_failed.txt"))
+		if strings.Contains(string(jdata), "cursor|p|T1") &&
+			ferr == nil && strings.Contains(string(fdata), "test-bkt|obj/k1") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("invariant broken: journal=%q, check_failed=%q (err=%v)", jdata, fdata, ferr)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestCheckpointBatchOrderDiscoveredFirst — within one batch, discovered
+// lines are written before cursor lines: a kill mid-batch may leave "child
+// discovered, parent not done" (recoverable) but never the reverse.
+func TestCheckpointBatchOrderDiscoveredFirst(t *testing.T) {
+	orig := journalCheckpointInterval
+	journalCheckpointInterval = 10 * time.Second
+	defer func() { journalCheckpointInterval = orig }()
+
+	tr := NewJournalTracker()
+	tr.AddDiscovered("sub")
+	tr.RecordSeed("p", "")
+	tr.RegisterPage("p", 1, "T1")
+	tr.Terminal("p", 0)
+	journalPath, _, stop := startCheckpointLoop(t, t.TempDir(), tr)
+	defer stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(journalPath)
+		if err == nil && strings.Contains(string(data), "cursor|p|T1") {
+			di := strings.Index(string(data), "discovered|sub")
+			ci := strings.Index(string(data), "cursor|p|T1")
+			if di < 0 || di > ci {
+				t.Fatalf("batch order wrong: discovered@%d cursor@%d in %q", di, ci, data)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cursor line never appeared: %q err=%v", data, err)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestCheckpointFinalOnStop — cancelling the loop's ctx triggers one final
+// checkpoint, so the journal reflects state as of shutdown, not as of the
+// last tick.
+func TestCheckpointFinalOnStop(t *testing.T) {
+	orig := journalCheckpointInterval
+	journalCheckpointInterval = 10 * time.Second
+	defer func() { journalCheckpointInterval = orig }()
+
+	tr := NewJournalTracker()
+	tr.RecordSeed("p", "")
+	journalPath, _, stop := startCheckpointLoop(t, t.TempDir(), tr)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for { // wait for the startup checkpoint
+		data, err := os.ReadFile(journalPath)
+		if err == nil && strings.Contains(string(data), "discovered|p") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("startup checkpoint missing: %q err=%v", data, err)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	tr.AddDiscovered("late-sub") // arrives after the startup checkpoint
+	stop()                        // cancel -> final checkpoint must include it
+	data, err := os.ReadFile(journalPath)
+	if err != nil || !strings.Contains(string(data), "discovered|late-sub") {
+		t.Fatalf("final checkpoint missed post-tick state: %q err=%v", data, err)
+	}
+}
+
+// TestCheckpointCommitClearsDelta — a discovery line lands exactly once:
+// Commit removed it from the pending set, later checkpoints do not repeat it.
+func TestCheckpointCommitClearsDelta(t *testing.T) {
+	orig := journalCheckpointInterval
+	journalCheckpointInterval = 10 * time.Millisecond
+	defer func() { journalCheckpointInterval = orig }()
+
+	tr := NewJournalTracker()
+	tr.AddDiscovered("x")
+	journalPath, _, stop := startCheckpointLoop(t, t.TempDir(), tr)
+	defer stop()
+
+	time.Sleep(50 * time.Millisecond) // several ticks pass
+	data, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(data), "discovered|x\n"); n != 1 {
+		t.Errorf("discovered|x appears %d times, want exactly 1 (Commit clears the delta): %q", n, data)
 	}
 }
