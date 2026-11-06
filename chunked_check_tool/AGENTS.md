@@ -494,7 +494,7 @@ diff union.txt mckeys.txt      # 期望空（有 mp.txt/invalid_keys.txt 的配�
 
 ## 8. 已知遗留项（改动时留意，非阻塞）
 
-来源：SDD ledger 的 deferred minors（见 `.superpowers/sdd/2026-09-03-chunked-check-tool/progress.md`）。
+来源：SDD ledger 的 deferred minors（见 `.superpowers/sdd/2026-09-03-chunked-check-tool/progress.md` 与 `.superpowers/sdd/2026-11-05-resume-journal/progress.md`）。
 
 - **Queue.Pop 阻塞路径的 lost-signal 窗口**：fast-path unlock 与 re-lock+Wait 之间存在理论上的丢失唤醒窗口。当前 pipeline 关闭队列时用 `Broadcast`，不会触发。若未来改为单消费者关闭场景需重新评估。
 - **NodePool.Assign 空端点 panic**：`n=0` 时除零。`Config` 上游校验 `endpoints` 非空，故不会触发。无 `idx` 越界保护（调用方只用 `Assign` 返回的索引）。
@@ -506,6 +506,13 @@ diff union.txt mckeys.txt      # 期望空（有 mp.txt/invalid_keys.txt 的配�
 - **`workerIdx` 参数在 `Lister.Run` 未用**：保留给未来 NodePool 分配，当前是死重量。
 - **`list_type:3` 等非法值静默落到 Mode 2 分支**：可加校验。
 - **per-owner writer goroutine 的 MkdirAll/OpenFile 失败静默丢弃该行**：罕见启动期磁盘错误，第 N 个 owner 目录建不出来时该 owner 的结果行会丢，但其他 owner 不受影响。
+
+### 8.1 journal 遗留项（2026-11-06 review 轮 deferred，M=Minor / N=Nit）
+
+- **M1：key 含换行符 `\n` 破坏 journal 行格式**：journal（及所有 pipe 分隔的输出文件）是"一行一条记录"的文本格式，key 自带换行会把一条记录拆成两行。后果是恢复时重放读到坏行**报错停机**（fail-loud，不静默漏检）。不修理由：全工具只在 lister 拦含 `|` 的 key（落 invalid_keys.txt），换行 key 哪里都没拦——只在 journal 层修是修一半，修全需要给所有输出定 key 转义规则（独立设计决定）。**修复触发条件**：客户桶出现换行 key。修法参考：lister 的 key 拦截扩展到 `\n`（同 `|` 一样短路进 invalid_keys），或输出层引入转义。
+- **N1：`FlushAndWait` 在 `out.Close()` 之后调用会永久阻塞**：写手 goroutine 已退出、flush 请求无人应答。现有接线不可达：不变量 ③（`journalRun.Stop()` 先于 `out.Close()`）锁死时序。**修复触发条件**：未来有人改动关停顺序或新增 FlushAndWait 调用点时，顺手加"Close 后返回而非阻塞"守卫。
+- **N2：journal.go 内存注释措辞过头**："不随桶规模增长"的精确说法是上限 = 一个 checkpoint 间隔内新发现的前缀量（发现速率 × 间隔），极端发现速率下也会不小。**修复触发条件**：下次改 journal.go 时顺带改一行注释，无需单独动。
+- **N3：测试直接改写包级 `journalCheckpointInterval` 的恢复纪律**：测试改小该变量观察 tick、靠 defer 恢复；Go 同包测试默认串行所以今天踩不到，但与 `t.Parallel()` 不兼容。**修复触发条件**：有测试要加 `t.Parallel()` 时，先把该变量改为 per-test 注入。
 
 ## 9. 工作流约定
 
