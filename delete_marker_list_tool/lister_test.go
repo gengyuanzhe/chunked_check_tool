@@ -81,10 +81,26 @@ func TestLister_Mode1_HappyPath(t *testing.T) {
 func newMode2BFSServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 检查桶名——path 第一段是桶名。
+		bucket := strings.TrimPrefix(filepath.Dir(r.URL.Path), "/")
+		if r.URL.Path == "/" {
+			bucket = ""
+		}
+		// 提取 path 第一段。
+		pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(pathParts) > 0 && pathParts[0] != "" {
+			bucket = pathParts[0]
+		}
+		_ = bucket
 		w.Header().Set("Content-Type", "application/xml")
 		q := r.URL.Query()
 		if !q.Has("versions") {
 			if r.Method == http.MethodHead {
+				// 只对 testbucket 返回 200，其他桶名 404。
+				if bucket != "testbucket" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
 				w.WriteHeader(http.StatusOK)
 				return
 			}
