@@ -109,10 +109,31 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, out *O
 	return scanner.Err()
 }
 
-// handleCheck 被 Task 6 填充。
+// handleCheck HEAD 一行，三态分类写 check_results.txt；失败写 head_failed。
 func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *Stats) {
 	stats.IncrProcessed()
-	// filled in Task 6
+	info, err := c.StatObject(ctx, r.Bkt, r.Key, r.VersionID)
+	state, ok := classifyHead(info, err)
+	if !ok {
+		stats.IncrHeadFailed()
+		out.WriteHeadFailed(r.Bkt, r.Key, r.VersionID)
+		var er minio.ErrorResponse
+		if errors.As(err, &er) {
+			out.WriteHeadFailedLog(r.Bkt, r.Key, r.VersionID, er.StatusCode, er.Code, er.RequestID, err)
+		} else {
+			out.WriteHeadFailedLog(r.Bkt, r.Key, r.VersionID, 0, "", "", err)
+		}
+		return
+	}
+	switch state {
+	case "marker":
+		stats.IncrMarker()
+	case "not_marker":
+		stats.IncrNotMarker()
+	case "absent":
+		stats.IncrAbsent()
+	}
+	out.WriteCheckResult(r.Bkt, r.Key, r.VersionID, state)
 }
 
 // handleDelete 被 Task 8 填充。
