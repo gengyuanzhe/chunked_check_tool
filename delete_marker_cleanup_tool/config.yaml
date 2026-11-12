@@ -1,0 +1,43 @@
+# delete_marker_cleanup_tool 配置模板
+# 用法:
+#   ./delete_marker_cleanup_tool -c config.yaml -mode <check|delete> -input <delete_markers.txt>
+#
+# 消费 delete_marker_list_tool 的输出，按 -mode 对每行做 HEAD 校验或 DELETE 删除。
+# 行格式: bkt\x1fkey\x1fversion_id（\x1f 分隔，三段）。
+#
+# 可直接复用 delete_marker_list_tool 或 chunked_check_tool 的 config.yaml——
+# 本工具只读自己认识的字段，未识别字段（list_type、list_concurrency、
+# is_check、multipart_*、backup_* 等）被忽略。
+
+# S3 节点 ip:port 列表，至少 1 个；worker 按行号 i % N 轮询绑 endpoint
+endpoints:
+  - 10.0.0.1:9000
+  - 10.0.0.2:9000
+
+# http 或 https；https 时忽略证书校验（InsecureSkipVerify=true）
+scheme: http
+
+# AK/SK；sk 在 run.log 里掩码为 ***
+ak: <access-key>
+sk: <secret-key>
+
+# 并发 worker 数（0=未设→8；负数报错；最小 1）
+op_concurrency: 8
+
+# 输出目录（自动创建，所有文件 append 模式）
+output_dir: ./out
+
+# 是否在 output_dir 名字后追加 _YYYYMMDD_HHMMSS 同级后缀
+# （./out → ./out_20260908_175201，不是 ./out/_<stamp> 子目录）。
+# true（默认）= 每次运行落到独立目录，结果互不混写；
+# false = 固定使用 output_dir 原样路径，多轮跑结果同目录追加并集
+output_dir_timestamp: true
+
+# 进度打印阈值（处理条目数，约，性能优先不要求精确）
+progress_interval: 5000
+
+# TCP 建连超时秒数（黑洞 IP 默认 10s 兜底；0=Go 默认无超时）
+dial_timeout: 10
+
+# 等服务端响应头超时秒数（0=Go 默认无超时，不兜底）
+response_header_timeout: 0
