@@ -11,14 +11,14 @@
 ## 编译
 
 ```bash
-# 本机（macOS）——需用 ~/sdk/go1.27.1/bin/go（go 在 ~/sdk 下，非系统 PATH）
-~/sdk/go1.27.1/bin/go build -o delete_marker_list_tool .
+# 本机
+go build -o delete_marker_list_tool .
 
 # Linux amd64（交叉编译，目标机不需要 Go）
-GOOS=linux GOARCH=amd64 ~/sdk/go1.27.1/bin/go build -o delete_marker_list_tool-linux-amd64 .
+GOOS=linux GOARCH=amd64 go build -o delete_marker_list_amd64 .
 
 # Linux arm64
-GOOS=linux GOARCH=arm64 ~/sdk/go1.27.1/bin/go build -o delete_marker_list_tool-linux-arm64 .
+GOOS=linux GOARCH=arm64 go build -o delete_marker_list_arm64 .
 ```
 
 生成的二进制可直接 scp 到 Linux 服务器运行，不需要目标机安装 Go 或运行时依赖（静态编译）。
