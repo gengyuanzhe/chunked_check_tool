@@ -1,0 +1,49 @@
+# delete_marker_list_tool 配置模板
+# 用法:
+#   ./delete_marker_list_tool -c config.yaml -bkt <bucket> [-prefix <p>]
+#
+# 枚举多版本桶内所有 delete marker（删除标记），输出 delete_markers.txt
+# 供下游删除工具消费。本工具只读不删。
+#
+# 可直接复用 chunked_check_tool 的 config.yaml——本工具只读自己认识的字段，
+# 未识别字段（is_check、multipart_*、backup_*、check_concurrency 等）被忽略。
+
+# S3 节点 ip:port 列表，至少 1 个；mode 2 多个节点做轮询绑定（无 NodePool 隔离）
+endpoints:
+  - 10.0.0.1:9000
+  - 10.0.0.2:9000
+
+# http 或 https；https 时忽略证书校验（InsecureSkipVerify=true）
+scheme: http
+
+# AK/SK；sk 在 run.log 里掩码为 ***
+ak: <access-key>
+sk: <secret-key>
+
+# 列举模式（必须显式配置，不给默认值——正确性关键）：
+#   1 = 单并发多版本列举：单 goroutine 消费 recursive 版本化流，适合小桶/调试
+#   2 = 基于 delimiter 并发多版本列举：BFS，list_concurrency 个 worker
+#       各取前缀做 delimited 版本化列举，common prefix 入队继续扫；默认推荐
+list_type: 2
+
+# mode 2 的 worker 数；mode 1 忽略
+list_concurrency: 8
+
+# 输出目录（自动创建，所有文件 append 模式）
+output_dir: ./out
+
+# 是否在 output_dir 名字后追加 _YYYYMMDD_HHMMSS 同级后缀
+# （./out → ./out_20260908_175201，不是 ./out/_<stamp> 子目录）。
+# true（默认）= 每次运行落到独立目录，结果互不混写；
+# false = 固定使用 output_dir 原样路径，多轮跑结果同目录追加并集
+# （补齐场景用：list_failed.txt 清理后重跑，delete_markers.txt 跨运行合并）
+output_dir_timestamp: true
+
+# 进度打印阈值（处理条目数，约，性能优先不要求精确）
+progress_interval: 5000
+
+# TCP 建连超时秒数（黑洞 IP 默认 10s 兜底；0=Go 默认无超时）
+dial_timeout: 10
+
+# 等服务端响应头超时秒数（0=Go 默认无超时，不兜底）
+response_header_timeout: 0
