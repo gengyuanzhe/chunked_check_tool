@@ -263,8 +263,10 @@ func TestRunWorkers_InvalidKeysInputURLDecodesKey(t *testing.T) {
 	out.FlushAndWait()
 	out.Close()
 	b, _ := os.ReadFile(filepath.Join(dir, "out", "check_results.txt"))
-	if !strings.Contains(string(b), "testbucket\x1fa\x1fb\x1fv1") {
-		t.Errorf("missing decoded-key row: %q", string(b))
+	// key 来自 invalid_keys.txt（URL 编码过）；输出行重新 QueryEscape key，
+	// 保持 4 段行格式契约（解码后 key 含 \x1f，否则会撕裂成 5 段）。
+	if !strings.Contains(string(b), "testbucket\x1fa%1Fb\x1fv1\x1fnot_marker") {
+		t.Errorf("missing re-encoded-key row: %q", string(b))
 	}
 }
 

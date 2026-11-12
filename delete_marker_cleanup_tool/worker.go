@@ -15,8 +15,11 @@ import (
 )
 
 // Row 是输入文件解析后的一行——bkt / key / versionID 三段。
+// KeyEncoded 标记 key 是否来自 invalid_keys.txt（URL 编码过）——
+// 写输出行时需重新 QueryEscape 以保持 3/4 段行格式契约。
 type Row struct {
 	Bkt, Key, VersionID string
+	KeyEncoded          bool
 }
 
 // ParseRow 把一行 \x1f 分隔的字符串解析为 Row。
@@ -29,14 +32,24 @@ func ParseRow(line, inputBasename string) (Row, bool) {
 		return Row{}, false
 	}
 	bkt, key, vid := parts[0], parts[1], parts[2]
-	if filepath.Base(inputBasename) == "invalid_keys.txt" {
+	encoded := filepath.Base(inputBasename) == "invalid_keys.txt"
+	if encoded {
 		dec, err := url.QueryUnescape(key)
 		if err != nil {
 			return Row{}, false
 		}
 		key = dec
 	}
-	return Row{Bkt: bkt, Key: key, VersionID: vid}, true
+	return Row{Bkt: bkt, Key: key, VersionID: vid, KeyEncoded: encoded}, true
+}
+
+// outputKey 返回 key 的输出形态——invalid_keys.txt 来源的行重新 QueryEscape，
+// 保持 3/4 段行格式契约（解码后的 key 可能含 \x1f，撕裂行字段）。
+func (r Row) outputKey() string {
+	if r.KeyEncoded {
+		return url.QueryEscape(r.Key)
+	}
+	return r.Key
 }
 
 // RunWorkers 读输入文件逐行，N 个 worker 从 rowCh 抢任务。
@@ -120,7 +133,7 @@ func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *St
 	state, ok := classifyHead(info, err)
 	if !ok {
 		stats.IncrHeadFailed()
-		out.WriteHeadFailed(r.Bkt, r.Key, r.VersionID)
+		out.WriteHeadFailed(r.Bkt, r.outputKey(), r.VersionID)
 		var er minio.ErrorResponse
 		if errors.As(err, &er) {
 			out.WriteHeadFailedLog(r.Bkt, r.Key, r.VersionID, er.StatusCode, er.Code, er.RequestID, err)
@@ -137,7 +150,7 @@ func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *St
 	case "absent":
 		stats.IncrAbsent()
 	}
-	out.WriteCheckResult(r.Bkt, r.Key, r.VersionID, state)
+	out.WriteCheckResult(r.Bkt, r.outputKey(), r.VersionID, state)
 }
 
 // handleDelete 删除一行。NoSuchVersion / NoSuchKey 算成功（幂等空操作）；
@@ -147,23 +160,20 @@ func handleDelete(ctx context.Context, c *S3Client, r Row, out *Output, stats *S
 	err := c.DeleteObject(ctx, r.Bkt, r.Key, r.VersionID)
 	if err == nil {
 		stats.IncrDeleted()
-		out.WriteDeleted(r.Bkt, r.Key, r.VersionID)
+		out.WriteDeleted(r.Bkt, r.outputKey(), r.VersionID)
 		return
 	}
 	var er minio.ErrorResponse
 	if errors.As(err, &er) && (er.Code == "NoSuchVersion" || er.Code == "NoSuchKey") {
 		stats.IncrDeleted()
-		out.WriteDeleted(r.Bkt, r.Key, r.VersionID)
+		out.WriteDeleted(r.Bkt, r.outputKey(), r.VersionID)
 		return
 	}
 	stats.IncrDeleteFailed()
-	out.WriteDeleteFailed(r.Bkt, r.Key, r.VersionID)
+	out.WriteDeleteFailed(r.Bkt, r.outputKey(), r.VersionID)
 	if errors.As(err, &er) {
 		out.WriteDeleteFailedLog(r.Bkt, r.Key, r.VersionID, er.StatusCode, er.Code, er.RequestID, err)
 	} else {
 		out.WriteDeleteFailedLog(r.Bkt, r.Key, r.VersionID, 0, "", "", err)
 	}
 }
-
-// 保留 minio 的引用给后续任务用，避免 import-not-used 编译错。
-var _ = minio.ErrorResponse{}

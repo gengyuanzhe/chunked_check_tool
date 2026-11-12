@@ -69,7 +69,7 @@
 
 12. **`op_concurrency` 默认 8（未设时）**：与 lister 的 `list_concurrency` 行为对齐——0 视为"未设"→8，负数报错。**不可**把 0 也报错——破坏"未设走默认"的隐式契约。
 
-13. **`\x1f`-in-key 输入兜底**：lister 把 key 含 `\x1f` 的 marker 路由到 `invalid_keys.txt`（key 经 `url.QueryEscape` 编码）。本工具按 `-input` 的 basename 判别：basename=`invalid_keys.txt` 时对 key 段做 `url.QueryUnescape`。**不可**对所有输入都解码——只有 `invalid_keys.txt` 命名的文件才编码过。
+13. **`\x1f`-in-key 输入兜底**：lister 把 key 含 `\x1f` 的 marker 路由到 `invalid_keys.txt`（key 经 `url.QueryEscape` 编码）。本工具按 `-input` 的 basename 判别：basename=`invalid_keys.txt` 时对 key 段做 `url.QueryUnescape` 用于 HEAD/DELETE 调用。**输出行重新 `url.QueryEscape` 编码 key**——解码后的 key 含 `\x1f`，直接写入会撕裂 3/4 段行格式。`Row.KeyEncoded` 字段记录来源，`Row.outputKey()` 决定输出形态。**不可**对所有输入都解码——只有 `invalid_keys.txt` 命名的文件才编码过。
 
 14. **预检硬退出条件**：`readFirstRowBucket` 失败（空文件 / 首行格式错）或 `BucketExists` 传输错误 → 硬退出；`exists=false` → warning + 继续（多桶输入保护——只校验首行 bkt）。
 

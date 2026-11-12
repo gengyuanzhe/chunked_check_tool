@@ -91,7 +91,7 @@ response_header_timeout: 0          # 等服务端响应头超时秒数（0=不�
 行格式：`bkt\x1fkey\x1fversion_id`（三段，`\x1f` ASCII Unit Separator 分隔）。
 
 - 由 `delete_marker_list_tool` 产出的 `delete_markers.txt` 直接消费
-- 若输入 basename 是 `invalid_keys.txt`（key 含 `\x1f` 的兜底文件），本工具按 `url.QueryUnescape` 解码 key 段
+- 若输入 basename 是 `invalid_keys.txt`（key 含 `\x1f` 的兜底文件），本工具按 `url.QueryUnescape` 解码 key 段用于 HEAD/DELETE 调用；**输出行重新 `url.QueryEscape` 编码 key**，保持 3/4 段行格式契约（解码后 key 含 `\x1f` 会撕裂行字段）
 - `version_id` 字面量 `"null"` 原样透传（S3 开版本控制前的旧对象，合法值）
 
 ## 输出文件
