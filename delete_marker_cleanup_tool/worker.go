@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -55,6 +56,10 @@ func (r Row) outputKey() string {
 // RunWorkers 读输入文件逐行，N 个 worker 从 rowCh 抢任务。
 // 每个 worker 绑 endpoints[i % len(endpoints)]，按 mode 调 handleCheck/handleDelete。
 // 行解析失败（torn line）跳过并写到 mode 对应的 failed log。
+//
+// Worker 死亡保护：worker 在 NewS3Client 失败时往 errCh 发 error 再退出；
+// scanner 用 select 检测 errCh——若所有 worker 都死了，scanner 立即返回 error
+// 而不是死锁在 rowCh <- row。errCh 缓冲到 N 容量，worker 发送不阻塞。
 func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, out *Output, stats *Stats, progress *ProgressPrinter) error {
 	f, err := os.Open(inputPath)
 	if err != nil {
@@ -71,6 +76,7 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, out *O
 	if n < 1 {
 		n = 1
 	}
+	errCh := make(chan error, n)
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func() {
@@ -79,6 +85,7 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, out *O
 			endpoint := cfg.Endpoints[idx]
 			client, err := NewS3Client(cfg, endpoint)
 			if err != nil {
+				errCh <- fmt.Errorf("worker endpoint %s: %w", endpoint, err)
 				return
 			}
 			var local int
@@ -105,6 +112,7 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, out *O
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	var workerErr error
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
@@ -119,10 +127,28 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, out *O
 			}
 			continue
 		}
-		rowCh <- row
+		select {
+		case rowCh <- row:
+		case err := <-errCh:
+			workerErr = err
+			goto scanDone
+		}
 	}
+scanDone:
 	close(rowCh)
 	wg.Wait()
+	// 兜底：若所有 worker 在 scanner 走完前就死了但 select 没捕到（errCh 已缓冲 N，
+	// 不可能漏，但保险起见），wg.Wait 后再非阻塞取一次。
+	if workerErr == nil {
+		select {
+		case err := <-errCh:
+			workerErr = err
+		default:
+		}
+	}
+	if workerErr != nil {
+		return workerErr
+	}
 	return scanner.Err()
 }
 

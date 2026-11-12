@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseRow_ThreeFields(t *testing.T) {
@@ -92,6 +93,49 @@ func TestRunWorkers_ModeCheck_ThreeStates(t *testing.T) {
 	}
 	if !strings.Contains(out2, "testbucket\x1fgone.txt\x1fv-1\x1fabsent") {
 		t.Errorf("missing absent state: %q", out2)
+	}
+}
+
+func TestRunWorkers_WorkerDiedOnBadEndpointReturnsError(t *testing.T) {
+	// 回归：若 NewS3Client 失败（如 endpoints 中混入格式错的 endpoint），
+	// worker 静默 return，scanner 在 rowCh <- row 上死锁。修复：worker 报错
+	// 到 errCh，scanner 用 select 检测并返回 error。
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "input.txt")
+	rows := []string{
+		"testbucket\x1fk1\x1fv1",
+		"testbucket\x1fk2\x1fv1",
+	}
+	if err := os.WriteFile(inputPath, []byte(strings.Join(rows, "\n")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{
+		// ftp 不是合法 S3 scheme——minio.New 直接报错
+		Endpoints: []string{"ftp://bad-endpoint"}, Scheme: "http", AK: "a", SK: "s",
+		OpConcurrency: 2, OutputDir: filepath.Join(dir, "out"), OutputDirTimestamp: false,
+		ProgressInterval: 1000,
+	}
+	out, err := NewOutput(cfg, "check")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stats Stats
+	progress := NewProgressPrinter(&strings.Builder{})
+	progress.SetInterval(1000)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		err := RunWorkers(context.Background(), cfg, "check", inputPath, out, &stats, progress)
+		if err == nil {
+			t.Errorf("expected error from RunWorkers when all workers die on bad endpoint")
+		}
+		out.FlushAndWait()
+		out.Close()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunWorkers hung — worker death not detected (scanner deadlocked on rowCh <- row)")
 	}
 }
 
