@@ -45,9 +45,11 @@
    - `err == nil && info.IsDeleteMarker` → `marker`
    - `err == nil && !info.IsDeleteMarker` → `not_marker`
    - `err` 是 `NoSuchKey` / `NoSuchVersion` → `absent`
-   - `err` 是 `MethodNotAllowed` → `marker`（**无条件**——防御性：minio-go 不一定在 error path 填 `IsDeleteMarker`）
+   - `err.Code == "MethodNotAllowed"` → `marker`（**无条件**——防御性：minio-go 不一定在 error path 填 `IsDeleteMarker`）
+   - `err.StatusCode == 405`（bare 405，`Code != "MethodNotAllowed"`）→ `marker`（自研 S3 兜底：minio-go 在 HEAD 无 body 时把 bare 405 包装成 `ErrorResponse{Code:"405 Method Not Allowed"}`，按 StatusCode==405 兜底）
    - 其他错误 → `(state="", ok=false)`，路由到 `head_failed.txt`
-   - **不可**把 MethodNotAllowed 改成基于 `info.IsDeleteMarker` 判别——S3 spec 上 MethodNotAllowed on HEAD 只对 delete marker 版本返回，逻辑等价但实测 minio-go 在 error path 上可能不填 IsDeleteMarker
+   - **不可**把 405 改成基于 `info.IsDeleteMarker` 判别——S3 spec 上 MethodNotAllowed on HEAD 只对 delete marker 版本返回，逻辑等价但实测 minio-go 在 error path 上可能不填 IsDeleteMarker
+   - **不可**砍掉 `StatusCode==405` 兜底分支——自研 S3 可能不带 `x-amz-delete-marker` 头，整批 check 会 100% head_failed
 
 4. **mode delete 的 NoSuchVersion/NoSuchKey 算成功**：删除按 version-id 幂等，第二次删同一版本服务端返回 404；本工具把 `NoSuchKey` / `NoSuchVersion` 计入 `deleted.txt` 而非 `delete_failed.txt`。**不可**改成失败——会破坏"幂等空操作"语义。
 

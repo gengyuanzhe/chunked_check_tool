@@ -59,6 +59,19 @@ func TestClassifyHead_MethodNotAllowedWithoutMarkerFlag(t *testing.T) {
 	}
 }
 
+func TestClassifyHead_Bare405Status(t *testing.T) {
+	// 自研 S3 可能返回 bare 405（无 x-amz-delete-marker 头）；minio-go 在
+	// HEAD 无 body 时把 405 包装成 ErrorResponse{Code: "405 Method Not Allowed",
+	// StatusCode: 405}——Code 不等于 "MethodNotAllowed"，必须按 StatusCode==405
+	// 判定为 marker，否则整批 check 100% head_failed。
+	info := minio.ObjectInfo{}
+	err := minio.ErrorResponse{Code: "405 Method Not Allowed", StatusCode: 405}
+	state, ok := classifyHead(info, err)
+	if !ok || state != "marker" {
+		t.Errorf("got (%q, %v) want (marker, true)", state, ok)
+	}
+}
+
 func TestClassifyHead_InternalErrorUnclassified(t *testing.T) {
 	err := minio.ErrorResponse{Code: "InternalError", StatusCode: 500}
 	state, ok := classifyHead(minio.ObjectInfo{}, err)

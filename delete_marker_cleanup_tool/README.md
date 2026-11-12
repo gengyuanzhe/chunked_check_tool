@@ -126,11 +126,12 @@ awk -F'\x1f' '{print $1, $2, $3, $4}' check_results.txt
 |---|---|---|
 | 200 + `info.IsDeleteMarker=true` | `marker` | 该版本是 delete marker |
 | 200 + `info.IsDeleteMarker=false` | `not_marker` | 该版本存在但不是 marker |
-| 405 MethodNotAllowed | `marker` | S3 对 HEAD delete marker 返回 405（不带 `x-amz-delete-marker` 也算 marker——防御性判别） |
+| 405 MethodNotAllowed | `marker` | S3 对 HEAD delete marker 返回 405；`info.IsDeleteMarker` 在 error 路径可能未填，按 405 本身的语义判别 |
+| 405（bare，无 `x-amz-delete-marker` 头） | `marker` | 自研 S3 兜底：minio-go 把 bare 405 包装成 `ErrorResponse{Code:"405 Method Not Allowed", StatusCode:405}`，按 `StatusCode==405` 兜底判定 |
 | 404 NoSuchKey / NoSuchVersion | `absent` | 该版本不存在 |
 | 其他错误 | (失败) | 记入 `head_failed.txt` + `head_failed.log`，不计入 `check_results.txt` |
 
-`classifier.classifyHead(info, err)` 同时处理 `(info, nil)` 和 `(info, MethodNotAllowed err)` 两条路径——minio-go v7.3.0 对 HEAD delete marker 返回 `MethodNotAllowed` error 而非 `nil` err。
+`classifier.classifyHead(info, err)` 同时处理 `(info, nil)` 和 `(info, MethodNotAllowed err)` 两条路径——minio-go v7.3.0 对 HEAD delete marker 返回 `MethodNotAllowed` error 而非 `nil` err。bare 405（无 `x-amz-delete-marker` 头）按 `StatusCode==405` 兜底，覆盖自研 S3 的非规范返回。
 
 ## mode delete 失败处理
 
