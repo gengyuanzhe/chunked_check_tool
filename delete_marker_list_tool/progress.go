@@ -35,6 +35,12 @@ func (p *ProgressPrinter) SetInterval(n int) {
 	}
 }
 
+// Interval 返回当前阈值。caller 用它在本地累积到阈值后调 MaybePrint，
+// 打印后 reset 本地计数器——否则越过阈值后每行都打一行 progress。
+func (p *ProgressPrinter) Interval() int {
+	return p.interval
+}
+
 // SetQueueSnapshotProvider 注入队列快照回调（mode 2 用）。
 func (p *ProgressPrinter) SetQueueSnapshotProvider(fn func() QueueSnapshot) {
 	p.queueSnapshot = fn

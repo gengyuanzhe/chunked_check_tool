@@ -39,6 +39,7 @@ func (l *Lister) Run(ctx context.Context, bucket, prefix string) error {
 func (l *Lister) runMode1(ctx context.Context, bucket, prefix string) error {
 	ch := l.client.ListVersions(ctx, bucket, prefix, true)
 	var localCount int
+	interval := l.progress.Interval()
 	for obj := range ch {
 		if obj.Err != nil {
 			l.recordListFailed(prefix, obj.Err)
@@ -55,7 +56,10 @@ func (l *Lister) runMode1(ctx context.Context, bucket, prefix string) error {
 			l.out.WriteDeleteMarker(obj.Key, obj.VersionID)
 			l.stats.IncrDeleteMarkers()
 		}
-		l.progress.MaybePrint(l.stats, "scanned", localCount)
+		if localCount >= interval {
+			l.progress.MaybePrint(l.stats, "scanned", localCount)
+			localCount = 0
+		}
 	}
 	l.progress.MaybePrint(l.stats, "scanned", localCount)
 	return nil
@@ -121,6 +125,7 @@ func (l *Lister) runMode2(ctx context.Context, bucket, prefix string) error {
 // processPrefix 处理一个前缀：消费版本化列举流，分类条目。
 func (l *Lister) processPrefix(ctx context.Context, bucket, prefix string, q *queue, inflight *atomic.Int64, lc *localCounter) {
 	defer inflight.Add(-1)
+	interval := l.progress.Interval()
 	ch := l.client.ListVersions(ctx, bucket, prefix, false) // delimited
 	for obj := range ch {
 		if obj.Err != nil {
@@ -140,7 +145,10 @@ func (l *Lister) processPrefix(ctx context.Context, bucket, prefix string, q *qu
 			l.out.WriteDeleteMarker(obj.Key, obj.VersionID)
 			l.stats.IncrDeleteMarkers()
 		}
-		l.progress.MaybePrint(l.stats, "scanned", lc.count)
+		if lc.count >= interval {
+			l.progress.MaybePrint(l.stats, "scanned", lc.count)
+			lc.count = 0
+		}
 	}
 }
 

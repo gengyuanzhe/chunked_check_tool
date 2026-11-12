@@ -95,6 +95,46 @@ func TestRunWorkers_ModeCheck_ThreeStates(t *testing.T) {
 	}
 }
 
+func TestRunWorkers_ProgressNotFloodedAfterInterval(t *testing.T) {
+	// 回归：每 worker 的 local 计数器在打印后必须 reset，否则越过阈值后每行
+	// 都打一行 progress——20 行 interval=5 会打 16 行而非 4 行。
+	srv := newFakeHeadDeleteS3(t)
+	defer srv.Close()
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "input.txt")
+	const N = 20
+	rows := make([]string, N)
+	for i := range rows {
+		rows[i] = "testbucket\x1fregular.txt\x1fv-1"
+	}
+	if err := os.WriteFile(inputPath, []byte(strings.Join(rows, "\n")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{
+		Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s",
+		OpConcurrency: 1, OutputDir: filepath.Join(dir, "out"), OutputDirTimestamp: false,
+		ProgressInterval: 5,
+	}
+	out, err := NewOutput(cfg, "check")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stats Stats
+	var progBuf strings.Builder
+	progress := NewProgressPrinter(&progBuf)
+	progress.SetInterval(5)
+	if err := RunWorkers(context.Background(), cfg, "check", inputPath, out, &stats, progress); err != nil {
+		t.Fatal(err)
+	}
+	out.FlushAndWait()
+	out.Close()
+	progLines := strings.Count(progBuf.String(), "[progress]")
+	// 20 行 / interval 5 = 4 次（取等号时打）。容忍 ±1 漂移（不同 worker 抢任务边界）。
+	if progLines > 5 {
+		t.Errorf("progress flooded: got %d lines for %d rows @ interval 5 (want <=5):\n%s", progLines, N, progBuf.String())
+	}
+}
+
 func TestRunWorkers_ModeDelete_NoSuchVersionCountsAsSuccess(t *testing.T) {
 	srv := newFakeHeadDeleteS3(t)
 	defer srv.Close()

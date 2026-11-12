@@ -69,6 +69,7 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, out *O
 				return
 			}
 			var local int
+			interval := progress.Interval()
 			for row := range rowCh {
 				switch mode {
 				case "check":
@@ -77,10 +78,13 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, out *O
 					handleDelete(ctx, client, row, out, stats)
 				}
 				local++
-				if mode == "check" {
-					progress.MaybePrintCheck(stats, local)
-				} else {
-					progress.MaybePrintDelete(stats, local)
+				if local >= interval {
+					if mode == "check" {
+						progress.MaybePrintCheck(stats, local)
+					} else {
+						progress.MaybePrintDelete(stats, local)
+					}
+					local = 0
 				}
 			}
 		}()

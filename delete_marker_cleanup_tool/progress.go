@@ -30,6 +30,12 @@ func (p *ProgressPrinter) SetInterval(n int) {
 	}
 }
 
+// Interval 返回当前阈值。worker 用它在本地累积到阈值后调 MaybePrint*，
+// 打印后 reset 本地计数器——否则越过阈值后每行都打一行 progress。
+func (p *ProgressPrinter) Interval() int {
+	return p.interval
+}
+
 // MaybePrintCheck 在 count >= interval 时打印一行 check 模式进度。
 // not_marker 字段必须可见——用户工作流"跑 check 看 not_marker，非 0 就停手"。
 func (p *ProgressPrinter) MaybePrintCheck(s *Stats, count int) {
