@@ -136,10 +136,29 @@ func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *St
 	out.WriteCheckResult(r.Bkt, r.Key, r.VersionID, state)
 }
 
-// handleDelete 被 Task 8 填充。
+// handleDelete 删除一行。NoSuchVersion / NoSuchKey 算成功（幂等空操作）；
+// 其他失败写 delete_failed + log。
 func handleDelete(ctx context.Context, c *S3Client, r Row, out *Output, stats *Stats) {
 	stats.IncrProcessed()
-	// filled in Task 8
+	err := c.DeleteObject(ctx, r.Bkt, r.Key, r.VersionID)
+	if err == nil {
+		stats.IncrDeleted()
+		out.WriteDeleted(r.Bkt, r.Key, r.VersionID)
+		return
+	}
+	var er minio.ErrorResponse
+	if errors.As(err, &er) && (er.Code == "NoSuchVersion" || er.Code == "NoSuchKey") {
+		stats.IncrDeleted()
+		out.WriteDeleted(r.Bkt, r.Key, r.VersionID)
+		return
+	}
+	stats.IncrDeleteFailed()
+	out.WriteDeleteFailed(r.Bkt, r.Key, r.VersionID)
+	if errors.As(err, &er) {
+		out.WriteDeleteFailedLog(r.Bkt, r.Key, r.VersionID, er.StatusCode, er.Code, er.RequestID, err)
+	} else {
+		out.WriteDeleteFailedLog(r.Bkt, r.Key, r.VersionID, 0, "", "", err)
+	}
 }
 
 // 保留 minio 的引用给后续任务用，避免 import-not-used 编译错。

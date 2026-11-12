@@ -227,3 +227,56 @@ func TestRunWorkers_InvalidKeysInputURLDecodesKey(t *testing.T) {
 		t.Errorf("missing decoded-key row: %q", string(b))
 	}
 }
+
+func TestRunWorkers_ModeDelete_InternalErrorRecordedAsFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		parts := strings.SplitN(path, "/", 2)
+		if len(parts) < 2 || parts[1] == "" {
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Header().Set("Content-Type", "application/xml")
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+			return
+		}
+		if r.Method == http.MethodDelete {
+			http.Error(w, `<?xml version="1.0"?><Error><Code>InternalError</Code><RequestId>req-x</RequestId></Error>`, http.StatusInternalServerError)
+			return
+		}
+		http.Error(w, "nope", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "input.txt")
+	rows := []string{"testbucket\x1fkey1\x1fv-1"}
+	if err := os.WriteFile(inputPath, []byte(strings.Join(rows, "\n")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{
+		Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s",
+		OpConcurrency: 1, OutputDir: filepath.Join(dir, "out"), OutputDirTimestamp: false,
+		ProgressInterval: 1000,
+	}
+	out, err := NewOutput(cfg, "delete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stats Stats
+	progress := NewProgressPrinter(&strings.Builder{})
+	if err := RunWorkers(context.Background(), cfg, "delete", inputPath, out, &stats, progress); err != nil {
+		t.Fatal(err)
+	}
+	out.FlushAndWait()
+	out.Close()
+	if b, _ := os.ReadFile(filepath.Join(dir, "out", "deleted.txt")); strings.TrimSpace(string(b)) != "" {
+		t.Errorf("deleted.txt should be empty: %q", string(b))
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "out", "delete_failed.txt")); !strings.Contains(string(b), "testbucket\x1fkey1\x1fv-1") {
+		t.Errorf("delete_failed.txt missing row: %q", string(b))
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "out", "delete_failed.log")); !strings.Contains(string(b), "InternalError") {
+		t.Errorf("delete_failed.log missing InternalError: %q", string(b))
+	}
+}
