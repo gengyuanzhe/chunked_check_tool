@@ -164,6 +164,14 @@ awk -F'\x1f' '{print $1, $2, $3, $4}' check_results.txt
 - **mode delete 不重新校验**：若 input 是手写或被篡改，可能删错版本——用户工作流保证 input 来自 lister
 - **同秒内连续启动两次**（`output_dir_timestamp: true`）会撞目录并发 append 撕裂尾部行
 
+## 约束
+
+- **endpoint 是纯 `host:port`**（如 `10.0.0.1:9000`），**不带 scheme**——scheme 由 config 的 `scheme` 字段（http/https）单一决定，endpoint 不允许自带 scheme 覆盖
+- **scheme 只能是 `http` 或 `https`**，其他值启动即报错
+- **`op_concurrency`** 默认 8，最小 1，0 取默认，负数报错
+- **`version_id` 字面量 `"null"` 是合法值**：版本控制前的旧对象返回字面量 `"null"`，原样透传到 HEAD / DELETE，不要当空值
+- **无重试无断点无优雅退出**：失败靠把 `*_failed.txt` 当下一轮 input 重跑
+
 ## 集成测试
 
 `integration_test.go` 用 `//go:build integration` tag 隔离，跑前需启本地 MinIO：

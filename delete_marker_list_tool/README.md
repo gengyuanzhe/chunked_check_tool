@@ -148,6 +148,17 @@ less delete_markers.txt   # 看着字段黏在一起，但数据完整
 - **mode 1 无并发**，大桶会慢——这正是该模式的语义
 - **同秒内连续启动两次**（`output_dir_timestamp: true`）会撞目录并发 append 撕裂尾部行；靠下游解析时丢弃格式非法行兜底
 - **version_id 可能是字面量 `"null"`**（旧版本对象）；下游透传不要当空值
+- **`scanned_versions` 在 mode 2 对"以 / 结尾的目录 key"少统计**——已知偏差，不修。自研 S3 有 quirk：`delimiter=/` 列举时以 / 结尾的 key（如 `97-abc-0/`）被折叠到 CommonPrefixes，但 `prefix=97-abc-0/` + `delimiter=/` 再列举时不返回该 key 本身作为 Version。mode 2 的 BFS re-list 踩在这个 quirk 上，目录 key 本身的 Version 计数被丢；mode 1 走 recursive 不分 shard，无此问题。
+  - **delete_markers.txt 完整正确**，不受影响——`<DeleteMarker>` 是独立 XML 标签，不走 CommonPrefix 路径。`scanned_versions` 只是诊断指标，不是产出。
+  - **不修的原因**：修复需 CommonPrefix re-list 改用 recursive，会失去 shard 内部多级细分（并发度下降）。诊断指标偏差不值得牺牲并发。两个模式统计值有差异时以 mode 1 为准，或只看 delete_markers.txt 完整性。
+
+## 约束
+
+- **endpoint 是纯 `host:port`**（如 `10.0.0.1:9000`），**不带 scheme**——scheme 由 config 的 `scheme` 字段（http/https）单一决定，endpoint 不允许自带 scheme 覆盖
+- **scheme 只能是 `http` 或 `https`**，其他值启动即报错
+- **`list_type` 必须显式配置**（1 或 2），不给默认值——模式选择是正确性关键
+- **op_concurrency / list_concurrency** 默认 8，最小 1，0 取默认，负数报错
+- **无重试无断点无优雅退出**：失败靠整轮重跑，靠 `list_failed.txt` 为空确认完整性
 
 ## 相关文档
 
