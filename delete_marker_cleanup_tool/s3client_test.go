@@ -65,8 +65,8 @@ func newFakeHeadDeleteS3(t *testing.T) *httptest.Server {
 func TestStatObject_MarkerReturns405(t *testing.T) {
 	srv := newFakeHeadDeleteS3(t)
 	defer srv.Close()
-	cfg := &Config{Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s"}
-	c, err := NewS3Client(cfg, srv.URL)
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s"}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,8 +82,8 @@ func TestStatObject_MarkerReturns405(t *testing.T) {
 func TestStatObject_RegularObjectReturnsInfo(t *testing.T) {
 	srv := newFakeHeadDeleteS3(t)
 	defer srv.Close()
-	cfg := &Config{Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s"}
-	c, err := NewS3Client(cfg, srv.URL)
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s"}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,8 +99,8 @@ func TestStatObject_RegularObjectReturnsInfo(t *testing.T) {
 func TestStatObject_AbsentReturnsNoSuchVersion(t *testing.T) {
 	srv := newFakeHeadDeleteS3(t)
 	defer srv.Close()
-	cfg := &Config{Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s"}
-	c, err := NewS3Client(cfg, srv.URL)
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s"}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,8 +118,8 @@ func TestStatObject_AbsentReturnsNoSuchVersion(t *testing.T) {
 func TestDeleteObject_Success(t *testing.T) {
 	srv := newFakeHeadDeleteS3(t)
 	defer srv.Close()
-	cfg := &Config{Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s"}
-	c, err := NewS3Client(cfg, srv.URL)
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s"}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,8 +132,8 @@ func TestDeleteObject_Success(t *testing.T) {
 func TestDeleteObject_NoSuchVersion(t *testing.T) {
 	srv := newFakeHeadDeleteS3(t)
 	defer srv.Close()
-	cfg := &Config{Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s"}
-	c, err := NewS3Client(cfg, srv.URL)
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s"}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,8 +149,8 @@ func TestDeleteObject_NoSuchVersion(t *testing.T) {
 func TestBucketExists(t *testing.T) {
 	srv := newFakeHeadDeleteS3(t)
 	defer srv.Close()
-	cfg := &Config{Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s"}
-	c, err := NewS3Client(cfg, srv.URL)
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s"}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}

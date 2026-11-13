@@ -64,7 +64,7 @@ func TestRunWorkers_ModeCheck_ThreeStates(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &Config{
-		Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s",
+		Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s",
 		OpConcurrency: 1, OutputDir: filepath.Join(dir, "out"), OutputDirTimestamp: false,
 		ProgressInterval: 1000,
 	}
@@ -155,7 +155,7 @@ func TestRunWorkers_ProgressNotFloodedAfterInterval(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &Config{
-		Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s",
+		Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s",
 		OpConcurrency: 1, OutputDir: filepath.Join(dir, "out"), OutputDirTimestamp: false,
 		ProgressInterval: 5,
 	}
@@ -192,7 +192,7 @@ func TestRunWorkers_ModeDelete_NoSuchVersionCountsAsSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &Config{
-		Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s",
+		Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s",
 		OpConcurrency: 1, OutputDir: filepath.Join(dir, "out"), OutputDirTimestamp: false,
 		ProgressInterval: 1000,
 	}
@@ -235,7 +235,7 @@ func TestRunWorkers_TornLineSkippedAndLogged(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &Config{
-		Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s",
+		Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s",
 		OpConcurrency: 1, OutputDir: filepath.Join(dir, "out"), OutputDirTimestamp: false,
 		ProgressInterval: 1000,
 	}
@@ -291,7 +291,7 @@ func TestRunWorkers_InvalidKeysInputURLDecodesKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &Config{
-		Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s",
+		Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s",
 		OpConcurrency: 1, OutputDir: filepath.Join(dir, "out"), OutputDirTimestamp: false,
 		ProgressInterval: 1000,
 	}
@@ -341,7 +341,7 @@ func TestRunWorkers_ModeDelete_InternalErrorRecordedAsFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &Config{
-		Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s",
+		Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s",
 		OpConcurrency: 1, OutputDir: filepath.Join(dir, "out"), OutputDirTimestamp: false,
 		ProgressInterval: 1000,
 	}

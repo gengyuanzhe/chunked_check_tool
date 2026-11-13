@@ -81,12 +81,12 @@ func TestLister_Mode2_FailureRecordedOtherPrefixesContinue(t *testing.T) {
 	}))
 	defer srv.Close()
 	cfg := &Config{
-		Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s",
+		Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s",
 		ListType: 2, ListConcurrency: 1, // conc=1 避免 bad/ 重试噪音
 		OutputDir: filepath.Join(t.TempDir(), "out"), OutputDirTimestamp: false,
 	}
 	dir := cfg.OutputDir
-	client, err := NewS3Client(cfg, srv.URL)
+	client, err := NewS3Client(cfg, srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}

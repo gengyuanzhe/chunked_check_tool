@@ -30,7 +30,7 @@ func newFakeVersionedS3(t *testing.T, versionsXML string) (*httptest.Server, str
 		w.Header().Set("Content-Type", "application/xml")
 		w.Write([]byte(versionsXML))
 	}))
-	return srv, srv.URL
+	return srv, srv.Listener.Addr().String()
 }
 
 const versionsXMLOneMarker = `<?xml version="1.0" encoding="UTF-8"?>
@@ -78,8 +78,8 @@ func TestListVersions_OneMarkerOneVersion(t *testing.T) {
 func TestListVersions_ServerError(t *testing.T) {
 	srv, _ := newFakeVersionedS3(t, "") // empty XML triggers 500 in handler
 	defer srv.Close()
-	cfg := &Config{Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s"}
-	c, err := NewS3Client(cfg, srv.URL)
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s"}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,8 +105,8 @@ func TestListVersions_ServerError(t *testing.T) {
 func TestBucketExists(t *testing.T) {
 	srv, _ := newFakeVersionedS3(t, versionsXMLOneMarker)
 	defer srv.Close()
-	cfg := &Config{Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s"}
-	c, err := NewS3Client(cfg, srv.URL)
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s"}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}

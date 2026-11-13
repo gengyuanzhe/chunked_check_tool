@@ -67,6 +67,9 @@ func LoadConfig(path string) (*Config, error) {
 	if len(cfg.Endpoints) == 0 {
 		return nil, fmt.Errorf("config: endpoints must have at least one entry")
 	}
+	if cfg.Scheme != "http" && cfg.Scheme != "https" {
+		return nil, fmt.Errorf("config: scheme must be http or https, got %q", cfg.Scheme)
+	}
 	if cfg.AK == "" || cfg.SK == "" {
 		return nil, fmt.Errorf("config: ak and sk are required")
 	}

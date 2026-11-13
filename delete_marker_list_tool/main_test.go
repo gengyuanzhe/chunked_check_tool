@@ -14,7 +14,7 @@ func TestRun_EndToEnd_HappyPath(t *testing.T) {
 	cfgPath := filepath.Join(dir, "config.yaml")
 	cfgBody := strings.Join([]string{
 		"endpoints:",
-		"  - " + srv.URL,
+		"  - " + srv.Listener.Addr().String(),
 		"scheme: http",
 		"ak: a",
 		"sk: s",
@@ -80,7 +80,7 @@ func TestRun_BucketDoesNotExist(t *testing.T) {
 	cfgPath := filepath.Join(dir, "config.yaml")
 	cfgBody := strings.Join([]string{
 		"endpoints:",
-		"  - " + srv.URL,
+		"  - " + srv.Listener.Addr().String(),
 		"scheme: http",
 		"ak: a",
 		"sk: s",

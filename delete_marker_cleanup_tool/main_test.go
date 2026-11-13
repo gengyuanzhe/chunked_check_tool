@@ -19,7 +19,7 @@ func TestRun_ModeCheck_EndToEnd(t *testing.T) {
 	cfgPath := filepath.Join(dir, "config.yaml")
 	cfgBody := strings.Join([]string{
 		"endpoints:",
-		"  - " + srv.URL,
+		"  - " + srv.Listener.Addr().String(),
 		"scheme: http",
 		"ak: a",
 		"sk: s",
@@ -62,7 +62,7 @@ func TestRun_ModeDelete_EndToEnd(t *testing.T) {
 	cfgPath := filepath.Join(dir, "config.yaml")
 	cfgBody := strings.Join([]string{
 		"endpoints:",
-		"  - " + srv.URL,
+		"  - " + srv.Listener.Addr().String(),
 		"scheme: http",
 		"ak: a",
 		"sk: s",
@@ -131,7 +131,7 @@ func TestRun_BucketPreflight_FirstRowParseFailureExits(t *testing.T) {
 	cfgPath := filepath.Join(dir, "config.yaml")
 	cfgBody := strings.Join([]string{
 		"endpoints:",
-		"  - " + srv.URL,
+		"  - " + srv.Listener.Addr().String(),
 		"scheme: http",
 		"ak: a",
 		"sk: s",

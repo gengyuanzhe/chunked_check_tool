@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	neturl "net/url"
 	"strings"
 	"time"
 
@@ -28,9 +27,10 @@ type S3Client struct {
 // transport 调优对齐 delete_marker_list_tool：MaxIdleConnsPerHost=32、
 // IdleConnTimeout=90s、dial_timeout 兜底黑洞 IP、optional ResponseHeaderTimeout。
 // https 时 InsecureSkipVerify。
-// endpoint 可为 "host:port"（用 cfg.Scheme 拼 scheme）或完整 "http(s)://host[:port]"。
-// 构造期校验最终 URL 合法——aws sdk 的 LoadDefaultConfig 不校验 BaseEndpoint 格式，
-// 非法 scheme 会延迟到第一次请求才报错，掩盖 worker 启动失败。
+// endpoint 必须是 "host:port"（无 scheme）——scheme 由 cfg.Scheme（http/https）决定，
+// 单一来源，不允许 endpoint 自带 scheme 覆盖。URL 由 NewS3Client 内部拼。
+// 构造期校验 endpoint 格式——aws sdk 的 LoadDefaultConfig 不校验 BaseEndpoint，
+// 非法格式会延迟到第一次请求才报错，掩盖 worker 启动失败。
 func NewS3Client(cfg *Config, endpoint string) (*S3Client, error) {
 	secure := cfg.Scheme == "https"
 	tr := &http.Transport{
@@ -47,19 +47,15 @@ func NewS3Client(cfg *Config, endpoint string) (*S3Client, error) {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 
-	// endpoint 允许 "host:port"（config 契约）或完整 URL（测试用 httptest URL）。
-	// 不带 scheme 时按 cfg.Schema 拼，否则解析失败。
-	raw := endpoint
-	if !strings.Contains(raw, "://") {
-		if cfg.Scheme == "" {
-			return nil, fmt.Errorf("invalid endpoint %q: no scheme and cfg.scheme empty", endpoint)
-		}
-		raw = cfg.Scheme + "://" + raw
+	// endpoint 必须是 host:port，不允许带 scheme（scheme 由 cfg.Scheme 决定）。
+	if strings.Contains(endpoint, "://") {
+		return nil, fmt.Errorf("invalid endpoint %q: must be host:port without scheme (scheme comes from cfg.scheme)", endpoint)
 	}
-	u, err := neturl.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, fmt.Errorf("invalid endpoint %q: want http(s)://host", endpoint)
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil || host == "" || port == "" {
+		return nil, fmt.Errorf("invalid endpoint %q: want host:port", endpoint)
 	}
+	raw := cfg.Scheme + "://" + endpoint
 
 	awscfg, err := awsconfig.LoadDefaultConfig(context.Background(),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(cfg.AK, cfg.SK, "")),

@@ -40,7 +40,7 @@ func newAdminClient(t *testing.T, endpoint, ak, sk string) *s3.Client {
 		t.Fatalf("aws config: %v", err)
 	}
 	return s3.NewFromConfig(awscfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(endpoint)
+		o.BaseEndpoint = aws.String("http://" + endpoint)
 		o.UsePathStyle = true
 	})
 }
