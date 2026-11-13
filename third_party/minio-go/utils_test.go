@@ -1,0 +1,669 @@
+/*
+ * MinIO Go Library for Amazon S3 Compatible Cloud Storage
+ * Copyright 2015-2017 MinIO, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package minio
+
+import (
+	"errors"
+	"fmt"
+	"math/rand"
+	"mime"
+	"net/http"
+	"net/url"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/minio/minio-go/v7/pkg/s3utils"
+)
+
+func TestParseRFC7231Time(t *testing.T) {
+	testCases := []struct {
+		timeStr         string
+		expectedSuccess bool
+	}{
+		{
+			timeStr:         "Sun, 2 Jan 2000 20:34:56 GMT",
+			expectedSuccess: true,
+		},
+		{
+			timeStr:         "Sun, 02 Jan 2000 20:34:56 GMT",
+			expectedSuccess: true,
+		},
+		{
+			timeStr:         "Sun, 2 Jan 00 20:34:56 GMT",
+			expectedSuccess: true,
+		},
+		{
+			timeStr:         "Sun, 02 Jan 00 20:34:56 GMT",
+			expectedSuccess: true,
+		},
+		{
+			timeStr:         "Su, 2 Jan 00 20:34:56 GMT",
+			expectedSuccess: false,
+		},
+	}
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run("", func(t *testing.T) {
+			_, err := parseRFC7231Time(testCase.timeStr)
+			if err != nil && testCase.expectedSuccess {
+				t.Errorf("expected success found failure %v", err)
+			}
+			if err == nil && !testCase.expectedSuccess {
+				t.Errorf("expected failure found success")
+			}
+		})
+	}
+}
+
+// Tests signature redacting function used
+// in filtering on-wire Authorization header.
+func TestRedactSignature(t *testing.T) {
+	testCases := []struct {
+		authValue                 string
+		expectedRedactedAuthValue string
+	}{
+		{
+			authValue:                 "AWS 1231313:888x000231==",
+			expectedRedactedAuthValue: "AWS **REDACTED**:**REDACTED**",
+		},
+		{
+			authValue:                 "AWS4-HMAC-SHA256 Credential=12312313/20170613/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=02131231312313213",
+			expectedRedactedAuthValue: "AWS4-HMAC-SHA256 Credential=**REDACTED**/20170613/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=**REDACTED**",
+		},
+	}
+
+	for i, testCase := range testCases {
+		redactedAuthValue := redactSignature(testCase.authValue)
+		if redactedAuthValue != testCase.expectedRedactedAuthValue {
+			t.Errorf("Test %d: Expected %s, got %s", i+1, testCase.expectedRedactedAuthValue, redactedAuthValue)
+		}
+	}
+}
+
+// Tests for 'getEndpointURL(endpoint string, inSecure bool)'.
+func TestGetEndpointURL(t *testing.T) {
+	testCases := []struct {
+		// Inputs.
+		endPoint string
+		secure   bool
+
+		// Expected result.
+		result string
+		err    error
+		// Flag indicating whether the test is expected to pass or not.
+		shouldPass bool
+	}{
+		{"s3.amazonaws.com", true, "https://s3.amazonaws.com", nil, true},
+		{"s3.cn-north-1.amazonaws.com.cn", true, "https://s3.cn-north-1.amazonaws.com.cn", nil, true},
+		{"s3.cn-northwest-1.amazonaws.com.cn", true, "https://s3.cn-northwest-1.amazonaws.com.cn", nil, true},
+		{"s3.amazonaws.com", false, "http://s3.amazonaws.com", nil, true},
+		{"s3.cn-north-1.amazonaws.com.cn", false, "http://s3.cn-north-1.amazonaws.com.cn", nil, true},
+		{"s3.cn-northwest-1.amazonaws.com.cn", false, "http://s3.cn-northwest-1.amazonaws.com.cn", nil, true},
+		{"192.168.1.1:9000", false, "http://192.168.1.1:9000", nil, true},
+		{"192.168.1.1:9000", true, "https://192.168.1.1:9000", nil, true},
+		{"s3.amazonaws.com:443", true, "https://s3.amazonaws.com:443", nil, true},
+		{"storage.googleapis.com:443", true, "https://storage.googleapis.com:443", nil, true},
+		{"[::1]", false, "http://[::1]", nil, true},
+		{"[::1]", true, "https://[::1]", nil, true},
+		{"[::1]:80", false, "http://[::1]:80", nil, true},
+		{"[::1]:443", true, "https://[::1]:443", nil, true},
+		{"[::1]:9000", false, "http://[::1]:9000", nil, true},
+		{"[::1]:9000", true, "https://[::1]:9000", nil, true},
+		{"https://storage.example.com:6781", true, "https://storage.example.com:6781", nil, true},
+		{"HTTPS://storage.example.com:6781", true, "https://storage.example.com:6781", nil, true},
+		{"https://storage.example.com:6781/", true, "https://storage.example.com:6781/", nil, true},
+		{"http://127.0.0.1:9000", false, "http://127.0.0.1:9000", nil, true},
+		{"https://[::1]:9000", true, "https://[::1]:9000", nil, true},
+		{"storage.example.com?redirect=https://mirror.example.com", true, "https://storage.example.com?redirect=https://mirror.example.com", nil, true},
+		{"https://storage.example.com:6781", false, "", errInvalidArgument("Endpoint url scheme \"https\" conflicts with the secure option; remove the scheme from the endpoint or align the secure option."), false},
+		{"HTTPS://storage.example.com:6781", false, "", errInvalidArgument("Endpoint url scheme \"https\" conflicts with the secure option; remove the scheme from the endpoint or align the secure option."), false},
+		{"http://127.0.0.1:9000", true, "", errInvalidArgument("Endpoint url scheme \"http\" conflicts with the secure option; remove the scheme from the endpoint or align the secure option."), false},
+		{"https://storage.example.com:6781/bucket", true, "", errInvalidArgument("Endpoint url cannot have fully qualified paths."), false},
+		{"ws://storage.example.com:6781", true, "", errInvalidArgument("Endpoint url scheme \"ws\" is unsupported; use http or https or omit the scheme."), false},
+		{"://storage.example.com:6781", true, "", errInvalidArgument("Endpoint url scheme \"\" is unsupported; use http or https or omit the scheme."), false},
+		{"https://exa mple.com:6781", true, "", errors.New(`parse "https://exa mple.com:6781": invalid character " " in host name`), false},
+		{"https://", true, "", errInvalidArgument("Endpoint:  does not follow ip address or domain name standards."), false},
+		{"13333.123123.-", true, "", errInvalidArgument(fmt.Sprintf("Endpoint: %s does not follow ip address or domain name standards.", "13333.123123.-")), false},
+		{"13333.123123.-", true, "", errInvalidArgument(fmt.Sprintf("Endpoint: %s does not follow ip address or domain name standards.", "13333.123123.-")), false},
+		{"s3.aamzza.-", true, "", errInvalidArgument(fmt.Sprintf("Endpoint: %s does not follow ip address or domain name standards.", "s3.aamzza.-")), false},
+		{"", true, "", errInvalidArgument("Endpoint:  does not follow ip address or domain name standards."), false},
+	}
+
+	for i, testCase := range testCases {
+		result, err := getEndpointURL(testCase.endPoint, testCase.secure)
+		if err != nil && testCase.shouldPass {
+			t.Errorf("Test %d: Expected to pass, but failed with: <ERROR> %s", i+1, err.Error())
+		}
+		if err == nil && !testCase.shouldPass {
+			t.Errorf("Test %d: Expected to fail with <ERROR> \"%s\", but passed instead", i+1, testCase.err.Error())
+		}
+		// Failed as expected, but does it fail for the expected reason.
+		if err != nil && !testCase.shouldPass {
+			if err.Error() != testCase.err.Error() {
+				t.Errorf("Test %d: Expected to fail with error \"%s\", but instead failed with error \"%s\" instead", i+1, testCase.err.Error(), err.Error())
+			}
+		}
+
+		// Test passes as expected, but the output values are verified for correctness here.
+		if err == nil && testCase.shouldPass {
+			if testCase.result != result.String() {
+				t.Errorf("Test %d: Expected the result Url to be \"%s\", but found \"%s\" instead", i+1, testCase.result, result.String())
+			}
+		}
+	}
+}
+
+// Tests validate end point validator.
+func TestIsValidEndpointURL(t *testing.T) {
+	testCases := []struct {
+		url string
+		err error
+		// Flag indicating whether the test is expected to pass or not.
+		shouldPass bool
+	}{
+		{"", errInvalidArgument("Endpoint url cannot be empty."), false},
+		{"https://s3.amazonaws.com", nil, true},
+		{"https://s3.cn-north-1.amazonaws.com.cn", nil, true},
+		{"https://s3-us-gov-west-1.amazonaws.com", nil, true},
+		{"https://s3-fips-us-gov-west-1.amazonaws.com", nil, true},
+		{"https://s3-fips.us-gov-west-1.amazonaws.com", nil, true},
+		{"https://s3-fips.us-gov-east-1.amazonaws.com", nil, true},
+		{"https://s3.amazonaws.com/", nil, true},
+		{"https://storage.googleapis.com/", nil, true},
+		{"https://z3.amazonaws.com", nil, true},
+		{"https://mybalancer.us-east-1.elb.amazonaws.com", nil, true},
+		{"https://test-access-point-000000000000.op-00000000000000000.s3-outposts.eu-central-1.amazonaws.com", nil, true},
+		{"192.168.1.1", errInvalidArgument("Endpoint url cannot have fully qualified paths."), false},
+		{"https://amazon.googleapis.com/", errInvalidArgument("Google Cloud Storage endpoint should be 'storage.googleapis.com'."), false},
+		{"https://storage.googleapis.com/bucket/", errInvalidArgument("Endpoint url cannot have fully qualified paths."), false},
+		{"https://s3.amazonaws.com/bucket/object", errInvalidArgument("Endpoint url cannot have fully qualified paths."), false},
+		{"https://.s3server.example.com/", errInvalidArgument("Endpoint: .s3server.example.com does not follow ip address or domain name standards."), false},
+		{"https://s3server.example_/", errInvalidArgument("Endpoint: s3server.example_ does not follow ip address or domain name standards."), false},
+		{"https://_s3server.example.com/", errInvalidArgument("Endpoint: _s3server.example.com does not follow ip address or domain name standards."), false},
+		{"https://s3-outposts.eu-central-1.amazonaws.com", errInvalidArgument("S3 Outposts endpoint must match <prefix>.s3-outposts.<region>.amazonaws.com"), false},
+	}
+
+	for i, testCase := range testCases {
+		var u url.URL
+		if testCase.url == "" {
+			u = sentinelURL
+		} else {
+			u1, err := url.Parse(testCase.url)
+			if err != nil {
+				t.Errorf("Test %d: Expected to pass, but failed with: <ERROR> %s", i+1, err)
+			}
+			u = *u1
+		}
+		err := isValidEndpointURL(u)
+		if err != nil && testCase.shouldPass {
+			t.Errorf("Test %d: Expected to pass, but failed with: <ERROR> %s", i+1, err)
+		}
+		if err == nil && !testCase.shouldPass {
+			t.Errorf("Test %d: Expected to fail with <ERROR> \"%s\", but passed instead", i+1, testCase.err)
+		}
+		// Failed as expected, but does it fail for the expected reason.
+		if err != nil && !testCase.shouldPass {
+			if err.Error() != testCase.err.Error() {
+				t.Errorf("Test %d: Expected to fail with error \"%s\", but instead failed with error \"%s\" instead", i+1, testCase.err, err)
+			}
+		}
+	}
+}
+
+func TestDefaultBucketLocation(t *testing.T) {
+	testCases := []struct {
+		endpointURL      url.URL
+		regionOverride   string
+		expectedLocation string
+	}{
+		// Region override is set URL is ignored. - Test 1.
+		{
+			endpointURL:      url.URL{Host: "s3-fips-us-gov-west-1.amazonaws.com"},
+			regionOverride:   "us-west-1",
+			expectedLocation: "us-west-1",
+		},
+		// No region override, url based preferenced is honored - Test 2.
+		{
+			endpointURL:      url.URL{Host: "s3-fips-us-gov-west-1.amazonaws.com"},
+			regionOverride:   "",
+			expectedLocation: "us-gov-west-1",
+		},
+		// Region override is honored - Test 3.
+		{
+			endpointURL:      url.URL{Host: "s3.amazonaws.com"},
+			regionOverride:   "us-west-1",
+			expectedLocation: "us-west-1",
+		},
+		// China region should be honored, region override not provided. - Test 4.
+		{
+			endpointURL:      url.URL{Host: "s3.cn-north-1.amazonaws.com.cn"},
+			regionOverride:   "",
+			expectedLocation: "cn-north-1",
+		},
+		// China region should be honored, region override not provided. - Test 5.
+		{
+			endpointURL:      url.URL{Host: "s3.cn-northwest-1.amazonaws.com.cn"},
+			regionOverride:   "",
+			expectedLocation: "cn-northwest-1",
+		},
+		// No region provided, no standard region strings provided as well. - Test 6.
+		{
+			endpointURL:      url.URL{Host: "s3.amazonaws.com"},
+			regionOverride:   "",
+			expectedLocation: "us-east-1",
+		},
+	}
+
+	for i, testCase := range testCases {
+		retLocation := getDefaultLocation(testCase.endpointURL, testCase.regionOverride)
+		if testCase.expectedLocation != retLocation {
+			t.Errorf("Test %d: Expected location %s, got %s", i+1, testCase.expectedLocation, retLocation)
+		}
+	}
+}
+
+// Tests validate the expiry time validator.
+func TestIsValidExpiry(t *testing.T) {
+	testCases := []struct {
+		// Input.
+		duration time.Duration
+		// Expected result.
+		err error
+		// Flag to indicate whether the test should pass.
+		shouldPass bool
+	}{
+		{100 * time.Millisecond, errInvalidArgument("Expires cannot be lesser than 1 second."), false},
+		{604801 * time.Second, errInvalidArgument("Expires cannot be greater than 7 days."), false},
+		{0 * time.Second, errInvalidArgument("Expires cannot be lesser than 1 second."), false},
+		{1 * time.Second, nil, true},
+		{10000 * time.Second, nil, true},
+		{999 * time.Second, nil, true},
+	}
+
+	for i, testCase := range testCases {
+		err := isValidExpiry(testCase.duration)
+		if err != nil && testCase.shouldPass {
+			t.Errorf("Test %d: Expected to pass, but failed with: <ERROR> %s", i+1, err.Error())
+		}
+		if err == nil && !testCase.shouldPass {
+			t.Errorf("Test %d: Expected to fail with <ERROR> \"%s\", but passed instead", i+1, testCase.err.Error())
+		}
+		// Failed as expected, but does it fail for the expected reason.
+		if err != nil && !testCase.shouldPass {
+			if err.Error() != testCase.err.Error() {
+				t.Errorf("Test %d: Expected to fail with error \"%s\", but instead failed with error \"%s\" instead", i+1, testCase.err.Error(), err.Error())
+			}
+		}
+	}
+}
+
+// Tests validate the bucket name validator.
+func TestIsValidBucketName(t *testing.T) {
+	testCases := []struct {
+		// Input.
+		bucketName string
+		// Expected result.
+		err error
+		// Flag to indicate whether test should Pass.
+		shouldPass bool
+	}{
+		{".mybucket", errors.New("Bucket name contains invalid characters"), false},
+		{"mybucket.", errors.New("Bucket name contains invalid characters"), false},
+		{"mybucket-", errors.New("Bucket name contains invalid characters"), false},
+		{"my", errors.New("Bucket name cannot be shorter than 3 characters"), false},
+		{"", errors.New("Bucket name cannot be empty"), false},
+		{"my..bucket", errors.New("Bucket name contains invalid characters"), false},
+		{"my.bucket.com", nil, true},
+		{"my-bucket", nil, true},
+		{"123my-bucket", nil, true},
+	}
+
+	for i, testCase := range testCases {
+		err := s3utils.CheckValidBucketName(testCase.bucketName)
+		if err != nil && testCase.shouldPass {
+			t.Errorf("Test %d: Expected to pass, but failed with: <ERROR> %s", i+1, err.Error())
+		}
+		if err == nil && !testCase.shouldPass {
+			t.Errorf("Test %d: Expected to fail with <ERROR> \"%s\", but passed instead", i+1, testCase.err.Error())
+		}
+		// Failed as expected, but does it fail for the expected reason.
+		if err != nil && !testCase.shouldPass {
+			if err.Error() != testCase.err.Error() {
+				t.Errorf("Test %d: Expected to fail with error \"%s\", but instead failed with error \"%s\" instead", i+1, testCase.err.Error(), err.Error())
+			}
+		}
+	}
+}
+
+// Tests if header is standard supported header
+func TestIsStandardHeader(t *testing.T) {
+	testCases := []struct {
+		// Input.
+		header string
+		// Expected result.
+		expectedValue bool
+	}{
+		{"content-encoding", true},
+		{"content-type", true},
+		{"cache-control", true},
+		{"content-disposition", true},
+		{"content-language", true},
+		{"random-header", false},
+	}
+
+	for i, testCase := range testCases {
+		actual := isStandardHeader(testCase.header)
+		if actual != testCase.expectedValue {
+			t.Errorf("Test %d: Expected to pass, but failed", i+1)
+		}
+	}
+}
+
+// Tests if header is server encryption header
+func TestIsSSEHeader(t *testing.T) {
+	testCases := []struct {
+		// Input.
+		header string
+		// Expected result.
+		expectedValue bool
+	}{
+		{"x-amz-server-side-encryption", true},
+		{"x-amz-server-side-encryption-aws-kms-key-id", true},
+		{"x-amz-server-side-encryption-context", true},
+		{"x-amz-server-side-encryption-customer-algorithm", true},
+		{"x-amz-server-side-encryption-customer-key", true},
+		{"x-amz-server-side-encryption-customer-key-MD5", true},
+		{"random-header", false},
+	}
+
+	for i, testCase := range testCases {
+		actual := isSSEHeader(testCase.header)
+		if actual != testCase.expectedValue {
+			t.Errorf("Test %d: Expected to pass, but failed", i+1)
+		}
+	}
+}
+
+// Tests if header is x-amz-meta or x-amz-acl
+func TestIsAmzHeader(t *testing.T) {
+	testCases := []struct {
+		// Input.
+		header string
+		// Expected result.
+		expectedValue bool
+	}{
+		{"x-amz-iv", false},
+		{"x-amz-key", false},
+		{"x-amz-matdesc", false},
+		{"x-amz-meta-x-amz-iv", true},
+		{"x-amz-meta-x-amz-key", true},
+		{"x-amz-meta-x-amz-matdesc", true},
+		{"x-amz-acl", true},
+		{"random-header", false},
+	}
+
+	for i, testCase := range testCases {
+		actual := isAmzHeader(testCase.header)
+		if actual != testCase.expectedValue {
+			t.Errorf("Test %d: Expected to pass, but failed", i+1)
+		}
+	}
+}
+
+// Tests if query parameter starts with "x-" and will be ignored by S3.
+func TestIsCustomQueryValue(t *testing.T) {
+	testCases := []struct {
+		// Input.
+		queryParamKey string
+		// Expected result.
+		expectedValue bool
+	}{
+		{"x-custom-key", true},
+		{"xcustom-key", false},
+		{"random-header", false},
+	}
+
+	for i, testCase := range testCases {
+		actual := isCustomQueryValue(testCase.queryParamKey)
+		if actual != testCase.expectedValue {
+			t.Errorf("Test %d: Expected to pass, but failed", i+1)
+		}
+	}
+}
+
+func TestFullObjectChecksum64(t *testing.T) {
+	tests := []ChecksumType{
+		ChecksumCRC32,
+		ChecksumCRC32C,
+		ChecksumCRC64NVME,
+	}
+	for _, cs := range tests {
+		t.Run(cs.String(), func(t *testing.T) {
+			b := make([]byte, 1024000)
+			rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+			rng.Read(b)
+			sum := cs.EncodeToString
+			want := sum(b)
+			var parts []ObjectPart
+			for len(b) > 0 {
+				sz := rng.Intn(len(b) / 2)
+				if len(b)-sz < 1024 {
+					sz = len(b)
+				}
+				switch cs {
+				case ChecksumCRC32:
+					parts = append(parts, ObjectPart{PartNumber: len(parts) + 1, ChecksumCRC32: cs.EncodeToString(b[:sz]), Size: int64(sz)})
+				case ChecksumCRC32C:
+					parts = append(parts, ObjectPart{PartNumber: len(parts) + 1, ChecksumCRC32C: cs.EncodeToString(b[:sz]), Size: int64(sz)})
+				case ChecksumCRC64NVME:
+					parts = append(parts, ObjectPart{PartNumber: len(parts) + 1, ChecksumCRC64NVME: cs.EncodeToString(b[:sz]), Size: int64(sz)})
+				}
+				b = b[sz:]
+			}
+			gotCRC, err := cs.FullObjectChecksum(parts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotCRC.Encoded() != want {
+				t.Errorf("Checksum %v does not match the expected CRC got:%s want:%s", cs.String(), gotCRC.Encoded(), want)
+			}
+		})
+	}
+}
+
+func TestExtractObjMetadata(t *testing.T) {
+	tests := []struct {
+		name   string
+		header http.Header
+		want   http.Header
+	}{
+		{
+			name: "Test with valid header",
+			header: http.Header{
+				"X-Minio-Meta-Test": []string{"test"},
+			},
+			want: http.Header{
+				"X-Minio-Meta-Test": []string{"test"},
+			},
+		},
+		{
+			name: "Test with valid header with QEncoding characters",
+			header: http.Header{
+				"X-Minio-Meta-Test": []string{mime.QEncoding.Encode("UTF-8", "öha, das")},
+			},
+			want: http.Header{
+				"X-Minio-Meta-Test": []string{"öha, das"},
+			},
+		},
+		{
+			name: "Test with valid header with BEncoding characters",
+			header: http.Header{
+				"X-Minio-Meta-Test": []string{mime.BEncoding.Encode("UTF-8", "öha, das")},
+			},
+			want: http.Header{
+				"X-Minio-Meta-Test": []string{"öha, das"},
+			},
+		},
+		{
+			name: "Test with valid header with multi-QEncoding characters",
+			header: http.Header{
+				"X-Minio-Meta-Test": []string{mime.QEncoding.Encode("UTF-8", strings.Repeat("öha, das", 100))},
+			},
+			want: http.Header{
+				"X-Minio-Meta-Test": []string{strings.Repeat("öha, das", 100)},
+			},
+		},
+		{
+			name: "Test with valid header with multi-BEncoding characters",
+			header: http.Header{
+				"X-Minio-Meta-Test": []string{mime.BEncoding.Encode("UTF-8", strings.Repeat("öha, das", 100))},
+			},
+			want: http.Header{
+				"X-Minio-Meta-Test": []string{strings.Repeat("öha, das", 100)},
+			},
+		},
+		{
+			name: "Test with valid header with multi-BEncoding characters",
+			header: http.Header{
+				"X-Minio-Meta-Test": []string{mime.BEncoding.Encode("UTF-8", strings.Repeat("öha, das", 100)), mime.BEncoding.Encode("UTF-8", strings.Repeat("öha, das123", 100))},
+			},
+			want: http.Header{
+				"X-Minio-Meta-Test": []string{strings.Repeat("öha, das", 100), strings.Repeat("öha, das123", 100)},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractObjMetadata(tt.header)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("extractObjMetadata() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAmzRestoreToStruct(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          string
+		wantOng        bool
+		wantExpiry     bool
+		expectedExpiry string
+		wantErr        bool
+	}{
+		{
+			name:       "ongoing true without expiry",
+			input:      `ongoing-request="true"`,
+			wantOng:    true,
+			wantExpiry: false,
+			wantErr:    false,
+		},
+		{
+			name:           "ongoing false with expiry",
+			input:          `ongoing-request="false", expiry-date="Wed, 21 Oct 2015 07:28:00 GMT"`,
+			wantOng:        false,
+			wantExpiry:     true,
+			expectedExpiry: "Wed, 21 Oct 2015 07:28:00 GMT",
+			wantErr:        false,
+		},
+		{
+			name:           "no space after comma",
+			input:          `ongoing-request="false",expiry-date="Wed, 21 Oct 2015 07:28:00 GMT"`,
+			wantOng:        false,
+			wantExpiry:     true,
+			expectedExpiry: "Wed, 21 Oct 2015 07:28:00 GMT",
+			wantErr:        false,
+		},
+		{
+			name:    "invalid header",
+			input:   `invalid-format`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ong, expTime, err := amzRestoreToStruct(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ong != tt.wantOng {
+				t.Errorf("ongoing: got %v, want %v", ong, tt.wantOng)
+			}
+			if tt.wantExpiry {
+				if expTime.IsZero() {
+					t.Errorf("expected expiry time, got zero")
+				} else {
+					// verify parsed expiry matches expected RFC7231 time
+					expected, perr := parseRFC7231Time(tt.expectedExpiry)
+					if perr != nil {
+						t.Fatalf("failed to parse expected expiry: %v", perr)
+					}
+					if !expTime.Equal(expected) {
+						t.Errorf("expiry time mismatch: got %v, want %v", expTime, expected)
+					}
+				}
+			} else if !expTime.IsZero() {
+				t.Errorf("did not expect expiry time, got %v", expTime)
+			}
+		})
+	}
+}
+
+func TestToObjectInfoHeaders(t *testing.T) {
+	header := http.Header{
+		"Etag":            []string{`"d41d8cd98f00b204e9800998ecf8427e"`},
+		"Content-Length":  []string{"101"},
+		"Content-Type":    []string{"application/octet-stream"},
+		"Last-Modified":   []string{"Mon, 19 Aug 2024 12:00:00 GMT"},
+		"Content-Range":   []string{"bytes 0-100/2000"},
+		"X-Custom-Reply":  []string{"custom-value"},
+		"X-Amz-Meta-Note": []string{"=?UTF-8?Q?d=C3=A9j=C3=A0?="},
+	}
+	objInfo, err := ToObjectInfo("test-bucket", "test-object", header)
+	if err != nil {
+		t.Fatalf("ToObjectInfo() error = %v", err)
+	}
+	if got := objInfo.Headers.Get("Content-Range"); got != "bytes 0-100/2000" {
+		t.Errorf("Headers.Get(Content-Range) = %q, want %q", got, "bytes 0-100/2000")
+	}
+	if got := objInfo.Headers.Get("X-Custom-Reply"); got != "custom-value" {
+		t.Errorf("Headers.Get(X-Custom-Reply) = %q, want %q", got, "custom-value")
+	}
+	// The existing Metadata filter is unchanged: non-whitelisted response
+	// headers remain absent from Metadata and are reachable only via Headers.
+	if got := objInfo.Metadata.Get("Content-Range"); got != "" {
+		t.Errorf("Metadata.Get(Content-Range) = %q, want empty", got)
+	}
+	// RFC 2047-encoded metadata values appear MIME-decoded via Headers,
+	// matching Metadata (the decode is applied to the shared header map).
+	if got := objInfo.Headers.Get("X-Amz-Meta-Note"); got != "déjà" {
+		t.Errorf("Headers.Get(X-Amz-Meta-Note) = %q, want %q", got, "déjà")
+	}
+	if got, want := objInfo.Headers.Get("X-Amz-Meta-Note"), objInfo.Metadata.Get("X-Amz-Meta-Note"); got != want {
+		t.Errorf("Headers meta value = %q, Metadata meta value = %q, want equal", got, want)
+	}
+}

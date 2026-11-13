@@ -3,6 +3,12 @@
 *.out
 .DS_Store
 /chunked_check_tool/chunked_check_tool
+/chunked_check_tool/chunked_check_tool.exe
 /list_only/list_only
 /data_generator/data_generator
 /verify_tool/
+/delete_marker_list_tool/delete_marker_list_tool
+/delete_marker_list_tool/delete_marker_list_tool.exe
+/delete_marker_cleanup_tool/delete_marker_cleanup_tool
+/delete_marker_cleanup_tool/delete_marker_cleanup_tool.exe
+/delete_marker_cleanup_tool/._*/
