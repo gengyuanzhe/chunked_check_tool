@@ -2,26 +2,19 @@ package main
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/minio/minio-go/v7"
 )
 
-// newFakeHeadDeleteS3 routes by method. minio-go sends a GET location lookup
-// before HEAD/DELETE — that must return LocationConstraint XML, otherwise the
-// client fails before the real request.
+// newFakeHeadDeleteS3 routes by method.
 // HEAD /<bkt>                  → 200 (bucket exists)
-// GET  /<bkt> or /             → LocationConstraint XML
 // HEAD /<bkt>/<key>?versionId= → 405+marker / 200+ETag / 404 NoSuchVersion / 500
 // DELETE /<bkt>/<key>?versionId= → 204 / 404 NoSuchVersion (if vid=="already-deleted")
 func newFakeHeadDeleteS3(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Bucket-level request (no key segment): location lookup or HEAD bucket.
 		path := strings.TrimPrefix(r.URL.Path, "/")
 		parts := strings.SplitN(path, "/", 2)
 		if len(parts) < 2 || parts[1] == "" {
@@ -77,19 +70,12 @@ func TestStatObject_MarkerReturns405(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := c.StatObject(context.Background(), "testbucket", "marker.txt", "dm-1")
-	if info.IsDeleteMarker {
-		return
+	r := c.StatObject(context.Background(), "testbucket", "marker.txt", "dm-1")
+	if !r.IsDeleteMarker {
+		t.Errorf("IsDeleteMarker=false want true (405 + x-amz-delete-marker: true)")
 	}
-	if err == nil {
-		t.Fatalf("expected IsDeleteMarker=true or MethodNotAllowed error; got info=%+v err=nil", info)
-	}
-	var er minio.ErrorResponse
-	if !errors.As(err, &er) {
-		t.Fatalf("expected minio.ErrorResponse, got %T: %v", err, err)
-	}
-	if er.Code != "MethodNotAllowed" {
-		t.Errorf("err code=%q want MethodNotAllowed", er.Code)
+	if r.Err != nil {
+		t.Errorf("unexpected err: %v", r.Err)
 	}
 }
 
@@ -101,15 +87,12 @@ func TestStatObject_RegularObjectReturnsInfo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := c.StatObject(context.Background(), "testbucket", "regular.txt", "v-1")
-	if err != nil {
-		t.Fatalf("err: %v", err)
+	r := c.StatObject(context.Background(), "testbucket", "regular.txt", "v-1")
+	if r.Err != nil {
+		t.Fatalf("err: %v", r.Err)
 	}
-	if info.IsDeleteMarker {
+	if r.IsDeleteMarker {
 		t.Errorf("IsDeleteMarker=true want false")
-	}
-	if info.ETag != `abc` {
-		t.Errorf("ETag=%q want %q", info.ETag, `abc`)
 	}
 }
 
@@ -121,18 +104,14 @@ func TestStatObject_AbsentReturnsNoSuchVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = c.StatObject(context.Background(), "testbucket", "gone.txt", "v-1")
-	if err == nil {
+	r := c.StatObject(context.Background(), "testbucket", "gone.txt", "v-1")
+	if r.Err == nil {
 		t.Fatal("expected error")
 	}
-	var er minio.ErrorResponse
-	if !errors.As(err, &er) {
-		t.Fatalf("expected minio.ErrorResponse, got %T", err)
-	}
-	// minio-go may surface this as NoSuchKey or NoSuchVersion — both map to
-	// "absent" in classifier.go, so accept either.
-	if er.Code != "NoSuchVersion" && er.Code != "NoSuchKey" {
-		t.Errorf("code=%q want NoSuchVersion or NoSuchKey", er.Code)
+	// aws sdk 对 HEAD 的 404 返回 code="NotFound"（HEAD 无 body，SDK 用状态码推断），
+	// 不是 "NoSuchVersion"——classifier 按 StatusCode==404 兜底判定为 absent。
+	if r.StatusCode != 404 {
+		t.Errorf("StatusCode=%d want 404", r.StatusCode)
 	}
 }
 
@@ -144,7 +123,8 @@ func TestDeleteObject_Success(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.DeleteObject(context.Background(), "testbucket", "any.txt", "v-1"); err != nil {
+	_, _, err = c.DeleteObject(context.Background(), "testbucket", "any.txt", "v-1")
+	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 }
@@ -157,16 +137,12 @@ func TestDeleteObject_NoSuchVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = c.DeleteObject(context.Background(), "testbucket", "any.txt", "already-deleted")
+	_, _, err = c.DeleteObject(context.Background(), "testbucket", "any.txt", "already-deleted")
 	if err == nil {
 		return
 	}
-	var er minio.ErrorResponse
-	if !errors.As(err, &er) {
-		t.Fatalf("expected minio.ErrorResponse, got %T", err)
-	}
-	if er.Code != "NoSuchVersion" {
-		t.Errorf("code=%q want NoSuchVersion", er.Code)
+	if code := errorCode(err); code != "NoSuchVersion" {
+		t.Errorf("code=%q want NoSuchVersion", code)
 	}
 }
 

@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-
-	"github.com/minio/minio-go/v7"
 )
 
 // Row 是输入文件解析后的一行——bkt / key / versionID 三段。
@@ -155,17 +153,12 @@ scanDone:
 // handleCheck HEAD 一行，三态分类写 check_results.txt；失败写 head_failed。
 func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *Stats) {
 	stats.IncrProcessed()
-	info, err := c.StatObject(ctx, r.Bkt, r.Key, r.VersionID)
-	state, ok := classifyHead(info, err)
+	result := c.StatObject(ctx, r.Bkt, r.Key, r.VersionID)
+	state, ok := classifyHead(result)
 	if !ok {
 		stats.IncrHeadFailed()
 		out.WriteHeadFailed(r.Bkt, r.outputKey(), r.VersionID)
-		var er minio.ErrorResponse
-		if errors.As(err, &er) {
-			out.WriteHeadFailedLog(r.Bkt, r.Key, r.VersionID, er.StatusCode, er.Code, er.RequestID, err)
-		} else {
-			out.WriteHeadFailedLog(r.Bkt, r.Key, r.VersionID, 0, "", "", err)
-		}
+		out.WriteHeadFailedLog(r.Bkt, r.Key, r.VersionID, result.StatusCode, errorCode(result.Err), result.RequestID, result.Err)
 		return
 	}
 	switch state {
@@ -183,23 +176,18 @@ func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *St
 // 其他失败写 delete_failed + log。
 func handleDelete(ctx context.Context, c *S3Client, r Row, out *Output, stats *Stats) {
 	stats.IncrProcessed()
-	err := c.DeleteObject(ctx, r.Bkt, r.Key, r.VersionID)
+	statusCode, requestID, err := c.DeleteObject(ctx, r.Bkt, r.Key, r.VersionID)
 	if err == nil {
 		stats.IncrDeleted()
 		out.WriteDeleted(r.Bkt, r.outputKey(), r.VersionID)
 		return
 	}
-	var er minio.ErrorResponse
-	if errors.As(err, &er) && (er.Code == "NoSuchVersion" || er.Code == "NoSuchKey") {
+	if code := errorCode(err); code == "NoSuchVersion" || code == "NoSuchKey" {
 		stats.IncrDeleted()
 		out.WriteDeleted(r.Bkt, r.outputKey(), r.VersionID)
 		return
 	}
 	stats.IncrDeleteFailed()
 	out.WriteDeleteFailed(r.Bkt, r.outputKey(), r.VersionID)
-	if errors.As(err, &er) {
-		out.WriteDeleteFailedLog(r.Bkt, r.Key, r.VersionID, er.StatusCode, er.Code, er.RequestID, err)
-	} else {
-		out.WriteDeleteFailedLog(r.Bkt, r.Key, r.VersionID, 0, "", "", err)
-	}
+	out.WriteDeleteFailedLog(r.Bkt, r.Key, r.VersionID, statusCode, errorCode(err), requestID, err)
 }

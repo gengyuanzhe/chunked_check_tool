@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -11,8 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 func skipIfNoMinIO(t *testing.T) (endpoint, ak, sk string) {
@@ -26,55 +30,62 @@ func skipIfNoMinIO(t *testing.T) (endpoint, ak, sk string) {
 	return
 }
 
-func newMinIOAdminClient(t *testing.T, endpoint, ak, sk string) *minio.Client {
+func newAdminClient(t *testing.T, endpoint, ak, sk string) *s3.Client {
 	t.Helper()
-	c, err := minio.New(endpoint, &minio.Options{
-		Creds:        credentials.NewStaticV4(ak, sk, ""),
-		Secure:       false,
-		BucketLookup: minio.BucketLookupPath,
-	})
+	awscfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, "")),
+		awsconfig.WithRegion("us-east-1"),
+	)
 	if err != nil {
-		t.Fatalf("minio.New: %v", err)
+		t.Fatalf("aws config: %v", err)
 	}
-	return c
+	return s3.NewFromConfig(awscfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+		o.UsePathStyle = true
+	})
 }
 
-func setupBucket(t *testing.T, c *minio.Client, bucket string) {
+func setupBucket(t *testing.T, c *s3.Client, bucket string) {
 	t.Helper()
 	ctx := context.Background()
-	exists, err := c.BucketExists(ctx, bucket)
+	_, err := c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
 	if err != nil {
-		t.Fatalf("BucketExists: %v", err)
+		// bucket already exists is fine
 	}
-	if !exists {
-		if err := c.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
-			t.Fatalf("MakeBucket: %v", err)
-		}
-	}
-	if err := c.SetBucketVersioning(ctx, bucket, minio.BucketVersioningConfiguration{
-		Status: "Enabled",
-	}); err != nil {
-		t.Fatalf("SetBucketVersioning: %v", err)
+	_, err = c.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+		Bucket: aws.String(bucket),
+		VersioningConfiguration: &s3types.VersioningConfiguration{Status: s3types.BucketVersioningStatusEnabled},
+	})
+	if err != nil {
+		t.Fatalf("PutBucketVersioning: %v", err)
 	}
 }
 
-func teardownBucket(t *testing.T, c *minio.Client, bucket string) {
+func teardownBucket(t *testing.T, c *s3.Client, bucket string) {
 	t.Helper()
 	ctx := context.Background()
-	ch := c.ListObjects(ctx, bucket, minio.ListObjectsOptions{
-		WithVersions: true, Recursive: true, MaxKeys: 1000,
+	paginator := s3.NewListObjectVersionsPaginator(c, &s3.ListObjectVersionsInput{
+		Bucket: aws.String(bucket), MaxKeys: aws.Int32(1000),
 	})
-	var toDelete []minio.ObjectInfo
-	for obj := range ch {
-		if obj.Err != nil {
+	for paginator.HasMorePages() {
+		out, err := paginator.NextPage(ctx)
+		if err != nil {
 			break
 		}
-		toDelete = append(toDelete, obj)
+		for i := range out.Versions {
+			v := out.Versions[i]
+			_, _ = c.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(bucket), Key: v.Key, VersionId: v.VersionId,
+			})
+		}
+		for i := range out.DeleteMarkers {
+			v := out.DeleteMarkers[i]
+			_, _ = c.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(bucket), Key: v.Key, VersionId: v.VersionId,
+			})
+		}
 	}
-	for _, obj := range toDelete {
-		_ = c.RemoveObject(ctx, bucket, obj.Key, minio.RemoveObjectOptions{VersionID: obj.VersionID})
-	}
-	_ = c.RemoveBucket(ctx, bucket)
+	_, _ = c.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
 }
 
 func writeCfgAndInput(t *testing.T, dir, endpoint, ak, sk string, rows []string) (cfgPath, inputPath string) {
@@ -102,68 +113,81 @@ func writeCfgAndInput(t *testing.T, dir, endpoint, ak, sk string, rows []string)
 	return
 }
 
-func findMarkerVID(t *testing.T, c *minio.Client, bucket, key string) string {
+func findMarkerVID(t *testing.T, c *s3.Client, bucket, key string) string {
 	t.Helper()
 	ctx := context.Background()
-	ch := c.ListObjects(ctx, bucket, minio.ListObjectsOptions{
-		Prefix: key, WithVersions: true, Recursive: true,
+	out, err := c.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+		Bucket: aws.String(bucket), Prefix: aws.String(key),
 	})
-	for obj := range ch {
-		if obj.Err != nil {
-			break
-		}
-		if obj.IsDeleteMarker {
-			return obj.VersionID
+	if err != nil {
+		return ""
+	}
+	for i := range out.DeleteMarkers {
+		if aws.ToString(out.DeleteMarkers[i].Key) == key {
+			return aws.ToString(out.DeleteMarkers[i].VersionId)
 		}
 	}
 	return ""
 }
 
-func findLatestVID(t *testing.T, c *minio.Client, bucket, key string) string {
+func findLatestVID(t *testing.T, c *s3.Client, bucket, key string) string {
 	t.Helper()
 	ctx := context.Background()
-	ch := c.ListObjects(ctx, bucket, minio.ListObjectsOptions{
-		Prefix: key, WithVersions: true, Recursive: true,
+	out, err := c.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+		Bucket: aws.String(bucket), Prefix: aws.String(key),
 	})
-	for obj := range ch {
-		if obj.Err != nil {
-			break
+	if err != nil {
+		return ""
+	}
+	for i := range out.Versions {
+		if aws.ToString(out.Versions[i].Key) == key {
+			return aws.ToString(out.Versions[i].VersionId)
 		}
-		return obj.VersionID
 	}
 	return ""
+}
+
+func putObject(t *testing.T, c *s3.Client, bucket, key, content string) {
+	t.Helper()
+	_, err := c.PutObject(context.Background(), &s3.PutObjectInput{
+		Bucket: aws.String(bucket), Key: aws.String(key),
+		Body: bytes.NewReader([]byte(content)),
+	})
+	if err != nil {
+		t.Fatalf("PutObject %s: %v", key, err)
+	}
+}
+
+func removeObject(t *testing.T, c *s3.Client, bucket, key string) {
+	t.Helper()
+	_, err := c.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+		Bucket: aws.String(bucket), Key: aws.String(key),
+	})
+	if err != nil {
+		t.Fatalf("DeleteObject %s: %v", key, err)
+	}
 }
 
 func TestIntegration_ModeCheck_ThreeStatesOnRealMinIO(t *testing.T) {
 	endpoint, ak, sk := skipIfNoMinIO(t)
-	admin := newMinIOAdminClient(t, endpoint, ak, sk)
+	admin := newAdminClient(t, endpoint, ak, sk)
 	bucket := fmt.Sprintf("cleanup-tool-it-%d", time.Now().UnixNano())
 	setupBucket(t, admin, bucket)
 	defer teardownBucket(t, admin, bucket)
 
-	ctx := context.Background()
-	if _, err := admin.PutObject(ctx, bucket, "marker.txt", strings.NewReader("v1"), 2, minio.PutObjectOptions{}); err != nil {
-		t.Fatalf("Put marker.txt v1: %v", err)
-	}
-	if err := admin.RemoveObject(ctx, bucket, "marker.txt", minio.RemoveObjectOptions{}); err != nil {
-		t.Fatalf("Remove marker.txt (creates marker): %v", err)
-	}
-	if _, err := admin.PutObject(ctx, bucket, "regular.txt", strings.NewReader("v1"), 2, minio.PutObjectOptions{}); err != nil {
-		t.Fatalf("Put regular.txt: %v", err)
-	}
-	if _, err := admin.PutObject(ctx, bucket, "gone.txt", strings.NewReader("v1"), 2, minio.PutObjectOptions{}); err != nil {
-		t.Fatalf("Put gone.txt: %v", err)
-	}
-	// gone.txt: list all versions and delete each (object fully gone)
+	putObject(t, admin, bucket, "marker.txt", "v1")
+	removeObject(t, admin, bucket, "marker.txt") // creates delete marker
+	putObject(t, admin, bucket, "regular.txt", "v1")
+	putObject(t, admin, bucket, "gone.txt", "v1")
+	// gone.txt: delete all versions so object is fully gone
 	{
-		ch := admin.ListObjects(ctx, bucket, minio.ListObjectsOptions{
-			Prefix: "gone.txt", WithVersions: true, Recursive: true,
+		out, _ := admin.ListObjectVersions(context.Background(), &s3.ListObjectVersionsInput{
+			Bucket: aws.String(bucket), Prefix: aws.String("gone.txt"),
 		})
-		for obj := range ch {
-			if obj.Err != nil {
-				break
-			}
-			_ = admin.RemoveObject(ctx, bucket, obj.Key, minio.RemoveObjectOptions{VersionID: obj.VersionID})
+		for i := range out.Versions {
+			_, _ = admin.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+				Bucket: aws.String(bucket), Key: out.Versions[i].Key, VersionId: out.Versions[i].VersionId,
+			})
 		}
 	}
 
@@ -180,10 +204,6 @@ func TestIntegration_ModeCheck_ThreeStatesOnRealMinIO(t *testing.T) {
 	rows := []string{
 		fmt.Sprintf("%s\x1fmarker.txt\x1f%s", bucket, markerVID),
 		fmt.Sprintf("%s\x1fregular.txt\x1f%s", bucket, regularVID),
-		// gone.txt has no versions; HEAD with a valid-format-but-nonexistent UUID
-		// returns 404 NoSuchKey or NoSuchVersion (MinIO returns NoSuchKey when the
-		// object has no versions at all). Use a valid UUID format — MinIO rejects
-		// malformed version IDs with 400 InvalidArgument before checking existence.
 		fmt.Sprintf("%s\x1fgone.txt\x1f00000000-0000-0000-0000-000000000000", bucket),
 	}
 	cfgPath, inputPath := writeCfgAndInput(t, dir, endpoint, ak, sk, rows)
@@ -207,20 +227,15 @@ func TestIntegration_ModeCheck_ThreeStatesOnRealMinIO(t *testing.T) {
 
 func TestIntegration_ModeDelete_ThenReCheckAbsent(t *testing.T) {
 	endpoint, ak, sk := skipIfNoMinIO(t)
-	admin := newMinIOAdminClient(t, endpoint, ak, sk)
+	admin := newAdminClient(t, endpoint, ak, sk)
 	bucket := fmt.Sprintf("cleanup-tool-it-%d", time.Now().UnixNano())
 	setupBucket(t, admin, bucket)
 	defer teardownBucket(t, admin, bucket)
 
-	ctx := context.Background()
 	keys := []string{"del1.txt", "del2.txt", "del3.txt"}
 	for _, k := range keys {
-		if _, err := admin.PutObject(ctx, bucket, k, strings.NewReader("v1"), 2, minio.PutObjectOptions{}); err != nil {
-			t.Fatalf("Put %s: %v", k, err)
-		}
-		if err := admin.RemoveObject(ctx, bucket, k, minio.RemoveObjectOptions{}); err != nil {
-			t.Fatalf("Remove %s: %v", k, err)
-		}
+		putObject(t, admin, bucket, k, "v1")
+		removeObject(t, admin, bucket, k) // creates delete marker
 	}
 	var rows []string
 	for _, k := range keys {

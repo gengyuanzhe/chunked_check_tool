@@ -18,7 +18,7 @@
 ## 2. 技术栈
 
 - Go 1.27（`go.mod` module `delete_marker_cleanup_tool`）
-- `github.com/minio/minio-go/v7 v7.3.0`（**Pin 不升级**——HEAD-on-delete-marker 的 405 行为按 v7.3.0 校准；升级需回归验证）
+- `github.com/aws/aws-sdk-go-v2/config` + `service/s3` v1.114.10、`smithy-go` v1.28.9（**Pin 不升级**——HEAD-on-delete-marker 的 405 + `x-amz-delete-marker: true` 行为按 aws-sdk-go-v2 v1.114.10 校准；升级需回归验证）
 - `gopkg.in/yaml.v3`（配置）
 - TLS：`scheme=https` 时 `InsecureSkipVerify=true`（对齐 lister / chunked_check_tool）
 
@@ -28,8 +28,8 @@
 |---|---|
 | `main.go` | flag 解析（`-c`/`-mode`/`-input`）、`run` 编排、run.log 打开（第一个 open）、配置快照打印（sk 掩码）、`readFirstRowBucket` 预检、summary 打印。无信号处理器 |
 | `config.go` | `Config` 结构体 + `LoadConfig`（YAML，带默认值 + 校验 + 时间戳后缀重写）。无 `list_type` / `list_concurrency`，新增 `op_concurrency` |
-| `s3client.go` | `S3Client`（minio.Client 包装）、`StatObject(ctx, bkt, key, vid)`、`DeleteObject(ctx, bkt, key, vid)`、`BucketExists`。transport 调优对齐 lister |
-| `classifier.go` | `classifyHead(info, err) (state, ok)`——HEAD 响应到三态的映射；同时处理 `(info, nil)` 与 `(info, MethodNotAllowed err)` 两条路径 |
+| `s3client.go` | `S3Client`（s3.Client 包装）、`StatObject(ctx, bkt, key, vid) HeadResult`、`DeleteObject(ctx, bkt, key, vid) (statusCode, requestID, err)`、`BucketExists`。transport 调优对齐 lister |
+| `classifier.go` | `classifyHead(HeadResult) (state, ok)`——HEAD 响应到三态的映射；`HeadResult.IsDeleteMarker` 已由 `headResultFromErr` 从 405 + `x-amz-delete-marker: true` 推断；StatusCode==404 兜底判 absent（AWS SDK 对 HEAD 404 返回 code="NotFound"） |
 | `worker.go` | `Row{Bkt, Key, VersionID}`、`ParseRow(line, basename) (Row, bool)`（basename=`invalid_keys.txt` 时 URL 解码 key）、`RunWorkers` worker pool、`handleCheck` / `handleDelete` |
 | `output.go` | `Output`：mode check 四个 writer goroutine（check_results / head_failed / head_failed.log / 日志）+ mode delete 三个（deleted / delete_failed / delete_failed.log）；惰性 failed 文件；3 秒定时 flush |
 | `stats.go` | atomic.Int64 计数器 + `PrintSummary(w, mode)` 按模式切格式 |
@@ -42,14 +42,12 @@
 2. **`version_id` 字面量 `"null"` 是合法值**：S3 开版本控制前写入的旧对象返回字面量字符串 `"null"`。**原样透传**到 HEAD / DELETE，不要当空值。`ParseRow` 不做特殊处理。
 
 3. **mode 三态判别不可放宽**（`classifier.go`）：
-   - `err == nil && info.IsDeleteMarker` → `marker`
-   - `err == nil && !info.IsDeleteMarker` → `not_marker`
-   - `err` 是 `NoSuchKey` / `NoSuchVersion` → `absent`
-   - `err.Code == "MethodNotAllowed"` → `marker`（**无条件**——防御性：minio-go 不一定在 error path 填 `IsDeleteMarker`）
-   - `err.StatusCode == 405`（bare 405，`Code != "MethodNotAllowed"`）→ `marker`（自研 S3 兜底：minio-go 在 HEAD 无 body 时把 bare 405 包装成 `ErrorResponse{Code:"405 Method Not Allowed"}`，按 StatusCode==405 兜底）
+   - `r.Err == nil && r.IsDeleteMarker` → `marker`（`headResultFromErr` 已把 405 + `x-amz-delete-marker: true` 转成 `IsDeleteMarker=true, Err=nil`）
+   - `r.Err == nil && !r.IsDeleteMarker` → `not_marker`
+   - `errorCode(r.Err) ∈ {"NoSuchKey", "NoSuchVersion"}` → `absent`
+   - `r.StatusCode == 404` → `absent`（兜底：AWS SDK 对 HEAD 404 返回 code="NotFound"，HEAD 无 body，SDK 用状态码推断）
    - 其他错误 → `(state="", ok=false)`，路由到 `head_failed.txt`
-   - **不可**把 405 改成基于 `info.IsDeleteMarker` 判别——S3 spec 上 MethodNotAllowed on HEAD 只对 delete marker 版本返回，逻辑等价但实测 minio-go 在 error path 上可能不填 IsDeleteMarker
-   - **不可**砍掉 `StatusCode==405` 兜底分支——自研 S3 可能不带 `x-amz-delete-marker` 头，整批 check 会 100% head_failed
+   - **不可**砍掉 `StatusCode==404` 兜底分支——AWS SDK 对 HEAD 404 不返回 `NoSuchVersion` code，仅按状态码推断，去掉会 100% head_failed
 
 4. **mode delete 的 NoSuchVersion/NoSuchKey 算成功**：删除按 version-id 幂等，第二次删同一版本服务端返回 404；本工具把 `NoSuchKey` / `NoSuchVersion` 计入 `deleted.txt` 而非 `delete_failed.txt`。**不可**改成失败——会破坏"幂等空操作"语义。
 
@@ -77,7 +75,7 @@
 
 - 单 `package main`，独立 `go.mod`，与 lister / chunked_check_tool 平级
 - HTTP transport 调优对齐 lister：`MaxIdleConnsPerHost: 32`、`IdleConnTimeout: 90s`、`dial_timeout` 默认 10s 兜底黑洞 IP、optional `ResponseHeaderTimeout`
-- `BucketLookup: minio.BucketLookupPath`
+- `UsePathStyle: true`
 - 无 `-concurrency` flag（并发从 config 读），无 `-dry-run` / `-confirm` flag
 - 未知 YAML 字段被忽略——可复用 lister / chunked_check_tool 的 config.yaml
 - 集成测试用 `//go:build integration` tag 隔离，env `MINIO_ENDPOINT` / `MINIO_AK` / `MINIO_SK` 三选一缺即 `t.Skip`
@@ -92,7 +90,7 @@
 
 4. **mode delete 不重新校验**：依赖 input 来自 lister 输出。若用户手动构造 input，可能删错版本。文档约束 + 用户工作流保证，不强制校验。
 
-5. **HEAD-on-delete-marker 的 405 判别依赖 minio-go v7.3.0 行为**：minio-go 对 HEAD delete marker 返回 `(ObjectInfo, MethodNotAllowed err)` 而非 `(ObjectInfo, nil)`。升级 minio-go 需回归 `classifier.go` 的 MethodNotAllowed 分支是否仍必要。
+5. **HEAD-on-delete-marker 的 405 判别依赖 aws-sdk-go-v2 v1.114.10 行为**：AWS SDK 对 HEAD delete marker 返回 `*awshttp.ResponseError{StatusCode:405}` + `x-amz-delete-marker: true` 头，`headResultFromErr` 据此把 `IsDeleteMarker=true, Err=nil`。升级 aws-sdk-go-v2 需回归此分支——SDK 内部错误封装如改结构会断 IsDeleteMarker 推断。
 
 ## 7. 相关文档
 

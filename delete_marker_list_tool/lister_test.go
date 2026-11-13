@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func readFile(t *testing.T, p string) string {
@@ -81,9 +82,131 @@ func TestLister_Mode1_HappyPath(t *testing.T) {
 	}
 }
 
+// TestLister_Mode2_KeyEndingInSlashWithNullVersion 验证以 "/" 结尾、
+// VersionId="null" 的真实 key 不被 isCommonPrefix 误判成目录占位。
+// 回归用例：自研 S3 上存在 `94-abc-0/` 这种 key，version=null，
+// mode 2 原本会因 HasSuffix(Key,"/") 把它当 common prefix stub 跳过，
+// 导致 scanned_versions 漏统计（mode 1 不走 delimited，没此问题）。
+func TestLister_Mode2_KeyEndingInSlashWithNullVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if !q.Has("versions") {
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+			return
+		}
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix><IsTruncated>false</IsTruncated>
+<DeleteMarker><Key>94-abc-0/</Key><VersionId>null</VersionId><IsLatest>true</IsLatest></DeleteMarker>
+</ListVersionsResult>`))
+	}))
+	defer srv.Close()
+	cfg := &Config{
+		Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s",
+		ListType: 2, ListConcurrency: 1,
+		OutputDir: filepath.Join(t.TempDir(), "out"), OutputDirTimestamp: false,
+	}
+	dir := cfg.OutputDir
+	client, err := NewS3Client(cfg, srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := NewOutput(cfg, "testbucket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stats Stats
+	progress := NewProgressPrinter(&strings.Builder{})
+	l := NewLister(cfg, client, out, &stats, progress)
+	if err := l.Run(context.Background(), "testbucket", ""); err != nil {
+		t.Fatal(err)
+	}
+	out.FlushAndWait()
+	out.Close()
+
+	// 期望：1 个真实版本（key 以 / 结尾但 VersionId=null，不是 common prefix stub），
+	// 1 个 delete marker。
+	if got, want := stats.Snapshot().ScannedVersions, int64(1); got != want {
+		t.Errorf("ScannedVersions=%d, want %d (key ending in / with VersionId=null is a real version, not a common prefix stub)", got, want)
+	}
+	if got, want := stats.Snapshot().DeleteMarkers, int64(1); got != want {
+		t.Errorf("DeleteMarkers=%d, want %d", got, want)
+	}
+
+	b := readFile(t, filepath.Join(dir, "delete_markers.txt"))
+	wantLine := "testbucket\x1f94-abc-0/\x1fnull"
+	if !strings.Contains(b, wantLine) {
+		t.Errorf("delete_markers.txt missing %q: got %q", wantLine, b)
+	}
+}
+
+// TestLister_Mode2_KeyEndingInSlashAsVersion 验证服务端把以 "/" 结尾的 key
+// 当 <Version>（非 <DeleteMarker>）返回、且无 VersionId 时，isCommonPrefix 的
+// 四条件全成立（VersionID=="" && !IsDeleteMarker && ETag=="" && HasSuffix /），
+// 会被误判成 common prefix stub 跳过 scanned_versions——这是 mode 2 漏统计的根因。
+// mode 1 不走 delimited，不会触发 isCommonPrefix，所以不会漏。
+func TestLister_Mode2_KeyEndingInSlashAsVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if !q.Has("versions") {
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+			return
+		}
+		// key 以 / 结尾，作为 <Version> 返回（非 delete marker），无 VersionId/ETag。
+		// 曾经 minio-go 把它误解析成 common prefix（四条件合取启发式），导致 mode 2 漏统计；
+		// AWS SDK 按 XML 标签区分 Version 与 CommonPrefixes，本测试是回归保险。
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix><IsTruncated>false</IsTruncated>
+<Version><Key>94-abc-0/</Key><IsLatest>true</IsLatest></Version>
+</ListVersionsResult>`))
+	}))
+	defer srv.Close()
+	cfg := &Config{
+		Endpoints: []string{srv.URL}, Scheme: "http", AK: "a", SK: "s",
+		ListType: 2, ListConcurrency: 1,
+		OutputDir: filepath.Join(t.TempDir(), "out"), OutputDirTimestamp: false,
+	}
+	client, err := NewS3Client(cfg, srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := NewOutput(cfg, "testbucket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stats Stats
+	progress := NewProgressPrinter(&strings.Builder{})
+	l := NewLister(cfg, client, out, &stats, progress)
+	// 加超时防死循环——bug 路径下 isCommonPrefix 误判 → 入队 94-abc-0/ →
+	// worker 重列该前缀 → 服务端又返回同样的 key → 再入队…… 永不终止。
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := l.Run(ctx, "testbucket", ""); err != nil {
+		t.Fatal(err)
+	}
+	out.FlushAndWait()
+	out.Close()
+
+	// 期望：1 个真实版本被统计。bug：isCommonPrefix 误判 → 死循环，scanned_versions=0。
+	if got, want := stats.Snapshot().ScannedVersions, int64(1); got != want {
+		t.Errorf("ScannedVersions=%d, want %d (key ending in / as <Version> is a real version, not a common prefix stub)", got, want)
+	}
+}
+
 // newMode2BFSServer: 按 query prefix 返回不同 XML。
-// prefix="" → DeleteMarker(a.txt) + CommonPrefixes(sub/)
-// prefix="sub/" → DeleteMarker(sub/c.txt)
+// prefix="" → DeleteMarker(a.txt, dm-a) + Version(a.txt, reg-a) + CommonPrefixes(sub/)
+// prefix="sub/" → DeleteMarker(sub/c.txt, dm-c)
 func newMode2BFSServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -119,6 +242,7 @@ func newMode2BFSServer(t *testing.T) *httptest.Server {
 <ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
 <Name>testbucket</Name><Prefix></Prefix><IsTruncated>false</IsTruncated>
 <DeleteMarker><Key>a.txt</Key><VersionId>dm-a</VersionId><IsLatest>true</IsLatest></DeleteMarker>
+<Version><Key>a.txt</Key><VersionId>reg-a</VersionId><IsLatest>false</IsLatest><ETag>"e"</ETag><Size>1</Size></Version>
 <CommonPrefixes><Prefix>sub/</Prefix></CommonPrefixes>
 </ListVersionsResult>`))
 		} else {
@@ -157,10 +281,13 @@ func TestLister_Mode2_BFSWithCommonPrefix(t *testing.T) {
 	out.FlushAndWait()
 	out.Close()
 
-	// scanned_versions 必须只计真实版本（2 个 delete marker），不含
-	// common-prefix stub（sub/）。bug：原先 stub 也被算进去，得 3。
-	if got := stats.Snapshot().ScannedVersions; got != 2 {
-		t.Errorf("ScannedVersions=%d, want 2 (real versions only, no common-prefix stubs)", got)
+	// scanned_versions 必须统计所有版本（dm-a, reg-a, dm-c = 3），不含
+	// common-prefix stub（sub/）。delete_markers 只统计 delete marker（2）。
+	if got, want := stats.Snapshot().ScannedVersions, int64(3); got != want {
+		t.Errorf("ScannedVersions=%d, want %d (markers + regular versions, no common-prefix stubs)", got, want)
+	}
+	if got, want := stats.Snapshot().DeleteMarkers, int64(2); got != want {
+		t.Errorf("DeleteMarkers=%d, want %d", got, want)
 	}
 
 	b := readFile(t, filepath.Join(dir, "delete_markers.txt"))
@@ -182,3 +309,4 @@ func TestLister_Mode2_BFSWithCommonPrefix(t *testing.T) {
 		}
 	}
 }
+

@@ -5,8 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/minio/minio-go/v7"
 )
 
 func newFakeVersionedS3(t *testing.T, versionsXML string) (*httptest.Server, string) {
@@ -51,13 +49,15 @@ func TestListVersions_OneMarkerOneVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ch := c.ListVersions(context.Background(), "testbucket", "", true)
-	var got []minio.ObjectInfo
-	for obj := range ch {
+	vc, pc := c.ListVersions(context.Background(), "testbucket", "", true)
+	var got []VersionEntry
+	for obj := range vc {
 		if obj.Err != nil {
 			t.Fatalf("unexpected err: %v", obj.Err)
 		}
 		got = append(got, obj)
+	}
+	for range pc {
 	}
 	if len(got) != 2 {
 		t.Fatalf("got %d entries, want 2", len(got))
@@ -83,14 +83,16 @@ func TestListVersions_ServerError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ch := c.ListVersions(context.Background(), "testbucket", "", true)
+	vc, pc := c.ListVersions(context.Background(), "testbucket", "", true)
 	var errCount int
 	var got int
-	for obj := range ch {
+	for obj := range vc {
 		got++
 		if obj.Err != nil {
 			errCount++
 		}
+	}
+	for range pc {
 	}
 	if got == 0 {
 		t.Errorf("expected at least one entry (the error), got 0")

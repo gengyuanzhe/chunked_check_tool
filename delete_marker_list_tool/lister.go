@@ -3,11 +3,10 @@ package main
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"sync/atomic"
 
-	"github.com/minio/minio-go/v7"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )
 
 // Lister 驱动两种 mode 的列举。
@@ -37,21 +36,25 @@ func (l *Lister) Run(ctx context.Context, bucket, prefix string) error {
 
 // runMode1: 单流递归。流中断记 list_failed + 返回 error。
 func (l *Lister) runMode1(ctx context.Context, bucket, prefix string) error {
-	ch := l.client.ListVersions(ctx, bucket, prefix, true)
+	vc, pc := l.client.ListVersions(ctx, bucket, prefix, true)
 	var localCount int
 	interval := l.progress.Interval()
-	for obj := range ch {
+	// recursive=true 不会有 common prefix；pc 单独排空防 goroutine 泄漏。
+	pcClosed := make(chan struct{})
+	go func() {
+		for range pc {
+		}
+		close(pcClosed)
+	}()
+	for obj := range vc {
 		if obj.Err != nil {
 			l.recordListFailed(prefix, obj.Err)
 			l.stats.IncrListFailed()
+			<-pcClosed
 			return obj.Err
 		}
 		l.stats.IncrScannedVersions()
 		localCount++
-		if l.isCommonPrefix(obj) {
-			// recursive=true 不会吐 common prefix，但兜底跳过。
-			continue
-		}
 		if obj.IsDeleteMarker {
 			l.out.WriteDeleteMarker(obj.Key, obj.VersionID)
 			l.stats.IncrDeleteMarkers()
@@ -62,20 +65,19 @@ func (l *Lister) runMode1(ctx context.Context, bucket, prefix string) error {
 		}
 	}
 	l.progress.MaybePrint(l.stats, "scanned", localCount)
+	<-pcClosed
 	return nil
 }
 
 // runMode2: BFS delimiter 并发。
 func (l *Lister) runMode2(ctx context.Context, bucket, prefix string) error {
 	q := newQueue()
-	var inflight atomic.Int64 // 替代 WaitGroup——需要能读计数做进度 + 终止判断
+	var inflight atomic.Int64
 
-	// 进度队列快照回调。
 	l.progress.SetQueueSnapshotProvider(func() QueueSnapshot {
 		return QueueSnapshot{Prefix: q.Len(), Inflight: int(inflight.Load())}
 	})
 
-	// seed: 入队前先 Add，保持 Add-before-Push 终止不变量。
 	inflight.Add(1)
 	q.Push(prefix)
 
@@ -99,8 +101,6 @@ func (l *Lister) runMode2(ctx context.Context, bucket, prefix string) error {
 		}()
 	}
 
-	// inflight 归零后 SignalDone，唤醒阻塞在 Pop 的 worker。
-	// 用一个 watcher goroutine 轮询——inflight 在 ms 级变化，100ms 轮询够快。
 	wgDone := make(chan struct{})
 	go func() {
 		defer close(wgDone)
@@ -123,22 +123,29 @@ func (l *Lister) runMode2(ctx context.Context, bucket, prefix string) error {
 }
 
 // processPrefix 处理一个前缀：消费版本化列举流，分类条目。
+// AWS SDK 把 <Version>/<DeleteMarker>/<CommonPrefixes> 解析到独立 slice，
+// ListVersions 返回两个 channel：vc（版本，含 marker）+ pc（common prefix）。
+// 不再有 isCommonPrefix 启发式——key 以 / 结尾的真实版本不会被误判。
 func (l *Lister) processPrefix(ctx context.Context, bucket, prefix string, q *queue, inflight *atomic.Int64, lc *localCounter) {
 	defer inflight.Add(-1)
 	interval := l.progress.Interval()
-	ch := l.client.ListVersions(ctx, bucket, prefix, false) // delimited
-	for obj := range ch {
+	vc, pc := l.client.ListVersions(ctx, bucket, prefix, false)
+	// pc 由独立 goroutine 排空并把 common prefix 入队——vc、pc 独立消费，
+	// 不互相阻塞。vc 排空即该前缀完成。
+	pcDone := make(chan struct{})
+	go func() {
+		for p := range pc {
+			inflight.Add(1)
+			q.Push(p)
+		}
+		close(pcDone)
+	}()
+	for obj := range vc {
 		if obj.Err != nil {
 			l.recordListFailed(prefix, obj.Err)
 			l.stats.IncrListFailed()
-			return // 该前缀失败，继续扫其他前缀
-		}
-		if l.isCommonPrefix(obj) {
-			// common prefix stub：不计入 scanned_versions，只入队继续 BFS。
-			// 与 mode 1 语义对齐——scanned_versions 只算真实版本。
-			inflight.Add(1)
-			q.Push(obj.Key)
-			continue
+			<-pcDone
+			return
 		}
 		l.stats.IncrScannedVersions()
 		lc.count++
@@ -151,25 +158,17 @@ func (l *Lister) processPrefix(ctx context.Context, bucket, prefix string, q *qu
 			lc.count = 0
 		}
 	}
-}
-
-// isCommonPrefix 判别 common prefix 条目。
-// minio channel API 把 common prefix 作为 ObjectInfo{Key: ".../"} 吐出，
-// 其余字段全空。四条件合取——误判前缀为版本会漏扫子目录，误判版本为
-// 前缀会死循环。详见设计文档 §4.2。
-func (l *Lister) isCommonPrefix(o minio.ObjectInfo) bool {
-	return o.VersionID == "" && !o.IsDeleteMarker && o.ETag == "" && strings.HasSuffix(o.Key, "/")
+	<-pcDone
 }
 
 // recordListFailed 从 err 提取 HTTP/S3 code + reqID，写 list_failed.txt + log。
 func (l *Lister) recordListFailed(prefix string, err error) {
-	var er minio.ErrorResponse
-	if errors.As(err, &er) {
+	var re *awshttp.ResponseError
+	if errors.As(err, &re) {
 		l.out.WriteListFailed(prefix)
-		l.out.WriteListFailedLog(prefix, er.StatusCode, er.Code, er.RequestID, err)
+		l.out.WriteListFailedLog(prefix, re.Response.StatusCode, "", re.Response.Header.Get("x-amz-request-id"), err)
 		return
 	}
-	// 非 S3 ErrorResponse（传输层错误等）。
 	l.out.WriteListFailed(prefix)
 	l.out.WriteListFailedLog(prefix, 0, "", "", err)
 }

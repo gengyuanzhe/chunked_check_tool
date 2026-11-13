@@ -13,11 +13,11 @@
 ## 2. 技术栈
 
 - Go 1.27（`go.mod` module `delete_marker_list_tool`）
-- `github.com/minio/minio-go/v7 v7.3.0`（**Pin 不升级**——channel API 的 `WithVersions` + CommonPrefixes 行为按 v7.3.0 校准；升级需回归验证）
+- `github.com/aws/aws-sdk-go-v2/config` + `service/s3` v1.114.10、`smithy-go` v1.28.9（**Pin 不升级**——`ListObjectVersions` 把 `<Version>`/`<DeleteMarker>`/`<CommonPrefixes>` 解析到独立 slice，按 XML 标签区分；升级需回归验证）
 - `gopkg.in/yaml.v3`（配置）
 - TLS：`scheme=https` 时 `InsecureSkipVerify=true`（对齐 chunked_check_tool）
 
-**用 `Client.ListObjects` 不用 `Core.ListObjects`**：minio-go v7.3.0 的 Core 不支持版本化列举（`WithVersions`）；版本化列举只在 Client 的 channel API 上暴露。
+**用 `ListObjectVersions` 不用启发式区分**：AWS SDK 把 `<Version>`/`<DeleteMarker>`/`<CommonPrefixes>` 解析到独立 slice 字段，靠 XML 标签区分——key 以 `/` 结尾的真实版本不会被误判成 common prefix（曾经 minio-go 的 channel API 把三者合并到一个 channel、丢源标签，导致 `94-abc-0/` 这类 key 在 mode 2 漏统计）。
 
 ## 3. 模块布局
 
@@ -25,8 +25,8 @@
 |---|---|
 | `main.go` | flag 解析（`-c`/`-bkt`/`-prefix`）、`run` 编排、run.log 打开（第一个 open）、配置快照打印（sk 掩码）、BucketExists 预检、summary 打印。无信号处理器 |
 | `config.go` | `Config` 结构体 + `LoadConfig`（YAML，带默认值 + 校验 + 时间戳后缀重写） |
-| `s3client.go` | `S3Client`（minio.Client 包装）、`ListVersions`（channel API 封装）、`BucketExists`。transport 调优对齐 chunked_check_tool |
-| `lister.go` | `Lister`：mode 1 单流 + mode 2 BFS 两种驱动；`isCommonPrefix` 四条件判别；`recordListFailed` 从 `minio.ErrorResponse` 提 HTTP/S3 code + reqID |
+| `s3client.go` | `S3Client`（s3.Client 包装）、`ListVersions(ctx, bkt, prefix, recursive) (<-chan VersionEntry, <-chan string)`（两个 channel：版本/删除标记 + common prefix）、`BucketExists`。transport 调优对齐 chunked_check_tool |
+| `lister.go` | `Lister`：mode 1 单流 + mode 2 BFS 两种驱动；不再有 `isCommonPrefix` 启发式（AWS SDK 按 XML 标签区分 Version/DeleteMarker/CommonPrefixes）；`recordListFailed` 从 `*awshttp.ResponseError` 提 StatusCode + reqID |
 | `queue.go` | 无界前缀队列（slice + mutex + cond），ctx-aware Pop，`SignalDone` 终止。对齐 chunked_check_tool/queue.go 形态，砍掉 Drain（无优雅退出） |
 | `output.go` | `Output`：三个 writer goroutine（delete_markers / invalid_keys / list_failed）+ slog listLogger；`\x1f` 行分隔符；key 含 `\x1f` 自动路由到 invalid_keys + URL 编码；list_failed.txt 惰性 open；3 秒定时 flush |
 | `stats.go` | atomic.Int64 计数器 + `StatsSnapshot` + `PrintSummary` |
@@ -38,10 +38,8 @@
 
 2. **`version_id` 字面量 `"null"` 是合法值**：S3 开版本控制之前写入的旧版本对象返回字面量字符串 `"null"` 作为 VersionId。下游删除工具必须原样透传，不要当空值。本工具原样写入结果文件，不做特殊处理。
 
-3. **共同前缀判别四条件合取**：`VersionID == "" && !IsDeleteMarker && ETag == "" && strings.HasSuffix(Key, "/")`。**不可放宽任一条件**——误判前缀为版本会漏扫子目录，误判版本为前缀会死循环。详见设计文档 §4.2。
-   - minio channel API 把 common prefix 作为 `ObjectInfo{Key: ".../", 其余字段空}` 吐出
-   - 真版本条目 VersionID 非空（含 `"null"` 字面量）；null 版本对象的 VersionID 在 minio-go v7.3.0 里是 `"null"` 字符串，非空
-   - 后三个条件兜底：真对象有 ETag，marker 有 IsDeleteMarker
+3. **AWS SDK 按 XML 标签区分 Version/DeleteMarker/CommonPrefixes**：`ListObjectVersions` 输出三个独立 slice，**没有启发式**。`ListVersions` 把 Version/DeleteMarker 摊平到 `VersionEntry{IsDeleteMarker: bool}`、把 CommonPrefixes 走独立 channel。**不可**加任何"key 以 `/` 结尾即 common prefix"的启发式——曾经 minio-go 合并 channel 导致 `94-abc-0/` 这类 key 在 mode 2 漏统计。
+   - null 版本对象的 VersionID 是 `"null"` 字符串（非空），按 AWS SDK 返回原样透传
 
 4. **mode 2 BFS 终止不变量——Add-before-Push**：每入队一个新前缀**先** `inflight.Add(1)` **再** `queue.Push`。违反会导致 inflight 提前归零 → 提前终止 → 漏扫子目录。对齐 chunked_check_tool/AGENTS.md §4.7。
 
@@ -57,13 +55,13 @@
 
 10. **`\x1f`-in-key 路由**：key 含 `\x1f` 的 marker 走 `invalid_keys.txt`，key 经 `url.QueryEscape` 编码。**不可**直接写入 `delete_markers.txt`（会撕裂行字段）。`output.go` 的 `WriteDeleteMarker` 自动检测 + 路由。
 
-11. **minio-go v7.3.0 channel API**：`Client.ListObjects(WithVersions: true)` 吐出的 `ObjectInfo` 带 `IsDeleteMarker` / `VersionID` / `IsLatest` 字段；带 delimiter 时也吐 common prefix 作为 `ObjectInfo{Key: ".../"}` 条目。**不要**改用 `Core.ListObjects`（Core 不支持 WithVersions）；升级 minio-go 需重验 channel API 是否仍吐 CommonPrefixes（spec §4.1）。
+11. **aws-sdk-go-v2 v1.114.10 ListObjectVersions**：响应 `Versions` / `DeleteMarkers` / `CommonPrefixes` 三个独立 slice，按 XML 标签区分。`ListVersions` 把 Version + DeleteMarker 摊平到 `VersionEntry`（IsDeleteMarker 区分），CommonPrefixes 走独立 channel。升级 aws-sdk-go-v2 需重验三 slice 是否仍按 XML 标签区分（spec §4.1）。
 
 ## 5. 约束
 
 - 单 `package main`，独立 `go.mod`，与 chunked_check_tool / list_only 平级
 - HTTP transport 调优对齐 chunked_check_tool：`MaxIdleConnsPerHost: 32`、`IdleConnTimeout: 90s`、`dial_timeout` 默认 10s 兜底黑洞 IP、optional `ResponseHeaderTimeout`
-- `BucketLookup: minio.BucketLookupPath`（ip:port 节点更安全，避免 DNS 子域）
+- `UsePathStyle: true`（ip:port 节点更安全，避免 DNS 子域）
 - 无 `-resume` / `-nextmarker` / `-check-file` / `-list-file` / `-backup-file` flag
 - `list_type` **必须显式配置**（1 或 2），不给默认值——模式选择是正确性关键，按"校验类参数默认零值+强制显式配置"原则不设默认（与 chunked_check_tool 不同，那里 list_type 默认 2）
 - 未知 YAML 字段被忽略——可复用 chunked_check_tool 的 config.yaml

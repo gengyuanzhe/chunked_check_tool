@@ -110,7 +110,7 @@ less delete_markers.txt   # 看着字段黏在一起，但数据完整
 
 ### mode 1：单并发多版本列举（`list_type: 1`）
 
-单个 goroutine 消费 `minio.Client.ListObjects(WithVersions: true, Recursive: true)`，流里按字典序吐出所有 key 的所有版本。逐条过滤 `IsDeleteMarker == true` 写结果文件。
+单个 goroutine 调 `ListObjectVersions(Prefix: bucket, Recursive: true)`，AWS SDK 把 `<Version>` / `<DeleteMarker>` 解析到独立 slice，逐条过滤 `IsDeleteMarker == true` 写结果文件。
 
 - 适合小桶或调试
 - 无并发，大桶会慢
