@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	neturl "net/url"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,8 +28,9 @@ type S3Client struct {
 // transport 调优对齐 delete_marker_list_tool：MaxIdleConnsPerHost=32、
 // IdleConnTimeout=90s、dial_timeout 兜底黑洞 IP、optional ResponseHeaderTimeout。
 // https 时 InsecureSkipVerify。
-// 构造期校验 endpoint 是合法 http/https URL——aws sdk 的 LoadDefaultConfig 不校验
-// BaseEndpoint 格式，非法 scheme 会延迟到第一次请求才报错，掩盖 worker 启动失败。
+// endpoint 可为 "host:port"（用 cfg.Scheme 拼 scheme）或完整 "http(s)://host[:port]"。
+// 构造期校验最终 URL 合法——aws sdk 的 LoadDefaultConfig 不校验 BaseEndpoint 格式，
+// 非法 scheme 会延迟到第一次请求才报错，掩盖 worker 启动失败。
 func NewS3Client(cfg *Config, endpoint string) (*S3Client, error) {
 	secure := cfg.Scheme == "https"
 	tr := &http.Transport{
@@ -45,8 +47,16 @@ func NewS3Client(cfg *Config, endpoint string) (*S3Client, error) {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 
-	// 构造期校验 endpoint——aws sdk 接受 BaseEndpoint 时不校验格式。
-	u, err := neturl.Parse(endpoint)
+	// endpoint 允许 "host:port"（config 契约）或完整 URL（测试用 httptest URL）。
+	// 不带 scheme 时按 cfg.Schema 拼，否则解析失败。
+	raw := endpoint
+	if !strings.Contains(raw, "://") {
+		if cfg.Scheme == "" {
+			return nil, fmt.Errorf("invalid endpoint %q: no scheme and cfg.scheme empty", endpoint)
+		}
+		raw = cfg.Scheme + "://" + raw
+	}
+	u, err := neturl.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("invalid endpoint %q: want http(s)://host", endpoint)
 	}
@@ -60,7 +70,7 @@ func NewS3Client(cfg *Config, endpoint string) (*S3Client, error) {
 	}
 
 	client := s3.NewFromConfig(awscfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(endpoint)
+		o.BaseEndpoint = aws.String(raw)
 		o.UsePathStyle = true
 		o.HTTPClient = &http.Client{Transport: tr}
 	})
