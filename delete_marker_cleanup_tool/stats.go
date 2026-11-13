@@ -10,15 +10,17 @@ import (
 // Stats 是 delete_marker_cleanup_tool 的进程级计数器，全 atomic。
 // mode check 用 marker / notMarker / absent / headFailed；
 // mode delete 用 deleted / deleteFailed；processed / totalSecNs 共用。
+// Latency 是 1min 窗口的请求时延统计——progress 打印窗口 avg/max，非全局平均。
 type Stats struct {
-	processed    atomic.Int64
-	marker        atomic.Int64
-	notMarker     atomic.Int64
-	absent        atomic.Int64
-	headFailed    atomic.Int64
-	deleted       atomic.Int64
-	deleteFailed  atomic.Int64
-	totalMicrosec atomic.Int64
+	processed     atomic.Int64
+	marker         atomic.Int64
+	notMarker      atomic.Int64
+	absent         atomic.Int64
+	headFailed     atomic.Int64
+	deleted        atomic.Int64
+	deleteFailed   atomic.Int64
+	totalMicrosec  atomic.Int64
+	Latency        LatencyTracker
 }
 
 func (s *Stats) IncrProcessed()   { s.processed.Add(1) }

@@ -95,6 +95,7 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, out *O
 				errCh <- fmt.Errorf("worker endpoint %s: %w", endpoint, err)
 				return
 			}
+			client.SetLatencyTracker(&stats.Latency)
 			var local int
 			interval := progress.Interval()
 			for row := range rowCh {

@@ -38,23 +38,29 @@ func (p *ProgressPrinter) Interval() int {
 
 // MaybePrintCheck 在 count >= interval 时打印一行 check 模式进度。
 // not_marker 字段必须可见——用户工作流"跑 check 看 not_marker，非 0 就停手"。
+// latency 是 1min 窗口的请求时延（avg/max），非全局平均。
 func (p *ProgressPrinter) MaybePrintCheck(s *Stats, count int) {
 	if count < p.interval {
 		return
 	}
+	lat := s.Latency.Snapshot()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	fmt.Fprintf(p.w, "[progress] processed=%d marker=%d not_marker=%d absent=%d failed=%d\n",
-		s.processed.Load(), s.marker.Load(), s.notMarker.Load(), s.absent.Load(), s.headFailed.Load())
+	fmt.Fprintf(p.w, "[progress] processed=%d marker=%d not_marker=%d absent=%d failed=%d latency_avg_ms=%.2f latency_max_ms=%.2f\n",
+		s.processed.Load(), s.marker.Load(), s.notMarker.Load(), s.absent.Load(), s.headFailed.Load(),
+		lat.AvgMs, lat.MaxMs)
 }
 
 // MaybePrintDelete 在 count >= interval 时打印一行 delete 模式进度。
+// latency 是 1min 窗口的请求时延（avg/max），非全局平均。
 func (p *ProgressPrinter) MaybePrintDelete(s *Stats, count int) {
 	if count < p.interval {
 		return
 	}
+	lat := s.Latency.Snapshot()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	fmt.Fprintf(p.w, "[progress] processed=%d deleted=%d failed=%d\n",
-		s.processed.Load(), s.deleted.Load(), s.deleteFailed.Load())
+	fmt.Fprintf(p.w, "[progress] processed=%d deleted=%d failed=%d latency_avg_ms=%.2f latency_max_ms=%.2f\n",
+		s.processed.Load(), s.deleted.Load(), s.deleteFailed.Load(),
+		lat.AvgMs, lat.MaxMs)
 }

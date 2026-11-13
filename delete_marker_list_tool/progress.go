@@ -48,11 +48,13 @@ func (p *ProgressPrinter) SetQueueSnapshotProvider(fn func() QueueSnapshot) {
 
 // MaybePrint 在 count >= interval 时打印一行进度。label 是字段名
 // （"scanned"），count 是 worker 自上次打印以来的本地累积值。
+// latency 是 1min 窗口的 ListObjectVersions 时延（avg/max），非全局平均。
 func (p *ProgressPrinter) MaybePrint(s *Stats, label string, count int) {
 	if count < p.interval {
 		return
 	}
 	snap := s.Snapshot()
+	lat := s.Latency.Snapshot()
 	var qs QueueSnapshot
 	if p.queueSnapshot != nil {
 		qs = p.queueSnapshot()
@@ -61,12 +63,12 @@ func (p *ProgressPrinter) MaybePrint(s *Stats, label string, count int) {
 	defer p.mu.Unlock()
 	if p.queueSnapshot != nil {
 		fmt.Fprintf(p.w,
-			"[progress] scanned=%d markers=%d list_failed=%d (q=%d inflight=%d)\n",
+			"[progress] scanned=%d markers=%d list_failed=%d (q=%d inflight=%d) latency_avg_ms=%.2f latency_max_ms=%.2f\n",
 			snap.ScannedVersions, snap.DeleteMarkers, snap.ListFailed,
-			qs.Prefix, qs.Inflight)
+			qs.Prefix, qs.Inflight, lat.AvgMs, lat.MaxMs)
 	} else {
 		fmt.Fprintf(p.w,
-			"[progress] scanned=%d markers=%d list_failed=%d\n",
-			snap.ScannedVersions, snap.DeleteMarkers, snap.ListFailed)
+			"[progress] scanned=%d markers=%d list_failed=%d latency_avg_ms=%.2f latency_max_ms=%.2f\n",
+			snap.ScannedVersions, snap.DeleteMarkers, snap.ListFailed, lat.AvgMs, lat.MaxMs)
 	}
 }

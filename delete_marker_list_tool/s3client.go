@@ -19,8 +19,13 @@ import (
 // + HeadBucket（探测桶存在）。AWS SDK 把 <Version>/<DeleteMarker>/
 // <CommonPrefixes> 解析到独立 slice 字段，靠 XML 标签区分，不靠启发式。
 type S3Client struct {
-	client *s3.Client
+	client  *s3.Client
+	latency *LatencyTracker // 可选——nil 不记录。main 启动时注入 &stats.Latency。
 }
+
+// SetLatencyTracker 注入窗口式时延统计器。main 在 NewS3Client 后调一次。
+// nil 表示不记录（test 默认 nil，不影响功能）。
+func (c *S3Client) SetLatencyTracker(l *LatencyTracker) { c.latency = l }
 
 // NewS3Client 构造绑定到单个 endpoint 的 s3.Client。
 // transport 调优对齐 chunked_check_tool：MaxIdleConnsPerHost=32、
@@ -102,6 +107,7 @@ func (c *S3Client) ListVersions(ctx context.Context, bucket, prefix string, recu
 			delimiter = ""
 		}
 		for {
+			start := time.Now()
 			out, err := c.client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
 				Bucket:          aws.String(bucket),
 				Prefix:          aws.String(prefix),
@@ -109,6 +115,9 @@ func (c *S3Client) ListVersions(ctx context.Context, bucket, prefix string, recu
 				KeyMarker:       keyMarker,
 				VersionIdMarker: versionIDMarker,
 			})
+			if c.latency != nil {
+				c.latency.Record(time.Since(start))
+			}
 			if err != nil {
 				vc <- VersionEntry{Err: err}
 				return

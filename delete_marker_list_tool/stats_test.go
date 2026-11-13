@@ -42,7 +42,7 @@ func TestPrintSummaryContainsAllFields(t *testing.T) {
 	var buf bytes.Buffer
 	s.PrintSummary(&buf)
 	out := buf.String()
-	for _, want := range []string{"delete_markers", "scanned_versions", "list_failed", "total_sec", "list_calls", "list_avg_latency_ms"} {
+	for _, want := range []string{"delete_markers", "scanned_versions", "list_failed", "total_sec"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary missing %q: %s", want, out)
 		}

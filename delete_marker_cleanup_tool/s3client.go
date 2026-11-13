@@ -20,8 +20,13 @@ import (
 
 // S3Client 包装单个 s3.Client。本工具只用 HeadObject / DeleteObject / HeadBucket。
 type S3Client struct {
-	client *s3.Client
+	client  *s3.Client
+	latency *LatencyTracker // 可选——nil 不记录。worker 启动时注入 &stats.Latency。
 }
+
+// SetLatencyTracker 注入窗口式时延统计器。worker 在 NewS3Client 后调一次。
+// nil 表示不记录（test 默认 nil，不影响功能）。
+func (c *S3Client) SetLatencyTracker(l *LatencyTracker) { c.latency = l }
 
 // NewS3Client 构造绑定到单个 endpoint 的 s3.Client。
 // transport 调优对齐 delete_marker_list_tool：MaxIdleConnsPerHost=32、
@@ -88,11 +93,15 @@ type HeadResult struct {
 // aws SDK 对 405 返回 (nil, *smithy.OperationError)——错误路径上 classifier
 // 从 ResponseError.Response.StatusCode + header 判定 marker。
 func (c *S3Client) StatObject(ctx context.Context, bucket, key, versionID string) HeadResult {
+	start := time.Now()
 	_, err := c.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket:    aws.String(bucket),
 		Key:       aws.String(key),
 		VersionId: aws.String(versionID),
 	})
+	if c.latency != nil {
+		c.latency.Record(time.Since(start))
+	}
 	if err == nil {
 		return HeadResult{
 			Key:            key,
@@ -107,11 +116,15 @@ func (c *S3Client) StatObject(ctx context.Context, bucket, key, versionID string
 // DeleteObject 删除一个对象版本（对 delete marker 即消除该 marker）。
 // versionID 原样透传（含字面量 "null"）。NoSuchVersion 由调用方判定为成功。
 func (c *S3Client) DeleteObject(ctx context.Context, bucket, key, versionID string) (int, string, error) {
+	start := time.Now()
 	_, err := c.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket:    aws.String(bucket),
 		Key:       aws.String(key),
 		VersionId: aws.String(versionID),
 	})
+	if c.latency != nil {
+		c.latency.Record(time.Since(start))
+	}
 	if err == nil {
 		return 204, "", nil
 	}

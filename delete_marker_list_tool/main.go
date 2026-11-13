@@ -80,6 +80,7 @@ func run(cfgPath, bucket, prefix string) error {
 	var stats Stats
 	progress := NewProgressPrinter(mwOut)
 	progress.SetInterval(cfg.ProgressInterval)
+	client.SetLatencyTracker(&stats.Latency)
 
 	l := NewLister(cfg, client, out, &stats, progress)
 	listErr := l.Run(ctx, bucket, prefix)
