@@ -80,6 +80,7 @@ type VersionEntry struct {
 	Key            string
 	VersionID      string
 	IsDeleteMarker bool
+	LastModified   time.Time
 	Err            error // 非空表示列举失败，调用方应终止该前缀
 }
 
@@ -116,8 +117,9 @@ func (c *S3Client) ListVersions(ctx context.Context, bucket, prefix string, recu
 				v := out.Versions[i]
 				vc <- VersionEntry{
 					Key:            aws.ToString(v.Key),
-					VersionID:      aws.ToString(v.VersionId),
+					VersionID:       aws.ToString(v.VersionId),
 					IsDeleteMarker: false,
+					LastModified:   aws.ToTime(v.LastModified),
 				}
 			}
 			for i := range out.DeleteMarkers {
@@ -126,6 +128,7 @@ func (c *S3Client) ListVersions(ctx context.Context, bucket, prefix string, recu
 					Key:            aws.ToString(v.Key),
 					VersionID:      aws.ToString(v.VersionId),
 					IsDeleteMarker: true,
+					LastModified:   aws.ToTime(v.LastModified),
 				}
 			}
 			for i := range out.CommonPrefixes {

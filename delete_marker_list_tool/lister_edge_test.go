@@ -25,7 +25,7 @@ func TestLister_KeyWithUnitSeparator_RoutedToInvalid(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 直接调 WriteDeleteMarker 验证 \x1f 路由——这是 lister 调用的同一入口。
-	out.WriteDeleteMarker("a\x1fb", "v1")
+	out.WriteDeleteMarker("a\x1fb", "v1", "2026-11-13T15:30:00Z")
 	out.FlushAndWait()
 	out.Close()
 
@@ -36,7 +36,7 @@ func TestLister_KeyWithUnitSeparator_RoutedToInvalid(t *testing.T) {
 	}
 	// invalid_keys.txt must contain url-encoded key
 	b := readFile(t, filepath.Join(dir, "invalid_keys.txt"))
-	want := "testbucket\x1fa%1Fb\x1fv1"
+	want := "testbucket\x1fa%1Fb\x1fv1\x1f2026-11-13T15:30:00Z"
 	if !strings.Contains(b, want) {
 		t.Errorf("invalid_keys.txt missing %q: got %q", want, b)
 	}

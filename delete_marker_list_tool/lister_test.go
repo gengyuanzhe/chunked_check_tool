@@ -26,9 +26,9 @@ func readFile(t *testing.T, p string) string {
 const mode1XML = `<?xml version="1.0" encoding="UTF-8"?>
 <ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
 <Name>testbucket</Name><Prefix></Prefix><IsTruncated>false</IsTruncated>
-<DeleteMarker><Key>a.txt</Key><VersionId>dm-a</VersionId><IsLatest>true</IsLatest></DeleteMarker>
-<Version><Key>a.txt</Key><VersionId>reg-a</VersionId><IsLatest>false</IsLatest><ETag>"e"</ETag><Size>1</Size></Version>
-<DeleteMarker><Key>sub/c.txt</Key><VersionId>dm-c</VersionId><IsLatest>true</IsLatest></DeleteMarker>
+<DeleteMarker><Key>a.txt</Key><VersionId>dm-a</VersionId><IsLatest>true</IsLatest><LastModified>2026-01-02T15:04:05.000Z</LastModified></DeleteMarker>
+<Version><Key>a.txt</Key><VersionId>reg-a</VersionId><IsLatest>false</IsLatest><ETag>"e"</ETag><Size>1</Size><LastModified>2026-01-01T15:04:05.000Z</LastModified></Version>
+<DeleteMarker><Key>sub/c.txt</Key><VersionId>dm-c</VersionId><IsLatest>true</IsLatest><LastModified>2026-01-03T15:04:05.000Z</LastModified></DeleteMarker>
 </ListVersionsResult>`
 
 func TestLister_Mode1_HappyPath(t *testing.T) {
@@ -67,7 +67,7 @@ func TestLister_Mode1_HappyPath(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("got %d markers, want 2: %q", len(lines), b)
 	}
-	want := map[string]bool{"testbucket\x1fa.txt\x1fdm-a": false, "testbucket\x1fsub/c.txt\x1fdm-c": false}
+	want := map[string]bool{"testbucket\x1fa.txt\x1fdm-a\x1f2026-01-02T15:04:05Z": false, "testbucket\x1fsub/c.txt\x1fdm-c\x1f2026-01-03T15:04:05Z": false}
 	for _, l := range lines {
 		if _, ok := want[l]; !ok {
 			t.Errorf("unexpected line %q", l)
@@ -241,7 +241,7 @@ func newMode2BFSServer(t *testing.T) *httptest.Server {
 			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
 <ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
 <Name>testbucket</Name><Prefix></Prefix><IsTruncated>false</IsTruncated>
-<DeleteMarker><Key>a.txt</Key><VersionId>dm-a</VersionId><IsLatest>true</IsLatest></DeleteMarker>
+<DeleteMarker><Key>a.txt</Key><VersionId>dm-a</VersionId><IsLatest>true</IsLatest><LastModified>2026-01-02T15:04:05.000Z</LastModified></DeleteMarker>
 <Version><Key>a.txt</Key><VersionId>reg-a</VersionId><IsLatest>false</IsLatest><ETag>"e"</ETag><Size>1</Size></Version>
 <CommonPrefixes><Prefix>sub/</Prefix></CommonPrefixes>
 </ListVersionsResult>`))
@@ -249,7 +249,7 @@ func newMode2BFSServer(t *testing.T) *httptest.Server {
 			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
 <ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
 <Name>testbucket</Name><Prefix>sub/</Prefix><IsTruncated>false</IsTruncated>
-<DeleteMarker><Key>sub/c.txt</Key><VersionId>dm-c</VersionId><IsLatest>true</IsLatest></DeleteMarker>
+<DeleteMarker><Key>sub/c.txt</Key><VersionId>dm-c</VersionId><IsLatest>true</IsLatest><LastModified>2026-01-03T15:04:05.000Z</LastModified></DeleteMarker>
 </ListVersionsResult>`))
 		}
 	}))
@@ -295,7 +295,7 @@ func TestLister_Mode2_BFSWithCommonPrefix(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("got %d markers, want 2: %q", len(lines), b)
 	}
-	want := map[string]bool{"testbucket\x1fa.txt\x1fdm-a": false, "testbucket\x1fsub/c.txt\x1fdm-c": false}
+	want := map[string]bool{"testbucket\x1fa.txt\x1fdm-a\x1f2026-01-02T15:04:05Z": false, "testbucket\x1fsub/c.txt\x1fdm-c\x1f2026-01-03T15:04:05Z": false}
 	for _, l := range lines {
 		if _, ok := want[l]; !ok {
 			t.Errorf("unexpected line %q", l)

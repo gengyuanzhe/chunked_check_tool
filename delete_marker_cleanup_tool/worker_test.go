@@ -35,8 +35,8 @@ func TestParseRow_WrongFieldCount(t *testing.T) {
 	if _, ok := ParseRow("only\x1ftwo", "delete_markers.txt"); ok {
 		t.Errorf("expected ok=false for 2-field line")
 	}
-	if _, ok := ParseRow("bkt\x1fk\x1fv\x1fextra", "delete_markers.txt"); ok {
-		t.Errorf("expected ok=false for 4-field line")
+	if _, ok := ParseRow("bkt\x1fk\x1fv\x1flm\x1fextra", "delete_markers.txt"); ok {
+		t.Errorf("expected ok=false for 5-field line")
 	}
 }
 
@@ -47,6 +47,26 @@ func TestParseRow_NullVersionIdPassesThrough(t *testing.T) {
 	}
 	if r.VersionID != "null" {
 		t.Errorf("VersionID=%q want %q", r.VersionID, "null")
+	}
+}
+
+// ParseRow 兼容 3 段（旧输入）和 4 段（新输入带 lastModified）。
+func TestParseRow_Accepts3And4Fields(t *testing.T) {
+	// 3 段：LastModified 为空
+	r3, ok := ParseRow("bkt\x1fk\x1fv1", "delete_markers.txt")
+	if !ok {
+		t.Fatal("expected ok for 3-field line")
+	}
+	if r3.LastModified != "" {
+		t.Errorf("LastModified=%q want empty for 3-field line", r3.LastModified)
+	}
+	// 4 段：LastModified 透传
+	r4, ok := ParseRow("bkt\x1fk\x1fv1\x1f2026-11-13T15:30:00Z", "delete_markers.txt")
+	if !ok {
+		t.Fatal("expected ok for 4-field line")
+	}
+	if r4.LastModified != "2026-11-13T15:30:00Z" {
+		t.Errorf("LastModified=%q want %q", r4.LastModified, "2026-11-13T15:30:00Z")
 	}
 }
 
@@ -85,13 +105,13 @@ func TestRunWorkers_ModeCheck_ThreeStates(t *testing.T) {
 		t.Fatal(err)
 	}
 	out2 := string(b)
-	if !strings.Contains(out2, "testbucket\x1fmarker.txt\x1fdm-1\x1fmarker") {
+	if !strings.Contains(out2, "testbucket\x1fmarker.txt\x1fdm-1\x1f\x1fmarker") {
 		t.Errorf("missing marker state: %q", out2)
 	}
-	if !strings.Contains(out2, "testbucket\x1fregular.txt\x1fv-1\x1fnot_marker") {
+	if !strings.Contains(out2, "testbucket\x1fregular.txt\x1fv-1\x1f\x1fnot_marker") {
 		t.Errorf("missing not_marker state: %q", out2)
 	}
-	if !strings.Contains(out2, "testbucket\x1fgone.txt\x1fv-1\x1fabsent") {
+	if !strings.Contains(out2, "testbucket\x1fgone.txt\x1fv-1\x1f\x1fabsent") {
 		t.Errorf("missing absent state: %q", out2)
 	}
 }
@@ -309,7 +329,7 @@ func TestRunWorkers_InvalidKeysInputURLDecodesKey(t *testing.T) {
 	b, _ := os.ReadFile(filepath.Join(dir, "out", "check_results.txt"))
 	// key 来自 invalid_keys.txt（URL 编码过）；输出行重新 QueryEscape key，
 	// 保持 4 段行格式契约（解码后 key 含 \x1f，否则会撕裂成 5 段）。
-	if !strings.Contains(string(b), "testbucket\x1fa%1Fb\x1fv1\x1fnot_marker") {
+	if !strings.Contains(string(b), "testbucket\x1fa%1Fb\x1fv1\x1f\x1fnot_marker") {
 		t.Errorf("missing re-encoded-key row: %q", string(b))
 	}
 }

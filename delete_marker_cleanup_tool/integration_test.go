@@ -214,13 +214,13 @@ func TestIntegration_ModeCheck_ThreeStatesOnRealMinIO(t *testing.T) {
 
 	b, _ := os.ReadFile(filepath.Join(dir, "out", "check_results.txt"))
 	out := string(b)
-	if !strings.Contains(out, fmt.Sprintf("%s\x1fmarker.txt\x1f%s\x1fmarker", bucket, markerVID)) {
+	if !strings.Contains(out, fmt.Sprintf("%s\x1fmarker.txt\x1f%s\x1f\x1fmarker", bucket, markerVID)) {
 		t.Errorf("missing marker state. raw output:\n%s", out)
 	}
-	if !strings.Contains(out, fmt.Sprintf("%s\x1fregular.txt\x1f%s\x1fnot_marker", bucket, regularVID)) {
+	if !strings.Contains(out, fmt.Sprintf("%s\x1fregular.txt\x1f%s\x1f\x1fnot_marker", bucket, regularVID)) {
 		t.Errorf("missing not_marker state. raw output:\n%s", out)
 	}
-	if !strings.Contains(out, fmt.Sprintf("%s\x1fgone.txt\x1f00000000-0000-0000-0000-000000000000\x1fabsent", bucket)) {
+	if !strings.Contains(out, fmt.Sprintf("%s\x1fgone.txt\x1f00000000-0000-0000-0000-000000000000\x1f\x1fabsent", bucket)) {
 		t.Errorf("missing absent state. raw output:\n%s", out)
 	}
 }
@@ -270,7 +270,7 @@ func TestIntegration_ModeDelete_ThenReCheckAbsent(t *testing.T) {
 	cr, _ := os.ReadFile(filepath.Join(dir, "out", "check_results.txt"))
 	out := string(cr)
 	for _, r := range rows {
-		if !strings.Contains(out, r+"\x1fabsent") {
+		if !strings.Contains(out, r+"\x1f\x1fabsent") {
 			t.Errorf("expected absent for %s after delete. raw:\n%s", r, out)
 		}
 	}

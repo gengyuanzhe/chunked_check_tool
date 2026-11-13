@@ -27,8 +27,8 @@ type Output struct {
 	dir    string
 	bucket string
 
-	deleteMarkerCh  chan [2]string // {key, versionID}
-	invalidKeysCh   chan [2]string // {key, versionID}, key 已 URL 编码
+	deleteMarkerCh  chan [3]string // {key, versionID, lastModified}
+	invalidKeysCh   chan [3]string // {key, versionID, lastModified}, key 已 URL 编码
 	listFailedCh    chan string
 
 	deleteMarkerFile *os.File
@@ -52,8 +52,8 @@ func NewOutput(cfg *Config, bucket string) (*Output, error) {
 	o := &Output{
 		dir:            cfg.OutputDir,
 		bucket:         bucket,
-		deleteMarkerCh: make(chan [2]string, 1024),
-		invalidKeysCh:  make(chan [2]string, 1024),
+		deleteMarkerCh: make(chan [3]string, 1024),
+		invalidKeysCh:  make(chan [3]string, 1024),
 		listFailedCh:   make(chan string, 256),
 	}
 
@@ -89,7 +89,7 @@ func NewOutput(cfg *Config, bucket string) (*Output, error) {
 
 // startWriter 启动一个 writer goroutine。isListFailed=true 时走 list_failed
 // 特殊路径（lazy open 文件）；否则用预先 open 的 file。
-func (o *Output) startWriter(file *os.File, ch chan [2]string, isListFailed bool) {
+func (o *Output) startWriter(file *os.File, ch chan [3]string, isListFailed bool) {
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
@@ -119,7 +119,7 @@ func (o *Output) startWriter(file *os.File, ch chan [2]string, isListFailed bool
 						}
 						return
 					}
-					writeRow(w, o.bucket, row[0], row[1])
+					writeRow(w, o.bucket, row[0], row[1], row[2])
 				case <-ticker.C:
 					if w != nil {
 						w.Flush()
@@ -149,29 +149,32 @@ func (o *Output) writeListFailedLine(prefix string) {
 	o.listFailedFile.WriteString("\n")
 }
 
-// writeRow 写一行 bkt<sep>key<sep>versionID\n 到 w。
-func writeRow(w *bufio.Writer, bkt, key, versionID string) {
+// writeRow 写一行 bkt<sep>key<sep>versionID<sep>lastModified\n 到 w。
+func writeRow(w *bufio.Writer, bkt, key, versionID, lastModified string) {
 	w.WriteString(bkt)
 	w.WriteString(rowSep)
 	w.WriteString(key)
 	w.WriteString(rowSep)
 	w.WriteString(versionID)
+	w.WriteString(rowSep)
+	w.WriteString(lastModified)
 	w.WriteByte('\n')
 }
 
 // WriteDeleteMarker 把一条 marker 送进结果文件 writer。key 含 \x1f 时
-// 自动路由到 invalid_keys.txt，key 经 URL 编码。
-func (o *Output) WriteDeleteMarker(key, versionID string) {
+// 自动路由到 invalid_keys.txt，key 经 URL 编码。lastModified 是 RFC3339
+// 形式的 UTC 时间字符串（从 AWS SDK time.Time 格式化）。
+func (o *Output) WriteDeleteMarker(key, versionID, lastModified string) {
 	if containsRowSep(key) {
-		o.invalidKeysCh <- [2]string{url.QueryEscape(key), versionID}
+		o.invalidKeysCh <- [3]string{url.QueryEscape(key), versionID, lastModified}
 	} else {
-		o.deleteMarkerCh <- [2]string{key, versionID}
+		o.deleteMarkerCh <- [3]string{key, versionID, lastModified}
 	}
 }
 
 // WriteInvalidKey 显式路由到 invalid_keys.txt（key 已由调用方 URL 编码）。
-func (o *Output) WriteInvalidKey(key, versionID string) {
-	o.invalidKeysCh <- [2]string{key, versionID}
+func (o *Output) WriteInvalidKey(key, versionID, lastModified string) {
+	o.invalidKeysCh <- [3]string{key, versionID, lastModified}
 }
 
 // WriteListFailed 写一行到 list_failed.txt（惰性 open）。

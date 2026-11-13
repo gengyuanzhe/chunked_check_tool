@@ -5,9 +5,21 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )
+
+// formatLastModified 把 AWS SDK 返回的 time.Time 格式化成 RFC3339 UTC 字符串。
+// zero time（列举响应缺 LastModified 时）返回空串——下游可据此判断"无时间戳"。
+// 用 RFC3339 而非 ISO8601 因为 Go time.RFC3339 是标准库，且 RFC3339 是 ISO8601
+// 的严格子集，S3 / MinIO / 各家 S3 客户端都能解析。
+func formatLastModified(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
 
 // Lister 驱动两种 mode 的列举。
 // mode 1: 单 goroutine 消费一个 recursive 版本化流。
@@ -56,7 +68,7 @@ func (l *Lister) runMode1(ctx context.Context, bucket, prefix string) error {
 		l.stats.IncrScannedVersions()
 		localCount++
 		if obj.IsDeleteMarker {
-			l.out.WriteDeleteMarker(obj.Key, obj.VersionID)
+			l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified))
 			l.stats.IncrDeleteMarkers()
 		}
 		if localCount >= interval {
@@ -150,7 +162,7 @@ func (l *Lister) processPrefix(ctx context.Context, bucket, prefix string, q *qu
 		l.stats.IncrScannedVersions()
 		lc.count++
 		if obj.IsDeleteMarker {
-			l.out.WriteDeleteMarker(obj.Key, obj.VersionID)
+			l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified))
 			l.stats.IncrDeleteMarkers()
 		}
 		if lc.count >= interval {

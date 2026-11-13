@@ -24,10 +24,10 @@ type Output struct {
 	mode  string
 	bucket string // 不用——bkt 从每行读，写入时直接用调用方传入的 bkt
 
-	checkResultCh chan [4]string // {bkt, key, versionID, state}
-	deletedCh    chan [3]string // {bkt, key, versionID}
-	headFailedCh chan [3]string
-	deleteFailedCh chan [3]string
+	checkResultCh chan [5]string // {bkt, key, versionID, lastModified, state}
+	deletedCh    chan [4]string // {bkt, key, versionID, lastModified}
+	headFailedCh chan [4]string
+	deleteFailedCh chan [4]string
 
 	checkResultFile *os.File
 	deletedFile     *os.File
@@ -53,10 +53,10 @@ func NewOutput(cfg *Config, mode string) (*Output, error) {
 	o := &Output{
 		dir:            cfg.OutputDir,
 		mode:           mode,
-		checkResultCh:  make(chan [4]string, 1024),
-		deletedCh:      make(chan [3]string, 1024),
-		headFailedCh:   make(chan [3]string, 256),
-		deleteFailedCh: make(chan [3]string, 256),
+		checkResultCh:  make(chan [5]string, 1024),
+		deletedCh:      make(chan [4]string, 1024),
+		headFailedCh:   make(chan [4]string, 256),
+		deleteFailedCh: make(chan [4]string, 256),
 	}
 
 	var err error
@@ -106,7 +106,7 @@ func (o *Output) startResultWriter(file *os.File, ch interface{}, writeFn func(w
 		ticker := time.NewTicker(outputFlushInterval)
 		defer ticker.Stop()
 		switch c := ch.(type) {
-		case chan [4]string:
+		case chan [5]string:
 			for {
 				select {
 				case row, ok := <-c:
@@ -119,7 +119,7 @@ func (o *Output) startResultWriter(file *os.File, ch interface{}, writeFn func(w
 					w.Flush()
 				}
 			}
-		case chan [3]string:
+		case chan [4]string:
 			for {
 				select {
 				case row, ok := <-c:
@@ -150,7 +150,7 @@ func (o *Output) startFailedWriter(kind string) {
 			ch = o.deleteFailedCh
 		}
 		switch c := ch.(type) {
-		case chan [3]string:
+		case chan [4]string:
 			for {
 				select {
 				case row, ok := <-c:
@@ -166,7 +166,7 @@ func (o *Output) startFailedWriter(kind string) {
 }
 
 // writeFailedLine 惰性 open 对应 failed.txt 并写入一行。
-func (o *Output) writeFailedLine(kind string, row [3]string) {
+func (o *Output) writeFailedLine(kind string, row [4]string) {
 	o.failedMu.Lock()
 	defer o.failedMu.Unlock()
 	var f **os.File
@@ -197,11 +197,28 @@ func (o *Output) writeFailedLine(kind string, row [3]string) {
 	(*f).WriteString(row[1])
 	(*f).WriteString(rowSep)
 	(*f).WriteString(row[2])
+	(*f).WriteString(rowSep)
+	(*f).WriteString(row[3])
 	(*f).WriteString("\n")
 }
 
-// writeCheckResultRow 写 bkt<sep>key<sep>versionID<sep>state\n 到 w。
+// writeCheckResultRow 写 bkt<sep>key<sep>versionID<sep>lastModified<sep>state\n 到 w。
 func writeCheckResultRow(w *bufio.Writer, row interface{}) {
+	r := row.([5]string)
+	w.WriteString(r[0])
+	w.WriteString(rowSep)
+	w.WriteString(r[1])
+	w.WriteString(rowSep)
+	w.WriteString(r[2])
+	w.WriteString(rowSep)
+	w.WriteString(r[3])
+	w.WriteString(rowSep)
+	w.WriteString(r[4])
+	w.WriteByte('\n')
+}
+
+// writeDeletedRow 写 bkt<sep>key<sep>versionID<sep>lastModified\n 到 w。
+func writeDeletedRow(w *bufio.Writer, row interface{}) {
 	r := row.([4]string)
 	w.WriteString(r[0])
 	w.WriteString(rowSep)
@@ -213,35 +230,24 @@ func writeCheckResultRow(w *bufio.Writer, row interface{}) {
 	w.WriteByte('\n')
 }
 
-// writeDeletedRow 写 bkt<sep>key<sep>versionID\n 到 w。
-func writeDeletedRow(w *bufio.Writer, row interface{}) {
-	r := row.([3]string)
-	w.WriteString(r[0])
-	w.WriteString(rowSep)
-	w.WriteString(r[1])
-	w.WriteString(rowSep)
-	w.WriteString(r[2])
-	w.WriteByte('\n')
-}
-
 // WriteCheckResult 把一条 check 结果送进结果文件 writer。
-func (o *Output) WriteCheckResult(bkt, key, versionID, state string) {
-	o.checkResultCh <- [4]string{bkt, key, versionID, state}
+func (o *Output) WriteCheckResult(bkt, key, versionID, lastModified, state string) {
+	o.checkResultCh <- [5]string{bkt, key, versionID, lastModified, state}
 }
 
 // WriteDeleted 把一条 deleted 结果送进结果文件 writer。
-func (o *Output) WriteDeleted(bkt, key, versionID string) {
-	o.deletedCh <- [3]string{bkt, key, versionID}
+func (o *Output) WriteDeleted(bkt, key, versionID, lastModified string) {
+	o.deletedCh <- [4]string{bkt, key, versionID, lastModified}
 }
 
 // WriteHeadFailed 写一行到 head_failed.txt（惰性 open）。
-func (o *Output) WriteHeadFailed(bkt, key, versionID string) {
-	o.headFailedCh <- [3]string{bkt, key, versionID}
+func (o *Output) WriteHeadFailed(bkt, key, versionID, lastModified string) {
+	o.headFailedCh <- [4]string{bkt, key, versionID, lastModified}
 }
 
 // WriteDeleteFailed 写一行到 delete_failed.txt（惰性 open）。
-func (o *Output) WriteDeleteFailed(bkt, key, versionID string) {
-	o.deleteFailedCh <- [3]string{bkt, key, versionID}
+func (o *Output) WriteDeleteFailed(bkt, key, versionID, lastModified string) {
+	o.deleteFailedCh <- [4]string{bkt, key, versionID, lastModified}
 }
 
 // WriteHeadFailedLog 写一条 slog 详情到 head_failed.log。

@@ -20,8 +20,8 @@ func newTestOutput(t *testing.T) (*Output, string) {
 
 func TestWriteDeleteMarker_RowShape(t *testing.T) {
 	o, dir := newTestOutput(t)
-	o.WriteDeleteMarker("photos/a.jpg", "v1")
-	o.WriteDeleteMarker("photos/b.jpg", "null")
+	o.WriteDeleteMarker("photos/a.jpg", "v1", "2026-11-13T15:30:00Z")
+	o.WriteDeleteMarker("photos/b.jpg", "null", "2026-11-13T15:31:00Z")
 	o.FlushAndWait()
 	o.Close()
 	b, err := os.ReadFile(filepath.Join(dir, "delete_markers.txt"))
@@ -32,8 +32,8 @@ func TestWriteDeleteMarker_RowShape(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("got %d lines, want 2: %q", len(lines), string(b))
 	}
-	want0 := "testbucket\x1fphotos/a.jpg\x1fv1"
-	want1 := "testbucket\x1fphotos/b.jpg\x1fnull"
+	want0 := "testbucket\x1fphotos/a.jpg\x1fv1\x1f2026-11-13T15:30:00Z"
+	want1 := "testbucket\x1fphotos/b.jpg\x1fnull\x1f2026-11-13T15:31:00Z"
 	if lines[0] != want0 {
 		t.Errorf("line0=%q want %q", lines[0], want0)
 	}
@@ -45,7 +45,7 @@ func TestWriteDeleteMarker_RowShape(t *testing.T) {
 func TestWriteInvalidKey_UrlEncodesKey(t *testing.T) {
 	o, dir := newTestOutput(t)
 	// key contains \x1f — must be URL-encoded and routed to invalid_keys.txt
-	o.WriteDeleteMarker("a\x1fb", "v1")
+	o.WriteDeleteMarker("a\x1fb", "v1", "2026-11-13T15:30:00Z")
 	o.FlushAndWait()
 	o.Close()
 	b, err := os.ReadFile(filepath.Join(dir, "invalid_keys.txt"))
@@ -54,7 +54,7 @@ func TestWriteInvalidKey_UrlEncodesKey(t *testing.T) {
 	}
 	line := strings.TrimRight(string(b), "\n")
 	// "a\x1fb" → url.QueryEscape → "a%1Fb"
-	want := "testbucket\x1fa%1Fb\x1fv1"
+	want := "testbucket\x1fa%1Fb\x1fv1\x1f2026-11-13T15:30:00Z"
 	if line != want {
 		t.Errorf("got %q want %q", line, want)
 	}

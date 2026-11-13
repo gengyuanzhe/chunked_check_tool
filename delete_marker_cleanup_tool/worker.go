@@ -13,24 +13,33 @@ import (
 	"sync/atomic"
 )
 
-// Row 是输入文件解析后的一行——bkt / key / versionID 三段。
+// Row 是输入文件解析后的一行——bkt / key / versionID / lastModified 四段。
 // KeyEncoded 标记 key 是否来自 invalid_keys.txt（URL 编码过）——
-// 写输出行时需重新 QueryEscape 以保持 3/4 段行格式契约。
+// 写输出行时需重新 QueryEscape 以保持行格式契约。
+// LastModified 透传 lister 的输出，可能是 RFC3339 字符串或空串（旧 3 段输入）。
 type Row struct {
-	Bkt, Key, VersionID string
-	KeyEncoded          bool
+	Bkt, Key, VersionID, LastModified string
+	KeyEncoded                        bool
 }
 
 // ParseRow 把一行 \x1f 分隔的字符串解析为 Row。
 // 输入 basename == "invalid_keys.txt" 时对 key 字段做 URL 解码（lister 的兜底
-// 分流文件，key 被 url.QueryEscape 编码过）。返回 ok=false 表示字段数 != 3
+// 分流文件，key 被 url.QueryEscape 编码过）。返回 ok=false 表示字段数 != 3 且 != 4
 // 或 URL 解码失败。
+//
+// 兼容 3 段（旧输入：bkt\x1fkey\x1fversionID）和 4 段（新输入：
+// bkt\x1fkey\x1fversionID\x1flastModified）。3 段输入的 LastModified 为空串，
+// 输出时第四列写空串，保持下游解析稳定。
 func ParseRow(line, inputBasename string) (Row, bool) {
 	parts := strings.Split(line, "\x1f")
-	if len(parts) != 3 {
+	if len(parts) != 3 && len(parts) != 4 {
 		return Row{}, false
 	}
 	bkt, key, vid := parts[0], parts[1], parts[2]
+	lastMod := ""
+	if len(parts) == 4 {
+		lastMod = parts[3]
+	}
 	encoded := filepath.Base(inputBasename) == "invalid_keys.txt"
 	if encoded {
 		dec, err := url.QueryUnescape(key)
@@ -39,7 +48,7 @@ func ParseRow(line, inputBasename string) (Row, bool) {
 		}
 		key = dec
 	}
-	return Row{Bkt: bkt, Key: key, VersionID: vid, KeyEncoded: encoded}, true
+	return Row{Bkt: bkt, Key: key, VersionID: vid, LastModified: lastMod, KeyEncoded: encoded}, true
 }
 
 // outputKey 返回 key 的输出形态——invalid_keys.txt 来源的行重新 QueryEscape，
@@ -157,7 +166,7 @@ func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *St
 	state, ok := classifyHead(result)
 	if !ok {
 		stats.IncrHeadFailed()
-		out.WriteHeadFailed(r.Bkt, r.outputKey(), r.VersionID)
+		out.WriteHeadFailed(r.Bkt, r.outputKey(), r.VersionID, r.LastModified)
 		out.WriteHeadFailedLog(r.Bkt, r.Key, r.VersionID, result.StatusCode, errorCode(result.Err), result.RequestID, result.Err)
 		return
 	}
@@ -169,7 +178,7 @@ func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *St
 	case "absent":
 		stats.IncrAbsent()
 	}
-	out.WriteCheckResult(r.Bkt, r.outputKey(), r.VersionID, state)
+	out.WriteCheckResult(r.Bkt, r.outputKey(), r.VersionID, r.LastModified, state)
 }
 
 // handleDelete 删除一行。NoSuchVersion / NoSuchKey 算成功（幂等空操作）；
@@ -179,15 +188,15 @@ func handleDelete(ctx context.Context, c *S3Client, r Row, out *Output, stats *S
 	statusCode, requestID, err := c.DeleteObject(ctx, r.Bkt, r.Key, r.VersionID)
 	if err == nil {
 		stats.IncrDeleted()
-		out.WriteDeleted(r.Bkt, r.outputKey(), r.VersionID)
+		out.WriteDeleted(r.Bkt, r.outputKey(), r.VersionID, r.LastModified)
 		return
 	}
 	if code := errorCode(err); code == "NoSuchVersion" || code == "NoSuchKey" {
 		stats.IncrDeleted()
-		out.WriteDeleted(r.Bkt, r.outputKey(), r.VersionID)
+		out.WriteDeleted(r.Bkt, r.outputKey(), r.VersionID, r.LastModified)
 		return
 	}
 	stats.IncrDeleteFailed()
-	out.WriteDeleteFailed(r.Bkt, r.outputKey(), r.VersionID)
+	out.WriteDeleteFailed(r.Bkt, r.outputKey(), r.VersionID, r.LastModified)
 	out.WriteDeleteFailedLog(r.Bkt, r.Key, r.VersionID, statusCode, errorCode(err), requestID, err)
 }

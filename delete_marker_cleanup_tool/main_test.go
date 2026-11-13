@@ -45,7 +45,7 @@ func TestRun_ModeCheck_EndToEnd(t *testing.T) {
 		t.Errorf("run.log missing mode=check: %q", rl)
 	}
 	cr, _ := os.ReadFile(filepath.Join(dir, "out", "check_results.txt"))
-	if !strings.Contains(string(cr), "testbucket\x1fmarker.txt\x1fdm-1\x1fmarker") {
+	if !strings.Contains(string(cr), "testbucket\x1fmarker.txt\x1fdm-1\x1f\x1fmarker") {
 		t.Errorf("missing marker result: %q", cr)
 	}
 }
