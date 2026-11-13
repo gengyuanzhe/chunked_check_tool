@@ -47,3 +47,7 @@ dial_timeout: 10
 
 # 等服务端响应头超时秒数（0=Go 默认无超时，不兜底）
 response_header_timeout: 0
+
+# 请求时延统计窗口秒数（progress 行的 latency_avg_ms/latency_max_ms 每该秒数
+# 重置一次，看"最近一批"的时延而非全局平均）。默认 60。
+latency_window_sec: 60

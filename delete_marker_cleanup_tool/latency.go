@@ -64,6 +64,16 @@ func (l *LatencyTracker) Snapshot() LatencySnapshot {
 	}
 }
 
+// SetWindow 设置窗口长度。<=0 视为默认 1min。必须在第一次 Record/Snapshot 前
+// 调——运行中改窗口不影响当前窗口（rotate 时才生效）。
+func (l *LatencyTracker) SetWindow(d time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if d > 0 {
+		l.window = d
+	}
+}
+
 // ensureWindowLocked 兜底零值 LatencyTracker：window 为 0 设默认 1min。
 func (l *LatencyTracker) ensureWindowLocked(now time.Time) {
 	if l.window <= 0 {

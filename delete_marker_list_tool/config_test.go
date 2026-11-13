@@ -123,3 +123,50 @@ multipart_check_mode: 1
 		t.Errorf("ListType=%d want 2", cfg.ListType)
 	}
 }
+
+func TestLoadConfig_LatencyWindowDefault60(t *testing.T) {
+	p := writeConfigFile(t, `
+endpoints: ["1.2.3.4:80"]
+scheme: http
+ak: a
+sk: s
+list_type: 2
+`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LatencyWindowSec != 60 {
+		t.Errorf("LatencyWindowSec default=%d, want 60", cfg.LatencyWindowSec)
+	}
+}
+
+func TestLoadConfig_LatencyWindowExplicitAndNegative(t *testing.T) {
+	p := writeConfigFile(t, `
+endpoints: ["1.2.3.4:80"]
+scheme: http
+ak: a
+sk: s
+list_type: 2
+latency_window_sec: 30
+`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LatencyWindowSec != 30 {
+		t.Errorf("LatencyWindowSec=%d, want 30", cfg.LatencyWindowSec)
+	}
+
+	pBad := writeConfigFile(t, `
+endpoints: ["1.2.3.4:80"]
+scheme: http
+ak: a
+sk: s
+list_type: 2
+latency_window_sec: -1
+`)
+	if _, err := LoadConfig(pBad); err == nil {
+		t.Errorf("expected error for latency_window_sec=-1")
+	}
+}

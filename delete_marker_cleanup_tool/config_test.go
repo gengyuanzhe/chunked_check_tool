@@ -121,3 +121,47 @@ op_concurrency: -1
 		t.Errorf("expected error for op_concurrency=-1")
 	}
 }
+
+func TestLoadConfig_LatencyWindowDefault60(t *testing.T) {
+	p := writeConfigFile(t, `
+endpoints: ["1.2.3.4:80"]
+scheme: http
+ak: a
+sk: s
+`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LatencyWindowSec != 60 {
+		t.Errorf("LatencyWindowSec default=%d, want 60", cfg.LatencyWindowSec)
+	}
+}
+
+func TestLoadConfig_LatencyWindowExplicitAndNegative(t *testing.T) {
+	p := writeConfigFile(t, `
+endpoints: ["1.2.3.4:80"]
+scheme: http
+ak: a
+sk: s
+latency_window_sec: 30
+`)
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LatencyWindowSec != 30 {
+		t.Errorf("LatencyWindowSec=%d, want 30", cfg.LatencyWindowSec)
+	}
+
+	pBad := writeConfigFile(t, `
+endpoints: ["1.2.3.4:80"]
+scheme: http
+ak: a
+sk: s
+latency_window_sec: -1
+`)
+	if _, err := LoadConfig(pBad); err == nil {
+		t.Errorf("expected error for latency_window_sec=-1")
+	}
+}

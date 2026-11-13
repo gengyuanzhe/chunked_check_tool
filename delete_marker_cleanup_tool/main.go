@@ -83,6 +83,7 @@ func run(cfgPath, mode, inputPath string) error {
 	var stats Stats
 	progress := NewProgressPrinter(mwOut)
 	progress.SetInterval(cfg.ProgressInterval)
+	stats.Latency.SetWindow(time.Duration(cfg.LatencyWindowSec) * time.Second)
 
 	runErr := RunWorkers(context.Background(), cfg, mode, inputPath, out, &stats, progress)
 

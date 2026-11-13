@@ -22,6 +22,7 @@ type Config struct {
 	ProgressInterval      int      `yaml:"progress_interval"`
 	DialTimeout           int64    `yaml:"dial_timeout"`
 	ResponseHeaderTimeout int64    `yaml:"response_header_timeout"`
+	LatencyWindowSec      int      `yaml:"latency_window_sec"`
 }
 
 // LoadConfig 读 YAML 配置并应用默认值 + 校验。timestamp 后缀逻辑对齐
@@ -63,6 +64,10 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.DialTimeout == 0 {
 		cfg.DialTimeout = 10
 	}
+	// LatencyWindowSec 默认 60s（1min 窗口式时延统计）。0 视为默认。
+	if cfg.LatencyWindowSec == 0 {
+		cfg.LatencyWindowSec = 60
+	}
 
 	if len(cfg.Endpoints) == 0 {
 		return nil, fmt.Errorf("config: endpoints must have at least one entry")
@@ -78,6 +83,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.ProgressInterval < 1 {
 		return nil, fmt.Errorf("config: progress_interval must be >= 1, got %d", cfg.ProgressInterval)
+	}
+	if cfg.LatencyWindowSec < 1 {
+		return nil, fmt.Errorf("config: latency_window_sec must be >= 1, got %d", cfg.LatencyWindowSec)
 	}
 
 	if cfg.OutputDirTimestamp {
