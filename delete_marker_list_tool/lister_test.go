@@ -55,6 +55,12 @@ func TestLister_Mode1_HappyPath(t *testing.T) {
 	}
 	out.FlushAndWait()
 	out.Close()
+
+	// mode 1 流里 3 个版本（dm-a, reg-a, dm-c），无 common prefix。
+	if got := stats.Snapshot().ScannedVersions; got != 3 {
+		t.Errorf("ScannedVersions=%d, want 3", got)
+	}
+
 	b := readFile(t, filepath.Join(dir, "delete_markers.txt"))
 	lines := strings.Split(strings.TrimRight(b, "\n"), "\n")
 	if len(lines) != 2 {
@@ -75,7 +81,7 @@ func TestLister_Mode1_HappyPath(t *testing.T) {
 	}
 }
 
-// mode2BFSFakeServer: 按 query prefix 返回不同 XML。
+// newMode2BFSServer: 按 query prefix 返回不同 XML。
 // prefix="" → DeleteMarker(a.txt) + CommonPrefixes(sub/)
 // prefix="sub/" → DeleteMarker(sub/c.txt)
 func newMode2BFSServer(t *testing.T) *httptest.Server {
@@ -150,6 +156,13 @@ func TestLister_Mode2_BFSWithCommonPrefix(t *testing.T) {
 	}
 	out.FlushAndWait()
 	out.Close()
+
+	// scanned_versions 必须只计真实版本（2 个 delete marker），不含
+	// common-prefix stub（sub/）。bug：原先 stub 也被算进去，得 3。
+	if got := stats.Snapshot().ScannedVersions; got != 2 {
+		t.Errorf("ScannedVersions=%d, want 2 (real versions only, no common-prefix stubs)", got)
+	}
+
 	b := readFile(t, filepath.Join(dir, "delete_markers.txt"))
 	lines := strings.Split(strings.TrimRight(b, "\n"), "\n")
 	if len(lines) != 2 {

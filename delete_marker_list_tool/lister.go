@@ -133,14 +133,15 @@ func (l *Lister) processPrefix(ctx context.Context, bucket, prefix string, q *qu
 			l.stats.IncrListFailed()
 			return // 该前缀失败，继续扫其他前缀
 		}
-		l.stats.IncrScannedVersions()
-		lc.count++
 		if l.isCommonPrefix(obj) {
-			// common prefix 入队，Add-before-Push。
+			// common prefix stub：不计入 scanned_versions，只入队继续 BFS。
+			// 与 mode 1 语义对齐——scanned_versions 只算真实版本。
 			inflight.Add(1)
 			q.Push(obj.Key)
 			continue
 		}
+		l.stats.IncrScannedVersions()
+		lc.count++
 		if obj.IsDeleteMarker {
 			l.out.WriteDeleteMarker(obj.Key, obj.VersionID)
 			l.stats.IncrDeleteMarkers()
