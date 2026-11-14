@@ -54,24 +54,6 @@ func resolvePrefixes(prefix, retryPath string) ([]string, error) {
 	return []string{""}, nil
 }
 
-// validateFlags 是 resolvePrefixes 的可测包装——不依赖 flag 解析，直接接受
-// cfgPath/bucket/prefix/retryPath 四元组校验。cfgPath/bucket 非空 + 互斥规则
-// + retry 文件存在性。
-func validateFlags(cfgPath, bucket, prefix, retryPath string) error {
-	if cfgPath == "" || bucket == "" {
-		return fmt.Errorf("cfgPath and bucket are required")
-	}
-	if prefix != "" && retryPath != "" {
-		return fmt.Errorf("-prefix and -retry are mutually exclusive")
-	}
-	if retryPath != "" {
-		if _, err := os.Stat(retryPath); err != nil {
-			return fmt.Errorf("retry file %s: %w", retryPath, err)
-		}
-	}
-	return nil
-}
-
 // run 是主流程，被 main 和测试调用。返回 nil 表示成功扫完。
 // prefixes 是初始入队前缀列表（至少 1 个元素）；mode 1 只用 prefixes[0]，
 // mode 2 全部入队。

@@ -101,40 +101,61 @@ func TestRun_BucketDoesNotExist(t *testing.T) {
 	}
 }
 
-// TestValidateFlags_RetryAndPrefixMutuallyExclusive 验证 -retry 和 -prefix
-// 同时给时报错——互斥语义防误用。
-func TestValidateFlags_RetryAndPrefixMutuallyExclusive(t *testing.T) {
-	err := validateFlags("cfg.yaml", "bkt", "someprefix", "retry.txt")
+// TestResolvePrefixes_MutuallyExclusive 验证 -retry 和 -prefix 同时给时报错——
+// 互斥语义防误用。直接测生产路径 resolvePrefixes（main.go:29 调用）。
+func TestResolvePrefixes_MutuallyExclusive(t *testing.T) {
+	_, err := resolvePrefixes("someprefix", "retry.txt")
 	if err == nil {
 		t.Errorf("expected error when both -prefix and -retry are set")
 	}
 }
 
-// TestValidateFlags_RetryFileMustExist 验证 -retry 文件不存在时报错——
-// 预检阶段报错而非半启动后失败。
-func TestValidateFlags_RetryFileMustExist(t *testing.T) {
-	err := validateFlags("cfg.yaml", "bkt", "", filepath.Join(t.TempDir(), "nope.txt"))
+// TestResolvePrefixes_RetryFileNotFound 验证 -retry 文件不存在时报错——
+// resolvePrefixes 内部调 readRetryPrefixes，文件缺失在 BFS 启动前报出。
+func TestResolvePrefixes_RetryFileNotFound(t *testing.T) {
+	_, err := resolvePrefixes("", filepath.Join(t.TempDir(), "nope.txt"))
 	if err == nil {
 		t.Errorf("expected error when -retry file does not exist")
 	}
 }
 
-// TestValidateFlags_OnlyRetryOK 验证只给 -retry（存在文件）不报错。
-func TestValidateFlags_OnlyRetryOK(t *testing.T) {
+// TestResolvePrefixes_OnlyRetryReturnsPrefixes 验证只给 -retry（存在文件）
+// 返回文件里的 prefix 列表，不报错。
+func TestResolvePrefixes_OnlyRetryReturnsPrefixes(t *testing.T) {
 	dir := t.TempDir()
 	retryPath := filepath.Join(dir, "retry.txt")
 	if err := os.WriteFile(retryPath, []byte("a/\nb/\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateFlags("cfg.yaml", "bkt", "", retryPath); err != nil {
-		t.Errorf("unexpected error for -retry only: %v", err)
+	out, err := resolvePrefixes("", retryPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 2 || out[0] != "a/" || out[1] != "b/" {
+		t.Errorf("got %v, want [a/ b/]", out)
 	}
 }
 
-// TestValidateFlags_OnlyPrefixOK 验证只给 -prefix 不报错。
-func TestValidateFlags_OnlyPrefixOK(t *testing.T) {
-	if err := validateFlags("cfg.yaml", "bkt", "someprefix", ""); err != nil {
-		t.Errorf("unexpected error for -prefix only: %v", err)
+// TestResolvePrefixes_OnlyPrefix 验证只给 -prefix 返回单元素 slice。
+func TestResolvePrefixes_OnlyPrefix(t *testing.T) {
+	out, err := resolvePrefixes("someprefix", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 1 || out[0] != "someprefix" {
+		t.Errorf("got %v, want [someprefix]", out)
+	}
+}
+
+// TestResolvePrefixes_BothEmptyIsRoot 验证两者都空时返回 root prefix [""]——
+// 扫整个 bucket。
+func TestResolvePrefixes_BothEmptyIsRoot(t *testing.T) {
+	out, err := resolvePrefixes("", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 1 || out[0] != "" {
+		t.Errorf("got %v, want [\"\"]", out)
 	}
 }
 

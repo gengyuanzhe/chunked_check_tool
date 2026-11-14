@@ -124,9 +124,9 @@ flowchart TD
    - **`version_id == "null"` 不是判断标志**：`"null"` 是版本控制前旧对象的合法 VersionId（AWS 标准），不是目录标记标识。过滤 vid=null 会误伤所有版本控制前的旧对象，偏差更大。
    - **mode 1 无此问题**：recursive 列举不分 shard，目录 key 本身作为 Version 直接返回。
 
-13. **`-retry <file>` 与 `-prefix` 互斥**：`-retry` 读文件每行一个 prefix，初始 BFS 入队用该列表（去重保序）。`-retry` 只支持 mode 2（mode 1 单流不支持多 prefix 入口，`Lister.Run` 在 mode 1 + 多 prefix 时报错）。`-retry` 文件不存在 = 硬退出（`validateFlags` 预检）。`-retry` 模式下 `list_failed.txt` 仍会记新失败——可多次 `-retry list_failed.txt` 直到空文件。
+13. **`-retry <file>` 与 `-prefix` 互斥**：`-retry` 读文件每行一个 prefix，初始 BFS 入队用该列表（去重保序）。mode 1 + 多 prefix 报错（`Lister.Run` 在 `list_type==1 && len(prefixes)>1` 时报错）；mode 1 + 单 prefix retry 文件不报错——等价于 `-prefix <that prefix>` 单流重扫。`-retry` 文件不存在 = 硬退出（`resolvePrefixes` 调 `readRetryPrefixes`，文件缺失在 BFS 启动前报出）。`-retry` 模式下 `list_failed.txt` 仍会记新失败，可多次 `-retry list_failed.txt` 续传；但 `output_dir_timestamp: true`（默认）时每次运行目录不同，retry 文件需指向上一轮的 `<output_dir>_<ts>/list_failed.txt`。
 
-14. **`-retry` 是 prefix 粒度重扫，不是 next-marker 页级续传**：失败 prefix 已成功的前 N 页会重扫；但因 `delete_markers.txt` 是 `O_APPEND`，已写入的 marker 会重复追加。续传场景下前 N 页未写入（prefix 失败前根本没扫到那些 marker），所以实际不重复——但用户若手动构造 retry 文件（含已扫完的 prefix）会重复，需自行去重。Page-level 续传需要把 `ListVersions` 从 channel API 改成 paginator + 持久化 next-marker，本期不做。
+14. **`-retry` 是 prefix 粒度重扫，不是 next-marker 页级续传**：失败 prefix 已成功的前 N 页会重扫；但因 `delete_markers.txt` 是 `O_APPEND`，已写入的 marker 会重复追加。续传场景下前 N 页未写入（prefix 失败前根本没扫到那些 marker），所以实际不重复；但嵌套失败（`a/` 失败前已 enqueue `a/b/`，`a/b/` 也失败）retry 时 `a/` 重扫会再次 enqueue `a/b/`，导致 `a/b/` 扫两次、marker 重复写入——下游 cleanup 工具按 append-union 处理，重复无害但需知晓。Page-level 续传需把 `ListVersions` 从 channel API 改成 paginator + 持久化 next-marker，本期不做。
 
 ## 6. 约束
 
