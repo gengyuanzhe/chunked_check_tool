@@ -400,3 +400,34 @@ func TestLister_Mode2_BFSWithCommonPrefix(t *testing.T) {
 	}
 }
 
+
+// TestLister_RetryRejectedByMode1 验证 mode 1 + 多 prefix 入口报错——
+// mode 1 单流不支持 -retry（多 prefix），用户应用 -prefix 单值。
+func TestLister_RetryRejectedByMode1(t *testing.T) {
+	srv, _ := newFakeVersionedS3(t, mode1XML)
+	defer srv.Close()
+	cfg := &Config{
+		Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s",
+		ListType: 1, ListConcurrency: 1,
+		OutputDir: filepath.Join(t.TempDir(), "out"), OutputDirTimestamp: false,
+	}
+	client, err := NewS3Client(cfg, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := NewOutput(cfg, "testbucket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stats Stats
+	progress := NewProgressPrinter(&strings.Builder{})
+	l := NewLister(cfg, client, out, &stats, progress)
+	err = l.Run(context.Background(), "testbucket", []string{"a/", "b/"})
+	if err == nil {
+		out.FlushAndWait()
+		out.Close()
+		t.Fatalf("expected error for mode 1 with multiple prefixes")
+	}
+	out.FlushAndWait()
+	out.Close()
+}

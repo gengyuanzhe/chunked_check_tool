@@ -12,25 +12,70 @@ import (
 )
 
 // main 解析 flag，调用 run。错误时 stderr + exit 1。
+// -prefix 和 -retry 互斥：-retry 从文件读 prefix 列表（一行一个），-prefix
+// 是单值的语法糖。两者都空 = 扫整个 bucket（root prefix）。
 func main() {
 	cfgPath := flag.String("c", "", "config yaml path")
 	bucket := flag.String("bkt", "", "bucket name")
-	prefix := flag.String("prefix", "", "list prefix (default empty = whole bucket)")
+	prefix := flag.String("prefix", "", "list prefix (default empty = whole bucket; mutually exclusive with -retry)")
+	retryPath := flag.String("retry", "", "retry prefix file, one prefix per line (mutually exclusive with -prefix)")
 	flag.Parse()
 
 	if *cfgPath == "" || *bucket == "" {
-		fmt.Fprintln(os.Stderr, "usage: -c config.yaml -bkt <bucket> [-prefix p]")
+		fmt.Fprintln(os.Stderr, "usage: -c config.yaml -bkt <bucket> [-prefix p | -retry file]")
 		os.Exit(2)
 	}
 
-	if err := run(*cfgPath, *bucket, *prefix); err != nil {
+	prefixes, err := resolvePrefixes(*prefix, *retryPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(2)
+	}
+
+	if err := run(*cfgPath, *bucket, prefixes); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
+// resolvePrefixes 把 -prefix / -retry flag 解析成初始 prefix 列表。
+// 互斥规则：两者同时给报错。-retry 文件必须存在（预检，防半启动后失败）。
+// 两者都空 = [""]（root prefix，扫整个 bucket）。
+func resolvePrefixes(prefix, retryPath string) ([]string, error) {
+	if prefix != "" && retryPath != "" {
+		return nil, fmt.Errorf("-prefix and -retry are mutually exclusive")
+	}
+	if retryPath != "" {
+		return readRetryPrefixes(retryPath)
+	}
+	if prefix != "" {
+		return []string{prefix}, nil
+	}
+	return []string{""}, nil
+}
+
+// validateFlags 是 resolvePrefixes 的可测包装——不依赖 flag 解析，直接接受
+// cfgPath/bucket/prefix/retryPath 四元组校验。cfgPath/bucket 非空 + 互斥规则
+// + retry 文件存在性。
+func validateFlags(cfgPath, bucket, prefix, retryPath string) error {
+	if cfgPath == "" || bucket == "" {
+		return fmt.Errorf("cfgPath and bucket are required")
+	}
+	if prefix != "" && retryPath != "" {
+		return fmt.Errorf("-prefix and -retry are mutually exclusive")
+	}
+	if retryPath != "" {
+		if _, err := os.Stat(retryPath); err != nil {
+			return fmt.Errorf("retry file %s: %w", retryPath, err)
+		}
+	}
+	return nil
+}
+
 // run 是主流程，被 main 和测试调用。返回 nil 表示成功扫完。
-func run(cfgPath, bucket, prefix string) error {
+// prefixes 是初始入队前缀列表（至少 1 个元素）；mode 1 只用 prefixes[0]，
+// mode 2 全部入队。
+func run(cfgPath, bucket string, prefixes []string) error {
 	cfg, err := LoadConfig(cfgPath)
 	if err != nil {
 		return err
@@ -50,8 +95,13 @@ func run(cfgPath, bucket, prefix string) error {
 	mwOut := io.MultiWriter(os.Stdout, runLog)
 	mwErr := io.MultiWriter(os.Stderr, runLog)
 
-	// 配置快照（sk 掩码）。
-	printConfigSnapshot(mwErr, cfg, bucket, prefix)
+	// 配置快照（sk 掩码）。prefix 显示：单 prefix 直显，多 prefix（retry 模式）
+	// 显示数量避免 run.log 一行过长。
+	prefixDisplay := prefixes[0]
+	if len(prefixes) > 1 {
+		prefixDisplay = fmt.Sprintf("(%d prefixes from -retry)", len(prefixes))
+	}
+	printConfigSnapshot(mwErr, cfg, bucket, prefixDisplay)
 
 	start := time.Now()
 
@@ -84,7 +134,7 @@ func run(cfgPath, bucket, prefix string) error {
 	client.SetLatencyTracker(&stats.Latency)
 
 	l := NewLister(cfg, client, out, &stats, progress)
-	listErr := l.Run(ctx, bucket, []string{prefix})
+	listErr := l.Run(ctx, bucket, prefixes)
 
 	stats.SetTotalDuration(time.Since(start))
 	out.FlushAndWait()

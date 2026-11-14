@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,7 +42,12 @@ func NewLister(cfg *Config, client *S3Client, out *Output, stats *Stats, progres
 // mode 1 流中断返回 error；mode 2 单前缀失败只记录不返回，全部扫完后返回 nil。
 // prefixes 是初始入队前缀列表（至少 1 个元素）；mode 1 只用 prefixes[0]，
 // mode 2 全部入队。retry 工作流传入 list_failed.txt 读出的多个 prefix。
+// mode 1 不支持 -retry（多 prefix 入口）——单流语义与多入口冲突，报错让用户
+// 改用 -prefix 单值。
 func (l *Lister) Run(ctx context.Context, bucket string, prefixes []string) error {
+	if l.cfg.ListType == 1 && len(prefixes) > 1 {
+		return fmt.Errorf("mode 1 does not support -retry (multiple prefixes); use -prefix instead")
+	}
 	if l.cfg.ListType == 1 {
 		return l.runMode1(ctx, bucket, prefixes[0])
 	}
