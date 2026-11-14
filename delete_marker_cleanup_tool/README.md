@@ -152,6 +152,31 @@ awk -F'\x1f' '{print $1, $2, $3, $4}' check_results.txt
 - Ctrl-C / kill -9 直接终止进程；已 flush 的结果以整行为单位存续
 - 补齐方式：把 `*_failed.txt` 当作下一轮 `-input` 重跑（行格式与输入一致，可直接复用）
 
+## 续传工作流
+
+`*_failed.txt` 与 input 行格式相同（`bkt\x1fkey\x1fversion_id[\x1flast_modified]`），可直接当下一轮 `-input`。
+
+```
+mode check:
+  首次   -mode check  -input delete_markers.txt
+       → head_failed.txt（HEAD 失败的行，原格式）
+  第二轮 -mode check  -input head_failed.txt
+       → 新的 head_failed.txt（再失败的）
+       → 循环直到本轮 head_failed.txt 为空
+
+mode delete:
+  首次   -mode delete -input delete_markers.txt（或 check_results.txt 里的 marker 行）
+       → delete_failed.txt
+  第二轮 -mode delete -input delete_failed.txt
+       → 循环直到本轮 delete_failed.txt 为空
+```
+
+注意：
+
+- **`output_dir_timestamp: true`（默认）**：每次运行 output_dir 不同，续传时 `-input` 需指向**上一轮**的 `<output_dir>_<ts>/*_failed.txt`，不是本轮目录里的文件。设 `output_dir_timestamp: false` 可固定目录、反复 append 到同一个 `*_failed.txt`，但 append 模式下文件不会自动清空，需要手动 `rm` 后再跑。
+- **行级幂等**：mode check 的 HEAD 是只读，重复扫无害；mode delete 的 DELETE 对已删除版本返回 `NoSuchVersion`/`NoSuchKey` 算成功（幂等空操作）——重扫已删成功的行不会报错。
+- **行级语义无断点**：续传是行级重扫，不是 next-marker 页级续传。失败行已成功的前一次操作不会"接续"——但 HEAD/DELETE 本身幂等，重扫无害。
+
 ## 预检
 
 `run` 启动时读输入首行解析 bkt，用 `endpoints[0]` 跑一次 `BucketExists`：
