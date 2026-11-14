@@ -80,6 +80,9 @@ func TestProgressPrinterWithQueueSnapshot(t *testing.T) {
 	if strings.Contains(out, "inflight=") {
 		t.Errorf("inflight should not be in progress line: %q", out)
 	}
+	if !strings.Contains(out, "heap=") {
+		t.Errorf("missing heap= field: %q", out)
+	}
 }
 
 func TestProgressPrinterCustomInterval(t *testing.T) {

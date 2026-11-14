@@ -124,6 +124,26 @@ latency_window_sec: 60              # 请求时延统计窗口秒数（progress 
 | `list_failed.txt` | 列举失败的前缀+页级 marker（惰性创建：文件不存在=无失败） | `prefix\x1fkeyMarker\x1fversionIdMarker`；空 marker=从第一页扫 |
 | `list_failed.log` | 失败详情（slog text） | `bucket`/`prefix`/`http_code`/`s3_code`/`req_id`/`err` |
 
+## 进度行格式
+
+每处理 `progress_interval` 条（默认 5000）打一行到 stdout + `run.log`：
+
+```
+# mode 2（BFS）
+[progress] scanned=12345 markers=678 list_failed=0 (q=42) latency_avg_ms=42.5 latency_max_ms=210.0 heap=128.5MiB
+
+# mode 1（单流）
+[progress] scanned=12345 markers=678 list_failed=0 latency_avg_ms=42.5 latency_max_ms=210.0 heap=128.5MiB
+```
+
+字段说明：
+
+- `scanned` / `markers` / `list_failed`：scanned_versions / delete_markers / list_failed 的累计计数
+- `q`（mode 2）：BFS 队列长度——待扫的 prefix 数。宽桶百万级 common prefix 下会涨到几十万，是剩余工作量，不是并发请求数
+- `latency_avg_ms` / `latency_max_ms`：`ListObjectVersions` 在最近 `latency_window_sec` 秒窗口内的平均/最大时延（不是全局平均）
+- `heap`：`runtime.MemStats.HeapInuse`（当前堆已分配含碎片，单位 MiB）。BFS 队列堆积是驻留内存，GC 回收不了——`heap` 涨到接近 OS / `GOMEMLIMIT` 上限时考虑 Ctrl-C 后 `-retry list_failed.txt` 续传
+
+
 **行分隔符 `\x1f`**（ASCII Unit Separator，控制字符）：S3 key 规范上允许 `|`，实务里偶有出现；`\x1f` 是控制字符，key 中基本不出现，撞概率比 `|` 低一两个数量级。`\x1f` 在终端不可见，查看用：
 
 ```bash
