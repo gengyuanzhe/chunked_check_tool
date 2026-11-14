@@ -77,8 +77,8 @@ func TestProgressPrinterWithQueueSnapshot(t *testing.T) {
 	if !strings.Contains(out, "q=3") {
 		t.Errorf("missing q=3: %q", out)
 	}
-	if !strings.Contains(out, "inflight=2") {
-		t.Errorf("missing inflight=2: %q", out)
+	if strings.Contains(out, "inflight=") {
+		t.Errorf("inflight should not be in progress line: %q", out)
 	}
 }
 

@@ -6,11 +6,12 @@ import (
 	"sync"
 )
 
-// QueueSnapshot 是进度行的队列快照。mode 2 填 Prefix+Inflight；
-// mode 1 不填（无队列）。
+// QueueSnapshot 是进度行的队列快照。mode 2 填 Prefix；mode 1 不填（无队列）。
+// Inflight 仅 watcher 内部判终止用，progress 行不打——稳态下 inflight = q + list_concurrency，
+// 与 q 线性相关，临近结束时 q=0 已能反映收尾状态。
 type QueueSnapshot struct {
 	Prefix   int // BFS 队列长度
-	Inflight int // inflight WaitGroup 计数
+	Inflight int // inflight WaitGroup 计数（watcher 用，progress 不打）
 }
 
 // ProgressPrinter 串行化进度行写到一个共享 io.Writer。
@@ -63,9 +64,9 @@ func (p *ProgressPrinter) MaybePrint(s *Stats, label string, count int) {
 	defer p.mu.Unlock()
 	if p.queueSnapshot != nil {
 		fmt.Fprintf(p.w,
-			"[progress] scanned=%d markers=%d list_failed=%d (q=%d inflight=%d) latency_avg_ms=%.2f latency_max_ms=%.2f\n",
+			"[progress] scanned=%d markers=%d list_failed=%d (q=%d) latency_avg_ms=%.2f latency_max_ms=%.2f\n",
 			snap.ScannedVersions, snap.DeleteMarkers, snap.ListFailed,
-			qs.Prefix, qs.Inflight, lat.AvgMs, lat.MaxMs)
+			qs.Prefix, lat.AvgMs, lat.MaxMs)
 	} else {
 		fmt.Fprintf(p.w,
 			"[progress] scanned=%d markers=%d list_failed=%d latency_avg_ms=%.2f latency_max_ms=%.2f\n",
