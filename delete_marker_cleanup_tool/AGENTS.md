@@ -42,12 +42,12 @@
 ```mermaid
 flowchart TD
     Start([main]) --> LoadCfg[LoadConfig<br/>YAML + 默认值 + 校验]
-    LoadCfg --> OpenLog[open run.log<br/>mwOut/mwErr = MultiWriter]
+    LoadCfg --> OpenLog[打开 run.log]
     OpenLog --> Snapshot[打印 config 快照<br/>sk 掩码为 ***]
-    Snapshot --> Preflight["readFirstRowBucket<br/>+ BucketExists 预检"]
-    Preflight --> NewOut[NewOutput<br/>按 mode 开 writer goroutine]
-    NewOut --> Run[RunWorkers]
-    Run --> Summary[PrintSummary + Close]
+    OpenLog --> Preflight["读首行 bkt<br/>+ BucketExists 预检"]
+    Preflight --> NewOut[NewOutput<br/>按 mode 启动 writer]
+    NewOut --> Run[RunWorkers<br/>N 个 worker 并发]
+    Run --> Summary[打印 summary + 关输出]
 ```
 
 ### worker pool 数据流

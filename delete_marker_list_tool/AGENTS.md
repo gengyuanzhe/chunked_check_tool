@@ -32,7 +32,68 @@
 | `stats.go` | atomic.Int64 计数器 + `StatsSnapshot` + `PrintSummary` |
 | `progress.go` | `ProgressPrinter`（per-worker 本地计数 + 阈值打印）+ `QueueSnapshot`（mode 2 队列/inflight 快照） |
 
-## 4. 关键不变量（改动前必须守住）
+## 4. 架构与流程
+
+### 总体流程
+
+```mermaid
+flowchart TD
+    Start([main]) --> LoadCfg[LoadConfig<br/>YAML + 默认值 + 校验]
+    LoadCfg --> OpenLog[打开 run.log]
+    OpenLog --> Snapshot[打印 config 快照<br/>sk 掩码为 ***]
+    Snapshot --> Preflight[BucketExists 预检<br/>失败硬退出]
+    Preflight --> NewClient[NewS3Client<br/>注入 latency tracker]
+    NewClient --> NewOut[NewOutput<br/>启动 3 个 writer + 3s flush]
+    NewOut --> Mode{list_type}
+    Mode -->|1| M1[mode 1: 单流递归列举]
+    Mode -->|2| M2[mode 2: BFS delimiter 并发列举]
+    M1 --> Summary[打印 summary<br/>scanned/markers/list_failed/total_sec]
+    M2 --> Summary
+```
+
+### mode 1 — 单流递归
+
+```mermaid
+flowchart LR
+    LV[ListVersions<br/>recursive=true] -->|vc| Loop[for obj := range vc]
+    LV -.->|pc 空| PCDrain[排空 pc 防泄漏]
+    Loop --> Err{obj.Err?}
+    Err -->|有| Failed[recordListFailed<br/>IncrListFailed + 返回 err]
+    Err -->|无| Count[IncrScannedVersions]
+    Count --> IsDM{IsDeleteMarker?}
+    IsDM -->|是| Write[WriteDeleteMarker<br/>key/vid/lastModified]
+    IsDM -->|否| Thresh
+    Write --> Thresh{localCount &gt;= interval?}
+    Thresh -->|是| Print[MaybePrint + reset]
+    Thresh -->|否| Loop
+    Print --> Loop
+```
+
+### mode 2 — BFS delimiter 并发
+
+```mermaid
+flowchart TD
+    Init["inflight.Add(1)<br/>queue.Push(root prefix)"] --> Spawn[spawn N workers]
+    Spawn --> W1[worker 1]
+    Spawn --> W2[worker 2]
+    Spawn --> WN[worker N]
+    W1 --> Pop1[Pop prefix]
+    W2 --> Pop2[Pop prefix]
+    WN --> PopN[Pop prefix]
+    Pop1 --> LV1[ListVersions<br/>recursive=false]
+    Pop2 --> LV2[ListVersions]
+    PopN --> LVN[ListVersions]
+    LV1 -->|vc: Version+DeleteMarker| Consume[consume vc<br/>markers→delete_markers.txt<br/>scanned++]
+    LV1 -->|pc: CommonPrefix| Enq["inflight.Add(1)<br/>queue.Push(prefix)"]
+    Enq --> Q[(无界 queue)]
+    Q -->|Pop| Pop1
+    Consume --> Dec["inflight.Add(-1)"]
+    Watcher["watcher goroutine<br/>轮询 inflight==0"] -->|SignalDone| Q
+```
+
+**终止不变量（Add-before-Push）**：入队新前缀必须先 `inflight.Add(1)` 再 `queue.Push`。违反会让 watcher 提前看到 `inflight==0` → `SignalDone` → 漏扫子目录。
+
+## 5. 关键不变量（改动前必须守住）
 
 1. **行分隔符 `\x1f`**：行格式 `bkt\x1fkey\x1fversion_id`。**绝不**改回 `|`——chunked_check_tool 用 `|`，但本工具因 key 含 `|` 会导致漏删（marker 永远删不掉），刻意换 `\x1f`。`output.go` 的 `rowSep` 常量不可改。
 
@@ -63,7 +124,7 @@
    - **`version_id == "null"` 不是判断标志**：`"null"` 是版本控制前旧对象的合法 VersionId（AWS 标准），不是目录标记标识。过滤 vid=null 会误伤所有版本控制前的旧对象，偏差更大。
    - **mode 1 无此问题**：recursive 列举不分 shard，目录 key 本身作为 Version 直接返回。
 
-## 5. 约束
+## 6. 约束
 
 - 单 `package main`，独立 `go.mod`，与 chunked_check_tool / list_only 平级
 - HTTP transport 调优对齐 chunked_check_tool：`MaxIdleConnsPerHost: 32`、`IdleConnTimeout: 90s`、`dial_timeout` 默认 10s 兜底黑洞 IP、optional `ResponseHeaderTimeout`
@@ -72,7 +133,7 @@
 - `list_type` **必须显式配置**（1 或 2），不给默认值——模式选择是正确性关键，按"校验类参数默认零值+强制显式配置"原则不设默认（与 chunked_check_tool 不同，那里 list_type 默认 2）
 - 未知 YAML 字段被忽略——可复用 chunked_check_tool 的 config.yaml
 
-## 6. 遗留任务（已知未决/未来工作）
+## 7. 遗留任务（已知未决/未来工作）
 
 1. **key 含 `\n` 的 marker 仍会撕裂行**：chunked_check_tool 同样不防护，S3 key 含换行极罕见。未来如需可加 `\n` 检测 + URL 编码路由（同 `\x1f` 路由模式）。
 
@@ -84,7 +145,7 @@
 
 5. **mode 2 终止检测用轮询**：`runMode2` 用一个 watcher goroutine 100ms 级轮询 `inflight.Load() == 0` 后 `SignalDone`。未来如需更精确可用 channel + WaitGroup 替代，但当前实现已足够快（inflight 在 ms 级变化）。
 
-## 7. 相关文档
+## 8. 相关文档
 
 - 设计文档：`../docs/superpowers/specs/2026-11-12-delete-marker-list-tool-design.md`
 - 实现计划：`../docs/superpowers/plans/2026-11-12-delete-marker-list-tool.md`
