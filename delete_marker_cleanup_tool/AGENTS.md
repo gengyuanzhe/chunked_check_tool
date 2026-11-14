@@ -35,7 +35,77 @@
 | `stats.go` | atomic.Int64 计数器 + `PrintSummary(w, mode)` 按模式切格式 |
 | `progress.go` | `ProgressPrinter`：`MaybePrintCheck` / `MaybePrintDelete` 按模式打不同字段 |
 
-## 4. 关键不变量（改动前必须守住）
+## 4. 架构与流程
+
+### 总体流程
+
+```mermaid
+flowchart TD
+    Start([main]) --> LoadCfg[LoadConfig<br/>YAML + 默认值 + 校验]
+    LoadCfg --> OpenLog[open run.log<br/>mwOut/mwErr = MultiWriter]
+    OpenLog --> Snapshot[打印 config 快照<br/>sk 掩码为 ***]
+    Snapshot --> Preflight["readFirstRowBucket<br/>+ BucketExists 预检"]
+    Preflight --> NewOut[NewOutput<br/>按 mode 开 writer goroutine]
+    NewOut --> Run[RunWorkers]
+    Run --> Summary[PrintSummary + Close]
+```
+
+### worker pool 数据流
+
+```mermaid
+flowchart LR
+    File[input.txt] --> Scan[bufio.Scanner]
+    Scan --> Parse[ParseRow<br/>3/4 段兼容<br/>invalid_keys.txt 走 URL 解码]
+    Parse -->|torn line| FailLog[head/delete_failed.log<br/>torn note]
+    Parse --> RowCh["rowCh<br/>buf 1024"]
+    RowCh -->|抢任务| W1["worker 1<br/>endpoint 0"]
+    RowCh -->|抢任务| W2["worker 2<br/>endpoint 1"]
+    RowCh -->|抢任务| WN["worker N<br/>endpoint N-1"]
+    W1 --> Mode{mode}
+    Mode -->|check| HC[handleCheck<br/>StatObject]
+    Mode -->|delete| HD[handleDelete<br/>DeleteObject]
+```
+
+### mode check — 三态分类
+
+```mermaid
+flowchart TD
+    HC[handleCheck] --> Head[StatObject HEAD]
+    Head --> Class[classifyHead]
+    Class --> C1{"Err==nil &&<br/>IsDeleteMarker?"}
+    C1 -->|是| Marker["marker<br/>IncrMarker"]
+    C1 -->|否| C2{"Err==nil &&<br/>!IsDeleteMarker?"}
+    C2 -->|是| NotMarker["not_marker<br/>IncrNotMarker"]
+    C2 -->|否| C3{"errorCode ∈<br/>{NoSuchKey, NoSuchVersion}?"}
+    C3 -->|是| Absent["absent<br/>IncrAbsent"]
+    C3 -->|否| C4{"StatusCode==404?"}
+    C4 -->|是| Absent
+    C4 -->|否| Failed["state='' ok=false<br/>IncrHeadFailed"]
+    Marker --> CR[(check_results.txt)]
+    NotMarker --> CR
+    Absent --> CR
+    Failed --> HF[(head_failed.txt<br/>lazy)]
+    Failed --> HFL[(head_failed.log<br/>slog 详情)]
+```
+
+### mode delete — 幂等删除
+
+```mermaid
+flowchart TD
+    HD[handleDelete] --> Del[DeleteObject]
+    Del --> Err{err?}
+    Err -->|nil| Ok["成功<br/>IncrDeleted"]
+    Err -->|有| Code{"errorCode ∈<br/>{NoSuchKey, NoSuchVersion}?"}
+    Code -->|是| Ok["算成功<br/>幂等空操作"]
+    Code -->|否 其他错| Failed["IncrDeleteFailed"]
+    Ok --> D[(deleted.txt)]
+    Failed --> DF[(delete_failed.txt<br/>lazy)]
+    Failed --> DFL[(delete_failed.log<br/>slog 详情)]
+```
+
+**关键点**：`NoSuchKey`/`NoSuchVersion` 计入 `deleted.txt` 而非 `delete_failed.txt`——删除按 version-id 幂等，二次删同一版本返回 404 是预期路径。
+
+## 5. 关键不变量（改动前必须守住）
 
 1. **行分隔符 `\x1f`**：输入 `bkt\x1fkey\x1fversion_id`，check 结果 `bkt\x1fkey\x1fversion_id\x1f<state>`。**绝不**改回 `|`（对齐 lister；key 含 `|` 概率高于 `\x1f`）。
 
@@ -71,7 +141,7 @@
 
 14. **预检硬退出条件**：`readFirstRowBucket` 失败（空文件 / 首行格式错）或 `BucketExists` 传输错误 → 硬退出；`exists=false` → warning + 继续（多桶输入保护——只校验首行 bkt）。
 
-## 5. 约束
+## 6. 约束
 
 - 单 `package main`，独立 `go.mod`，与 lister / chunked_check_tool 平级
 - HTTP transport 调优对齐 lister：`MaxIdleConnsPerHost: 32`、`IdleConnTimeout: 90s`、`dial_timeout` 默认 10s 兜底黑洞 IP、optional `ResponseHeaderTimeout`
@@ -80,7 +150,7 @@
 - 未知 YAML 字段被忽略——可复用 lister / chunked_check_tool 的 config.yaml
 - 集成测试用 `//go:build integration` tag 隔离，env `MINIO_ENDPOINT` / `MINIO_AK` / `MINIO_SK` 三选一缺即 `t.Skip`
 
-## 6. 遗留任务（已知未决/未来工作）
+## 7. 遗留任务（已知未决/未来工作）
 
 1. **key 含 `\n` 仍会撕裂行**：lister 同样不防护，S3 key 含换行极罕见。未来如需可加 `\n` 检测 + URL 编码路由（同 `\x1f` 路由模式）。
 
@@ -92,7 +162,7 @@
 
 5. **HEAD-on-delete-marker 的 405 判别依赖 aws-sdk-go-v2 v1.114.10 行为**：AWS SDK 对 HEAD delete marker 返回 `*awshttp.ResponseError{StatusCode:405}` + `x-amz-delete-marker: true` 头，`headResultFromErr` 据此把 `IsDeleteMarker=true, Err=nil`。升级 aws-sdk-go-v2 需回归此分支——SDK 内部错误封装如改结构会断 IsDeleteMarker 推断。
 
-## 7. 相关文档
+## 8. 相关文档
 
 - 设计文档：`../docs/superpowers/specs/2026-11-12-delete-marker-cleanup-tool-design.md`
 - 实现计划：`../docs/superpowers/plans/2026-11-12-delete-marker-cleanup-tool.md`
