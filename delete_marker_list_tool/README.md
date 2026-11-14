@@ -39,6 +39,10 @@ GOOS=linux GOARCH=arm64 go build -o delete_marker_list_arm64 .
 # config 里设 output_dir_timestamp: false
 ./delete_marker_list_tool -c config.yaml -bkt mybucket
 # （上一轮的 list_failed.txt 手动清理后重跑，结果文件追加）
+
+# 失败 prefix 续扫（mode 2）：上一轮跑完后 list_failed.txt 非空，
+# 把它当 retry 文件继续扫这些 prefix。与 -prefix 互斥。
+./delete_marker_list_tool -c config.yaml -bkt mybucket -retry <prev_output_dir>/list_failed.txt
 ```
 
 ## 命令参数
