@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -266,5 +268,71 @@ func TestIntegration_Mode2_PageLevelMarkerResume(t *testing.T) {
 	}
 	if !strings.Contains(string(rl), "delete_markers=2") {
 		t.Errorf("run.log missing delete_markers=2: %q", rl)
+	}
+}
+
+// TestIntegration_Mode2_RetryMarkerPassedToRequest 验证 retry 文件里的 marker
+// 被传到 ListObjectVersions 请求——用 fake server 检查 query 里的 key-marker /
+// version-id-marker 参数。这是页级续传的核心契约：marker 必须在请求里出现。
+// 用 fake server 而非 MinIO——MinIO 不容易模拟"分页中途失败"，fake server 可控。
+func TestIntegration_Mode2_RetryMarkerPassedToRequest(t *testing.T) {
+	var sawMarker bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if !q.Has("versions") {
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+			return
+		}
+		km := q.Get("key-marker")
+		vidm := q.Get("version-id-marker")
+		// 验证 retry 文件里的 marker 被传到请求
+		if km == "k1" && vidm == "v1" {
+			sawMarker = true
+		}
+		xml := `<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix>a/</Prefix><IsTruncated>false</IsTruncated>
+<DeleteMarker><Key>a/m.txt</Key><VersionId>dm-a</VersionId><IsLatest>true</IsLatest><LastModified>2026-01-02T15:04:05.000Z</LastModified></DeleteMarker>
+</ListVersionsResult>`
+		w.Write([]byte(xml))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgBody := strings.Join([]string{
+		"endpoints:",
+		"  - " + srv.Listener.Addr().String(),
+		"scheme: http",
+		"ak: a",
+		"sk: s",
+		"list_type: 2",
+		"list_concurrency: 1",
+		"output_dir: " + filepath.Join(dir, "out"),
+		"output_dir_timestamp: false",
+		"",
+	}, "\n")
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// retry 文件带 marker——验证 marker 被传到请求
+	retryContent := "a/\x1fk1\x1fv1\n"
+	retryPath := filepath.Join(dir, "retry.txt")
+	if err := os.WriteFile(retryPath, []byte(retryContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := readRetryEntries(retryPath)
+	if err != nil {
+		t.Fatalf("readRetryEntries: %v", err)
+	}
+	if err := run(cfgPath, "testbucket", entries); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !sawMarker {
+		t.Errorf("expected request with key-marker=k1 version-id-marker=v1, but server never saw it")
 	}
 }

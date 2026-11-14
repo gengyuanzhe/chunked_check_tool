@@ -57,54 +57,43 @@ func (l *Lister) Run(ctx context.Context, bucket string, entries []RetryEntry) e
 // runMode1: 单流递归。流中断记 list_failed（含 marker）+ 返回 error。
 // entry.KeyMarker/VersionIDMarker 非空 = 从该 marker 起续扫（retry 场景）。
 func (l *Lister) runMode1(ctx context.Context, bucket string, entry RetryEntry) error {
-	vc, pc, bc := l.client.ListVersions(ctx, bucket, entry.Prefix, true, entry.KeyMarker, entry.VersionIDMarker)
 	var localCount int
 	interval := l.progress.Interval()
-	// recursive=true 不会有 common prefix；pc 单独排空防 goroutine 泄漏。
-	pcClosed := make(chan struct{})
-	go func() {
-		for range pc {
-		}
-		close(pcClosed)
-	}()
-	// bc 由独立 goroutine 接收，更新当前 marker——vc.Err 出现时用当前 marker
-	// 写 list_failed（页级续传点）。
-	var curKeyMarker, curVersionIDMarker string
-	bcDone := make(chan struct{})
-	go func() {
-		defer close(bcDone)
-		for pb := range bc {
-			curKeyMarker = pb.NextKeyMarker
-			curVersionIDMarker = pb.NextVersionIDMarker
-		}
-	}()
-	for obj := range vc {
-		if obj.Err != nil {
-			<-bcDone
-			l.recordListFailed(entry.Prefix, curKeyMarker, curVersionIDMarker, obj.Err)
+	keyMarker, versionIDMarker := entry.KeyMarker, entry.VersionIDMarker
+	for {
+		page, err := l.client.ListVersionsPage(ctx, bucket, entry.Prefix, true, keyMarker, versionIDMarker)
+		if err != nil {
+			// keyMarker/versionIDMarker 就是这次失败请求用的 marker = 续传点。
+			l.recordListFailed(entry.Prefix, keyMarker, versionIDMarker, err)
 			l.stats.IncrListFailed()
-			<-pcClosed
-			return obj.Err
+			return err
 		}
-		l.stats.IncrScannedVersions()
-		localCount++
-		if obj.IsDeleteMarker {
-			l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified))
-			l.stats.IncrDeleteMarkers()
+		for _, obj := range page.Versions {
+			l.stats.IncrScannedVersions()
+			localCount++
+			if obj.IsDeleteMarker {
+				l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified))
+				l.stats.IncrDeleteMarkers()
+			}
+			if localCount >= interval {
+				l.progress.MaybePrint(l.stats, "scanned", localCount)
+				localCount = 0
+			}
 		}
-		if localCount >= interval {
-			l.progress.MaybePrint(l.stats, "scanned", localCount)
-			localCount = 0
+		if !page.IsTruncated {
+			break
 		}
+		keyMarker, versionIDMarker = page.NextKeyMarker, page.NextVersionIDMarker
 	}
 	l.progress.MaybePrint(l.stats, "scanned", localCount)
-	<-bcDone
-	<-pcClosed
 	return nil
 }
 
 // runMode2: BFS delimiter 并发。entries 是初始入队条目列表（至少 1 个）。
 // BFS 发现的新 common prefix 入队为 RetryEntry{Prefix: p}（markers 空，从第一页扫）。
+// inflight 计数 = 队列里待处理 + worker 正在处理的条目数；归零 = 全扫完。
+// 终止由 worker 事件触发：处理完一个条目后若发现 inflight 归零，该 worker
+// 调 q.SignalDone() 唤醒其他阻塞在 Pop 的 worker（无需轮询 goroutine）。
 func (l *Lister) runMode2(ctx context.Context, bucket string, entries []RetryEntry) error {
 	q := newQueue()
 	var inflight atomic.Int64
@@ -134,86 +123,62 @@ func (l *Lister) runMode2(ctx context.Context, bucket string, entries []RetryEnt
 					return
 				}
 				l.processPrefix(ctx, bucket, e, q, &inflight, lc)
+				// inflight == 0 表示无待处理也无在处理 = 全扫完。
+				// 该 worker 发完成信号唤醒其他阻塞 Pop 的 worker 退出。
+				// 安全性：inflight 统计入队+在处理，归零时不可能有并发 push
+				// （push 来自在处理条目，归零时无在处理），故 SignalDone 不会
+				// 误杀未处理条目。
+				if inflight.Load() == 0 {
+					q.SignalDone()
+					return
+				}
 			}
 		}()
 	}
 
-	wgDone := make(chan struct{})
-	go func() {
-		defer close(wgDone)
-		for {
-			if inflight.Load() == 0 {
-				q.SignalDone()
-				return
-			}
-			select {
-			case <-ctx.Done():
-				q.SignalDone()
-				return
-			default:
-			}
-		}
-	}()
-	<-wgDone
 	wg.Wait()
 	return nil
 }
 
-// processPrefix 处理一个条目：消费版本化列举流，分类条目。
+// processPrefix 处理一个条目：逐页列举，分类条目。
 // AWS SDK 把 <Version>/<DeleteMarker>/<CommonPrefixes> 解析到独立 slice，
-// ListVersions 返回三个 channel：vc（版本，含 marker）+ pc（common prefix）+ bc（页边界）。
-// 不再有 isCommonPrefix 启发式——key 以 / 结尾的真实版本不会被误判。
+// ListVersionsPage 把它们摊平到 VersionPage.Versions + CommonPrefixes。
 // entry.KeyMarker/VersionIDMarker 非空 = 从该 marker 起续扫（retry 场景）。
-// bc goroutine 实时更新 curKeyMarker/curVersionIDMarker——vc.Err 出现时用其写
-// list_failed（页级续传点，下页起始 marker）。bc 与 vc 都是无缓冲 channel，
-// ListVersions 发 PageBoundary 时本页所有 entry 已被消费——严格同步点。
+// 失败时 keyMarker/versionIDMarker 就是这次失败请求用的 marker = 续传点，
+// 直接写 list_failed。
 func (l *Lister) processPrefix(ctx context.Context, bucket string, entry RetryEntry, q *queue, inflight *atomic.Int64, lc *localCounter) {
 	defer inflight.Add(-1)
 	interval := l.progress.Interval()
-	vc, pc, bc := l.client.ListVersions(ctx, bucket, entry.Prefix, false, entry.KeyMarker, entry.VersionIDMarker)
-	// pc 由独立 goroutine 排空并把 common prefix 入队——vc、pc、bc 独立消费，
-	// 不互相阻塞。vc 排空即该前缀完成。
-	pcDone := make(chan struct{})
-	go func() {
-		for p := range pc {
+	keyMarker, versionIDMarker := entry.KeyMarker, entry.VersionIDMarker
+	for {
+		page, err := l.client.ListVersionsPage(ctx, bucket, entry.Prefix, false, keyMarker, versionIDMarker)
+		if err != nil {
+			l.recordListFailed(entry.Prefix, keyMarker, versionIDMarker, err)
+			l.stats.IncrListFailed()
+			return
+		}
+		for _, p := range page.CommonPrefixes {
 			inflight.Add(1)
 			// 新发现的 common prefix 从第一页扫（markers 空）。
 			q.Push(RetryEntry{Prefix: p})
 		}
-		close(pcDone)
-	}()
-	// bc goroutine 接收 PageBoundary，更新 curKeyMarker/curVersionIDMarker。
-	// 出现 Err 后等 bcDone 确保最新 marker 已写入本地变量（无 race）。
-	var curKeyMarker, curVersionIDMarker string
-	bcDone := make(chan struct{})
-	go func() {
-		defer close(bcDone)
-		for pb := range bc {
-			curKeyMarker = pb.NextKeyMarker
-			curVersionIDMarker = pb.NextVersionIDMarker
+		for _, obj := range page.Versions {
+			l.stats.IncrScannedVersions()
+			lc.count++
+			if obj.IsDeleteMarker {
+				l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified))
+				l.stats.IncrDeleteMarkers()
+			}
+			if lc.count >= interval {
+				l.progress.MaybePrint(l.stats, "scanned", lc.count)
+				lc.count = 0
+			}
 		}
-	}()
-	for obj := range vc {
-		if obj.Err != nil {
-			<-bcDone
-			l.recordListFailed(entry.Prefix, curKeyMarker, curVersionIDMarker, obj.Err)
-			l.stats.IncrListFailed()
-			<-pcDone
+		if !page.IsTruncated {
 			return
 		}
-		l.stats.IncrScannedVersions()
-		lc.count++
-		if obj.IsDeleteMarker {
-			l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified))
-			l.stats.IncrDeleteMarkers()
-		}
-		if lc.count >= interval {
-			l.progress.MaybePrint(l.stats, "scanned", lc.count)
-			lc.count = 0
-		}
+		keyMarker, versionIDMarker = page.NextKeyMarker, page.NextVersionIDMarker
 	}
-	<-bcDone
-	<-pcDone
 }
 
 // recordListFailed 从 err 提取 HTTP/S3 code + reqID，写 list_failed.txt + log。

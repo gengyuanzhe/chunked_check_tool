@@ -25,8 +25,8 @@
 |---|---|
 | `main.go` | flag 解析（`-c`/`-bkt`/`-prefix`）、`run` 编排、run.log 打开（第一个 open）、配置快照打印（sk 掩码）、BucketExists 预检、summary 打印。无信号处理器 |
 | `config.go` | `Config` 结构体 + `LoadConfig`（YAML，带默认值 + 校验 + 时间戳后缀重写） |
-| `s3client.go` | `S3Client`（s3.Client 包装）、`ListVersions(ctx, bkt, prefix, recursive) (<-chan VersionEntry, <-chan string)`（两个 channel：版本/删除标记 + common prefix）、`BucketExists`。transport 调优对齐 chunked_check_tool |
-| `lister.go` | `Lister`：mode 1 单流 + mode 2 BFS 两种驱动；不再有 `isCommonPrefix` 启发式（AWS SDK 按 XML 标签区分 Version/DeleteMarker/CommonPrefixes）；`recordListFailed` 从 `*awshttp.ResponseError` 提 StatusCode + reqID |
+| `s3client.go` | `S3Client`（s3.Client 包装）、`ListVersionsPage(ctx, bkt, prefix, recursive, keyMarker, versionIDMarker) (*VersionPage, error)`（page-at-a-time：每调一次返回一页 Version+DeleteMarker+CommonPrefixes）、`BucketExists`。transport 调优对齐 chunked_check_tool |
+| `lister.go` | `Lister`：mode 1 单流 + mode 2 BFS 两种驱动；分页循环在 worker 内部（keyMarker/versionIDMarker 是局部变量，失败时即续传点）；不再有 `isCommonPrefix` 启发式（AWS SDK 按 XML 标签区分 Version/DeleteMarker/CommonPrefixes）；`recordListFailed` 从 `*awshttp.ResponseError` 提 StatusCode + reqID |
 | `queue.go` | 无界前缀队列（slice + mutex + cond），ctx-aware Pop，`SignalDone` 终止。对齐 chunked_check_tool/queue.go 形态，砍掉 Drain（无优雅退出） |
 | `output.go` | `Output`：三个 writer goroutine（delete_markers / invalid_keys / list_failed）+ slog listLogger；`\x1f` 行分隔符；key 含 `\x1f` 自动路由到 invalid_keys + URL 编码；list_failed.txt 惰性 open；3 秒定时 flush |
 | `stats.go` | atomic.Int64 计数器 + `StatsSnapshot` + `PrintSummary` |
@@ -54,19 +54,22 @@ flowchart TD
 ### mode 1 — 单流递归
 
 ```mermaid
-flowchart LR
-    LV[ListVersions<br/>recursive=true] -->|vc| Loop[for obj := range vc]
-    LV -.->|pc 空| PCDrain[排空 pc 防泄漏]
-    Loop --> Err{obj.Err?}
-    Err -->|有| Failed[recordListFailed<br/>IncrListFailed + 返回 err]
-    Err -->|无| Count[IncrScannedVersions]
+flowchart TD
+    Init["keyMarker, versionIDMarker = entry.KeyMarker, entry.VersionIDMarker"] --> Loop{IsTruncated?}
+    Loop -->|是| LV["ListVersionsPage<br/>recursive=true<br/>用 keyMarker/versionIDMarker"]
+    LV --> Err{err?}
+    Err -->|有| Failed["recordListFailed(prefix, keyMarker, versionIDMarker, err)<br/>返回 err"]
+    Err -->|无| Iter[遍历 page.Versions]
+    Iter --> Count[IncrScannedVersions + localCount++]
     Count --> IsDM{IsDeleteMarker?}
     IsDM -->|是| Write[WriteDeleteMarker<br/>key/vid/lastModified]
     IsDM -->|否| Thresh
     Write --> Thresh{localCount &gt;= interval?}
     Thresh -->|是| Print[MaybePrint + reset]
-    Thresh -->|否| Loop
-    Print --> Loop
+    Thresh -->|否| NextMarker
+    Print --> NextMarker["keyMarker, versionIDMarker = page.NextKeyMarker, page.NextVersionIDMarker"]
+    NextMarker --> Loop
+    Loop -->|否| Done
 ```
 
 ### mode 2 — BFS delimiter 并发
@@ -77,21 +80,27 @@ flowchart TD
     Spawn --> W1[worker 1]
     Spawn --> W2[worker 2]
     Spawn --> WN[worker N]
-    W1 --> Pop1[Pop prefix]
-    W2 --> Pop2[Pop prefix]
-    WN --> PopN[Pop prefix]
-    Pop1 --> LV1[ListVersions<br/>recursive=false]
-    Pop2 --> LV2[ListVersions]
-    PopN --> LVN[ListVersions]
-    LV1 -->|vc: Version+DeleteMarker| Consume[consume vc<br/>markers→delete_markers.txt<br/>scanned++]
-    LV1 -->|pc: CommonPrefix| Enq["inflight.Add(1)<br/>queue.Push(prefix)"]
+    W1 --> Pop1["Pop prefix"]
+    W2 --> Pop2["Pop prefix"]
+    WN --> PopN["Pop prefix"]
+    Pop1 --> LV1["ListVersionsPage<br/>recursive=false<br/>keyMarker/versionIDMarker"]
+    Pop2 --> LV2["ListVersionsPage"]
+    PopN --> LVN["ListVersionsPage"]
+    LV1 -->|Version+DeleteMarker| Consume["遍历 page.Versions<br/>markers→delete_markers.txt<br/>scanned++"]
+    LV1 -->|CommonPrefix| Enq["inflight.Add(1)<br/>queue.Push(prefix)"]
     Enq --> Q[(无界 queue)]
     Q -->|Pop| Pop1
-    Consume --> Dec["inflight.Add(-1)"]
-    Watcher["watcher goroutine<br/>轮询 inflight==0"] -->|SignalDone| Q
+    Consume --> Dec["defer inflight.Add(-1)"]
+    Dec --> Check{inflight == 0?}
+    Check -->|是| Done["SignalDone + worker 退出<br/>唤醒其他阻塞 Pop 的 worker"]
+    Check -->|否| NextPage{IsTruncated?}
+    NextPage -->|是| LV1
+    NextPage -->|否| Pop1
 ```
 
-**终止不变量（Add-before-Push）**：入队新前缀必须先 `inflight.Add(1)` 再 `queue.Push`。违反会让 watcher 提前看到 `inflight==0` → `SignalDone` → 漏扫子目录。
+**终止不变量（Add-before-Push）**：入队新前缀必须先 `inflight.Add(1)` 再 `queue.Push`。违反会让 worker 提前看到 `inflight==0` → `SignalDone` → 漏扫子目录。
+
+**终止由 worker 事件触发**：worker 处理完一个 entry（`defer inflight.Add(-1)` 已减计数）后检查 `inflight.Load() == 0`，归零时该 worker 调 `q.SignalDone()` 唤醒其他阻塞 Pop 的 worker 退出。归零时无在处理条目，不可能有并发 push（push 来自在处理条目发现 common prefix），故 SignalDone 不会误杀未处理条目。无轮询 goroutine。
 
 ## 5. 关键不变量（改动前必须守住）
 
@@ -99,7 +108,7 @@ flowchart TD
 
 2. **`version_id` 字面量 `"null"` 是合法值**：S3 开版本控制之前写入的旧版本对象返回字面量字符串 `"null"` 作为 VersionId。下游删除工具必须原样透传，不要当空值。本工具原样写入结果文件，不做特殊处理。
 
-3. **AWS SDK 按 XML 标签区分 Version/DeleteMarker/CommonPrefixes**：`ListObjectVersions` 输出三个独立 slice，**没有启发式**。`ListVersions` 把 Version/DeleteMarker 摊平到 `VersionEntry{IsDeleteMarker: bool}`、把 CommonPrefixes 走独立 channel。**不可**加任何"key 以 `/` 结尾即 common prefix"的启发式——曾经 minio-go 合并 channel 导致 `94-abc-0/` 这类 key 在 mode 2 漏统计。
+3. **AWS SDK 按 XML 标签区分 Version/DeleteMarker/CommonPrefixes**：`ListObjectVersions` 输出三个独立 slice，**没有启发式**。`ListVersionsPage` 把 Version/DeleteMarker 摊平到 `VersionEntry{IsDeleteMarker: bool}`、把 CommonPrefixes 放到 `VersionPage.CommonPrefixes`。**不可**加任何"key 以 `/` 结尾即 common prefix"的启发式——曾经 minio-go 合并 channel 导致 `94-abc-0/` 这类 key 在 mode 2 漏统计。
    - null 版本对象的 VersionID 是 `"null"` 字符串（非空），按 AWS SDK 返回原样透传
 
 4. **mode 2 BFS 终止不变量——Add-before-Push**：每入队一个新前缀**先** `inflight.Add(1)` **再** `queue.Push`。违反会导致 inflight 提前归零 → 提前终止 → 漏扫子目录。对齐 chunked_check_tool/AGENTS.md §4.7。
@@ -116,7 +125,7 @@ flowchart TD
 
 10. **`\x1f`-in-key 路由**：key 含 `\x1f` 的 marker 走 `invalid_keys.txt`，key 经 `url.QueryEscape` 编码。**不可**直接写入 `delete_markers.txt`（会撕裂行字段）。`output.go` 的 `WriteDeleteMarker` 自动检测 + 路由。
 
-11. **aws-sdk-go-v2 v1.114.10 ListObjectVersions**：响应 `Versions` / `DeleteMarkers` / `CommonPrefixes` 三个独立 slice，按 XML 标签区分。`ListVersions` 把 Version + DeleteMarker 摊平到 `VersionEntry`（IsDeleteMarker 区分），CommonPrefixes 走独立 channel。升级 aws-sdk-go-v2 需重验三 slice 是否仍按 XML 标签区分（spec §4.1）。
+11. **aws-sdk-go-v2 v1.114.10 ListObjectVersions**：响应 `Versions` / `DeleteMarkers` / `CommonPrefixes` 三个独立 slice，按 XML 标签区分。`ListVersionsPage` 把 Version + DeleteMarker 摊平到 `VersionEntry`（IsDeleteMarker 区分），CommonPrefixes 放到 `VersionPage.CommonPrefixes`。升级 aws-sdk-go-v2 需重验三 slice 是否仍按 XML 标签区分（spec §4.1）。
 
 12. **已知偏差——scanned_versions 在 mode 2 对"以 / 结尾的目录 key"少统计，不修**：自研 S3 有 quirk——`delimiter=/` 列举时以 / 结尾的 key（如 `97-abc-0/`）被折叠到 `<CommonPrefixes>`，但用 `prefix=97-abc-0/` + `delimiter=/` 再列举时**不返回 `97-abc-0/` 本身**作为 Version（目录标记 quirk）。mode 2 的 BFS re-list 踩在这个 quirk 上，目录 key 本身作为 Version（vid 通常是 `"null"`）被静默丢失，导致 `scanned_versions` 比 mode 1 少。
    - **delete_markers.txt 完整正确**——`<DeleteMarker>` 是独立 XML 标签，不走 CommonPrefix 路径，所有 delete marker 都会被列出。这是工具的真正产出，不受 quirk 影响。
@@ -126,7 +135,7 @@ flowchart TD
 
 13. **`-retry <file>` 与 `-prefix` 互斥**：`-retry` 读文件每行一个 RetryEntry，初始 BFS 入队用该列表（去重保序，按 prefix+marker 三元组去重）。mode 1 + 多 entry 报错（`Lister.Run` 在 `list_type==1 && len(entries)>1` 时报错）；mode 1 + 单 entry retry 文件不报错——从该 entry 的 marker 续扫该 prefix。`-retry` 文件不存在 = 硬退出（`resolveEntries` 调 `readRetryEntries`，文件缺失在 BFS 启动前报出）。`-retry` 模式下 `list_failed.txt` 仍会记新失败，可多次 `-retry list_failed.txt` 续传；但 `output_dir_timestamp: true`（默认）时每次运行目录不同，retry 文件需指向上一轮的 `<output_dir>_<ts>/list_failed.txt`。
 
-14. **`-retry` 是 next-marker 页级续传**：每行格式 `prefix\x1fkeyMarker\x1fversionIdMarker`——失败 prefix 已扫完的最后一页的 next-marker 被写入 `list_failed.txt`，retry 时从该 marker 起续扫（不重扫已扫页）。无 `\x1f` 行向后兼容旧格式（纯 prefix，从第一页扫）。`list_failed.txt` 行格式：`prefix\x1fkeyMarker\x1fversionIdMarker\n`，三个 marker 都空 = 从第一页扫（含 root prefix）。**prefix 含 `\x1f` 不支持**——`\x1f` 是字段分隔符，无法在 3-field 格式里无歧义表示（与 `delete_markers.txt` 用 `\x1f` 分隔 key 同理的限制；S3 key/prefix 极少含 `\x1f`）。`ListVersions` 返回三路 channel：vc（Version+DeleteMarker）、pc（CommonPrefix）、bc（PageBoundary，每成功一页后发）；bc 消费 goroutine 实时更新 curKeyMarker/curVersionIDMarker，vc.Err 出现时 `<-bcDone` 后读最新 marker 写 `list_failed.txt`——严格同步点（vc 无缓冲）。
+14. **`-retry` 是 next-marker 页级续传**：每行格式 `prefix\x1fkeyMarker\x1fversionIdMarker`——失败 prefix 已扫完的最后一页的 next-marker 被写入 `list_failed.txt`，retry 时从该 marker 起续扫（不重扫已扫页）。无 `\x1f` 行向后兼容旧格式（纯 prefix，从第一页扫）。`list_failed.txt` 行格式：`prefix\x1fkeyMarker\x1fversionIdMarker\n`，三个 marker 都空 = 从第一页扫（含 root prefix）。**prefix 含 `\x1f` 不支持**——`\x1f` 是字段分隔符，无法在 3-field 格式里无歧义表示（与 `delete_markers.txt` 用 `\x1f` 分隔 key 同理的限制；S3 key/prefix 极少含 `\x1f`）。`ListVersionsPage` 是 page-at-a-time：worker 分页循环里 `keyMarker`/`versionIDMarker` 是局部变量，失败时它们的值就是这次失败请求用的 marker = 续传点，直接 `recordListFailed(prefix, keyMarker, versionIDMarker, err)`——无 channel、无时序依赖、不可能丢 marker。
 
 ## 6. 约束
 
@@ -147,7 +156,7 @@ flowchart TD
 
 4. **下游删除工具未实现**：需读 `delete_markers.txt` + `invalid_keys.txt`（后者 key 需 `url.QueryUnescape` 解码），逐条 `DeleteObject(bucket, key, VersionId)`。删除按 version-id 幂等——重复行无害。
 
-5. **mode 2 终止检测用轮询**：`runMode2` 用一个 watcher goroutine 100ms 级轮询 `inflight.Load() == 0` 后 `SignalDone`。未来如需更精确可用 channel + WaitGroup 替代，但当前实现已足够快（inflight 在 ms 级变化）。
+5. **`queue.Pop` 空等时每次起临时 goroutine 桥接 ctx 到 cond**：`queue.go` 的 Pop 在队列空时，每次都 `make(chan struct{})` + 起一个 goroutine 监听 `ctx.Done()` 后广播 cond，`cond.Wait()` 醒来后 `close(stop)` 销毁。8 worker 突发间隙各自进 Pop 空等会反复起 goroutine。更优解是 queue 构造时起一个常驻 ctx-watcher goroutine，所有 Pop 共享——但稳态下队列持续有货（大桶），空等只在收尾，收益不抵改动风险，暂不修。
 
 ## 8. 相关文档
 

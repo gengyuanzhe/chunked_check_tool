@@ -49,23 +49,15 @@ func TestListVersions_OneMarkerOneVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vc, pc, bc := c.ListVersions(context.Background(), "testbucket", "", true, "", "")
-	var got []VersionEntry
-	for obj := range vc {
-		if obj.Err != nil {
-			t.Fatalf("unexpected err: %v", obj.Err)
-		}
-		got = append(got, obj)
+	page, err := c.ListVersionsPage(context.Background(), "testbucket", "", true, "", "")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
 	}
-	for range pc {
-	}
-	for range bc {
-	}
-	if len(got) != 2 {
-		t.Fatalf("got %d entries, want 2", len(got))
+	if len(page.Versions) != 2 {
+		t.Fatalf("got %d entries, want 2", len(page.Versions))
 	}
 	var markerCount, regularCount int
-	for _, o := range got {
+	for _, o := range page.Versions {
 		if o.IsDeleteMarker {
 			markerCount++
 		} else {
@@ -85,24 +77,9 @@ func TestListVersions_ServerError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vc, pc, bc := c.ListVersions(context.Background(), "testbucket", "", true, "", "")
-	var errCount int
-	var got int
-	for obj := range vc {
-		got++
-		if obj.Err != nil {
-			errCount++
-		}
-	}
-	for range pc {
-	}
-	for range bc {
-	}
-	if got == 0 {
-		t.Errorf("expected at least one entry (the error), got 0")
-	}
-	if errCount != 1 {
-		t.Errorf("errCount=%d want 1", errCount)
+	_, err = c.ListVersionsPage(context.Background(), "testbucket", "", true, "", "")
+	if err == nil {
+		t.Errorf("expected error, got nil")
 	}
 }
 
