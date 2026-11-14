@@ -84,7 +84,7 @@ func run(cfgPath, bucket, prefix string) error {
 	client.SetLatencyTracker(&stats.Latency)
 
 	l := NewLister(cfg, client, out, &stats, progress)
-	listErr := l.Run(ctx, bucket, prefix)
+	listErr := l.Run(ctx, bucket, []string{prefix})
 
 	stats.SetTotalDuration(time.Since(start))
 	out.FlushAndWait()

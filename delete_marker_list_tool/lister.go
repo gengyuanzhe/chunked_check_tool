@@ -39,11 +39,13 @@ func NewLister(cfg *Config, client *S3Client, out *Output, stats *Stats, progres
 
 // Run 按 cfg.ListType 驱动。
 // mode 1 流中断返回 error；mode 2 单前缀失败只记录不返回，全部扫完后返回 nil。
-func (l *Lister) Run(ctx context.Context, bucket, prefix string) error {
+// prefixes 是初始入队前缀列表（至少 1 个元素）；mode 1 只用 prefixes[0]，
+// mode 2 全部入队。retry 工作流传入 list_failed.txt 读出的多个 prefix。
+func (l *Lister) Run(ctx context.Context, bucket string, prefixes []string) error {
 	if l.cfg.ListType == 1 {
-		return l.runMode1(ctx, bucket, prefix)
+		return l.runMode1(ctx, bucket, prefixes[0])
 	}
-	return l.runMode2(ctx, bucket, prefix)
+	return l.runMode2(ctx, bucket, prefixes)
 }
 
 // runMode1: 单流递归。流中断记 list_failed + 返回 error。
@@ -81,8 +83,8 @@ func (l *Lister) runMode1(ctx context.Context, bucket, prefix string) error {
 	return nil
 }
 
-// runMode2: BFS delimiter 并发。
-func (l *Lister) runMode2(ctx context.Context, bucket, prefix string) error {
+// runMode2: BFS delimiter 并发。prefixes 是初始入队前缀列表（至少 1 个）。
+func (l *Lister) runMode2(ctx context.Context, bucket string, prefixes []string) error {
 	q := newQueue()
 	var inflight atomic.Int64
 
@@ -90,8 +92,10 @@ func (l *Lister) runMode2(ctx context.Context, bucket, prefix string) error {
 		return QueueSnapshot{Prefix: q.Len(), Inflight: int(inflight.Load())}
 	})
 
-	inflight.Add(1)
-	q.Push(prefix)
+	for _, p := range prefixes {
+		inflight.Add(1)
+		q.Push(p)
+	}
 
 	conc := l.cfg.ListConcurrency
 	if conc < 1 {

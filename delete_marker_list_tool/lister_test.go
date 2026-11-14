@@ -51,7 +51,7 @@ func TestLister_Mode1_HappyPath(t *testing.T) {
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
 	l := NewLister(cfg, client, out, &stats, progress)
-	if err := l.Run(context.Background(), "testbucket", ""); err != nil {
+	if err := l.Run(context.Background(), "testbucket", []string{""}); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()
@@ -82,6 +82,96 @@ func TestLister_Mode1_HappyPath(t *testing.T) {
 	}
 }
 
+// TestLister_Mode2_RetryMultiplePrefixes 验证 Run 接受初始 prefix 列表——
+// retry 工作流的前置：l.Run(ctx, bucket, []string{"a/", "b/"}) 应让 BFS 从两个
+// 前缀同时开始扫。fake S3 按 query prefix 返回不同 XML。
+func TestLister_Mode2_RetryMultiplePrefixes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if !q.Has("versions") {
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+			return
+		}
+		prefix := q.Get("prefix")
+		var xml string
+		switch prefix {
+		case "a/":
+			xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix>a/</Prefix><IsTruncated>false</IsTruncated>
+<DeleteMarker><Key>a/m.txt</Key><VersionId>dm-a</VersionId><IsLatest>true</IsLatest><LastModified>2026-01-02T15:04:05.000Z</LastModified></DeleteMarker>
+</ListVersionsResult>`
+		case "b/":
+			xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix>b/</Prefix><IsTruncated>false</IsTruncated>
+<DeleteMarker><Key>b/m.txt</Key><VersionId>dm-b</VersionId><IsLatest>true</IsLatest><LastModified>2026-01-03T15:04:05.000Z</LastModified></DeleteMarker>
+</ListVersionsResult>`
+		default:
+			xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix>` + prefix + `</Prefix><IsTruncated>false</IsTruncated>
+</ListVersionsResult>`
+		}
+		w.Write([]byte(xml))
+	}))
+	defer srv.Close()
+	cfg := &Config{
+		Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s",
+		ListType: 2, ListConcurrency: 2,
+		OutputDir: filepath.Join(t.TempDir(), "out"), OutputDirTimestamp: false,
+	}
+	dir := cfg.OutputDir
+	client, err := NewS3Client(cfg, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := NewOutput(cfg, "testbucket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stats Stats
+	progress := NewProgressPrinter(&strings.Builder{})
+	l := NewLister(cfg, client, out, &stats, progress)
+	if err := l.Run(context.Background(), "testbucket", []string{"a/", "b/"}); err != nil {
+		t.Fatal(err)
+	}
+	out.FlushAndWait()
+	out.Close()
+
+	if got, want := stats.Snapshot().ScannedVersions, int64(2); got != want {
+		t.Errorf("ScannedVersions=%d, want %d", got, want)
+	}
+	if got, want := stats.Snapshot().DeleteMarkers, int64(2); got != want {
+		t.Errorf("DeleteMarkers=%d, want %d", got, want)
+	}
+
+	b := readFile(t, filepath.Join(dir, "delete_markers.txt"))
+	want := map[string]bool{
+		"testbucket\x1fa/m.txt\x1fdm-a\x1f2026-01-02T15:04:05Z": false,
+		"testbucket\x1fb/m.txt\x1fdm-b\x1f2026-01-03T15:04:05Z": false,
+	}
+	for _, line := range strings.Split(strings.TrimRight(b, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		if _, ok := want[line]; !ok {
+			t.Errorf("unexpected line %q", line)
+		} else {
+			want[line] = true
+		}
+	}
+	for k, seen := range want {
+		if !seen {
+			t.Errorf("missing line %q", k)
+		}
+	}
+}
 // TestLister_Mode2_KeyEndingInSlashWithNullVersion 验证以 "/" 结尾、
 // VersionId="null" 的真实 key 不被 isCommonPrefix 误判成目录占位。
 // 回归用例：自研 S3 上存在 `94-abc-0/` 这种 key，version=null，
@@ -123,7 +213,7 @@ func TestLister_Mode2_KeyEndingInSlashWithNullVersion(t *testing.T) {
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
 	l := NewLister(cfg, client, out, &stats, progress)
-	if err := l.Run(context.Background(), "testbucket", ""); err != nil {
+	if err := l.Run(context.Background(), "testbucket", []string{""}); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()
@@ -192,7 +282,7 @@ func TestLister_Mode2_KeyEndingInSlashAsVersion(t *testing.T) {
 	// worker 重列该前缀 → 服务端又返回同样的 key → 再入队…… 永不终止。
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := l.Run(ctx, "testbucket", ""); err != nil {
+	if err := l.Run(ctx, "testbucket", []string{""}); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()
@@ -275,7 +365,7 @@ func TestLister_Mode2_BFSWithCommonPrefix(t *testing.T) {
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
 	l := NewLister(cfg, client, out, &stats, progress)
-	if err := l.Run(context.Background(), "testbucket", ""); err != nil {
+	if err := l.Run(context.Background(), "testbucket", []string{""}); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()
