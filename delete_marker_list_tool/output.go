@@ -190,10 +190,13 @@ func (o *Output) WriteListFailed(prefix, keyMarker, versionIDMarker string) {
 }
 
 // WriteListFailedLog 写一条 slog 详情到 list_failed.log。
-func (o *Output) WriteListFailedLog(prefix string, statusCode int, s3Code, reqID string, err error) {
+// keyMarker/versionIDMarker 是失败请求用的 marker（=续传点），便于定位翻页位置。
+func (o *Output) WriteListFailedLog(prefix, keyMarker, versionIDMarker string, statusCode int, s3Code, reqID string, err error) {
 	o.listLogger.Error("list failed",
 		"bucket", o.bucket,
 		"prefix", prefix,
+		"key_marker", keyMarker,
+		"version_id_marker", versionIDMarker,
 		"http_code", statusCode,
 		"s3_code", s3Code,
 		"req_id", reqID,

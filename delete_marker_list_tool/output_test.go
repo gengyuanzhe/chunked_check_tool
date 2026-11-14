@@ -98,7 +98,7 @@ func TestListFailed_LazilyCreated(t *testing.T) {
 
 func TestWriteListFailedLog_WritesSlog(t *testing.T) {
 	o, dir := newTestOutput(t)
-	o.WriteListFailedLog("photos/", 500, "InternalError", "req-123", nil)
+	o.WriteListFailedLog("photos/", "", "", 500, "InternalError", "req-123", nil)
 	o.FlushAndWait()
 	o.Close()
 	b, err := os.ReadFile(filepath.Join(dir, "list_failed.log"))

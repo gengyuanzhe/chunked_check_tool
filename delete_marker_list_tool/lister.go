@@ -188,11 +188,11 @@ func (l *Lister) recordListFailed(prefix, keyMarker, versionIDMarker string, err
 	var re *awshttp.ResponseError
 	if errors.As(err, &re) {
 		l.out.WriteListFailed(prefix, keyMarker, versionIDMarker)
-		l.out.WriteListFailedLog(prefix, re.Response.StatusCode, "", re.Response.Header.Get("x-amz-request-id"), err)
+		l.out.WriteListFailedLog(prefix, keyMarker, versionIDMarker, re.Response.StatusCode, "", re.Response.Header.Get("x-amz-request-id"), err)
 		return
 	}
 	l.out.WriteListFailed(prefix, keyMarker, versionIDMarker)
-	l.out.WriteListFailedLog(prefix, 0, "", "", err)
+	l.out.WriteListFailedLog(prefix, keyMarker, versionIDMarker, 0, "", "", err)
 }
 
 // localCounter 是 worker 本地进度计数（无 per-obj atomic）。

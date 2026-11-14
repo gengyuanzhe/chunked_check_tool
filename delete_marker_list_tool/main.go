@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,6 +80,8 @@ func run(cfgPath, bucket string, entries []RetryEntry) error {
 	defer runLog.Close()
 	mwOut := io.MultiWriter(os.Stdout, runLog)
 	mwErr := io.MultiWriter(os.Stderr, runLog)
+	// [diag] 标准库 log 路由到 run.log + stderr——ListVersionsPage 的诊断行由此进 run.log。
+	log.SetOutput(mwErr)
 
 	// 配置快照（sk 掩码）。prefix 显示：单 prefix 直显，多 prefix（retry 模式）
 	// 显示数量避免 run.log 一行过长。

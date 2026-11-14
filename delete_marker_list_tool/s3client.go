@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -115,6 +116,9 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 	if versionIDMarker != "" {
 		reqVersionIDMarker = aws.String(versionIDMarker)
 	}
+	// [diag] 记录每次请求的入参 marker（=进 URL 的 key-marker/version-id-marker）。
+	// 追 version-id-marker=0 来源：看 reqVIDM 是否非预期地是 "0"。
+	log.Printf("[list-page] req bucket=%s prefix=%q recursive=%v km=%q vidm=%q", bucket, prefix, recursive, keyMarker, versionIDMarker)
 	start := time.Now()
 	out, err := c.client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
 		Bucket:          aws.String(bucket),
@@ -127,8 +131,16 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 		c.latency.Record(time.Since(start))
 	}
 	if err != nil {
+		// [diag] 请求失败也打返回值（err 里无 marker）——入参已在上面记录。
+		log.Printf("[list-page] err bucket=%s prefix=%q km=%q vidm=%q err=%v", bucket, prefix, keyMarker, versionIDMarker, err)
 		return nil, err
 	}
+	// [diag] 记录服务端返回的 next-marker——这是下一页请求用的 marker，
+	// 也是失败时（下一页）写进 list_failed 的续传点。
+	log.Printf("[list-page] resp bucket=%s prefix=%q nextKM=%q nextVIDM=%q truncated=%v nVer=%d nDM=%d nCP=%d",
+		bucket, prefix,
+		aws.ToString(out.NextKeyMarker), aws.ToString(out.NextVersionIdMarker),
+		aws.ToBool(out.IsTruncated), len(out.Versions), len(out.DeleteMarkers), len(out.CommonPrefixes))
 	page := &VersionPage{
 		NextKeyMarker:       aws.ToString(out.NextKeyMarker),
 		NextVersionIDMarker: aws.ToString(out.NextVersionIdMarker),
