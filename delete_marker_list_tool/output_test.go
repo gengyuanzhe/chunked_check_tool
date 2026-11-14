@@ -70,16 +70,17 @@ func TestWriteInvalidKey_UrlEncodesKey(t *testing.T) {
 
 func TestWriteListFailed_Contract(t *testing.T) {
 	o, dir := newTestOutput(t)
-	o.WriteListFailed("photos/") // non-empty prefix
-	o.WriteListFailed("")        // empty prefix → empty line
+	o.WriteListFailed("photos/", "", "") // non-empty prefix, no markers (from page 1)
+	o.WriteListFailed("", "", "")        // empty prefix + no markers → root prefix from page 1
+	o.WriteListFailed("photos/", "k1", "v1") // page-level resume: prefix + markers
 	o.FlushAndWait()
 	o.Close()
 	b, err := os.ReadFile(filepath.Join(dir, "list_failed.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Two lines: "photos/" and ""
-	want := "photos/\n\n"
+	// Three lines, each `prefix\x1fkeyMarker\x1fversionIdMarker\n`
+	want := "photos/\x1f\x1f\n\x1f\x1f\nphotos/\x1fk1\x1fv1\n"
 	if string(b) != want {
 		t.Errorf("got %q want %q", string(b), want)
 	}

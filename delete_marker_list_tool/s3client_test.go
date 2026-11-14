@@ -49,7 +49,7 @@ func TestListVersions_OneMarkerOneVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vc, pc := c.ListVersions(context.Background(), "testbucket", "", true)
+	vc, pc, bc := c.ListVersions(context.Background(), "testbucket", "", true, "", "")
 	var got []VersionEntry
 	for obj := range vc {
 		if obj.Err != nil {
@@ -58,6 +58,8 @@ func TestListVersions_OneMarkerOneVersion(t *testing.T) {
 		got = append(got, obj)
 	}
 	for range pc {
+	}
+	for range bc {
 	}
 	if len(got) != 2 {
 		t.Fatalf("got %d entries, want 2", len(got))
@@ -83,7 +85,7 @@ func TestListVersions_ServerError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vc, pc := c.ListVersions(context.Background(), "testbucket", "", true)
+	vc, pc, bc := c.ListVersions(context.Background(), "testbucket", "", true, "", "")
 	var errCount int
 	var got int
 	for obj := range vc {
@@ -93,6 +95,8 @@ func TestListVersions_ServerError(t *testing.T) {
 		}
 	}
 	for range pc {
+	}
+	for range bc {
 	}
 	if got == 0 {
 		t.Errorf("expected at least one entry (the error), got 0")

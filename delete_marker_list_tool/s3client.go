@@ -89,19 +89,39 @@ type VersionEntry struct {
 	Err            error // 非空表示列举失败，调用方应终止该前缀
 }
 
+// PageBoundary 是每成功一页后发的页边界快照——NextKeyMarker /
+// NextVersionIDMarker 是续扫下一页的起始 marker。调用方收到后可作 checkpoint；
+// 因 vc 是无缓冲 channel，调用方收到 PageBoundary 时本页所有 entry 已被消费，
+// 即"上一页完成"的严格同步点。
+type PageBoundary struct {
+	NextKeyMarker       string
+	NextVersionIDMarker string
+}
+
 // ListVersions 返回版本化列举流。
 // recursive=true 不带 delimiter（流里吐所有 key 的所有版本）；
 // recursive=false 带 / delimiter（流里吐直接子 key 的所有版本 +
 // common prefix 作为独立返回值）。
+// keyMarker/versionIDMarker 非空 = 从该 marker 起续扫（retry 场景）。
 // 三类条目（Version/DeleteMarker/CommonPrefix）按 XML 标签区分，
 // 不靠字段零值启发式——key 以 / 结尾的真实版本不会被误判成 common prefix。
-func (c *S3Client) ListVersions(ctx context.Context, bucket, prefix string, recursive bool) (<-chan VersionEntry, <-chan string) {
+// 三路 channel：vc（Version+DeleteMarker）、pc（CommonPrefix）、
+// bc（PageBoundary，每成功一页后发）。
+func (c *S3Client) ListVersions(ctx context.Context, bucket, prefix string, recursive bool, keyMarker, versionIDMarker string) (<-chan VersionEntry, <-chan string, <-chan PageBoundary) {
 	vc := make(chan VersionEntry)
 	pc := make(chan string)
+	bc := make(chan PageBoundary)
 	go func() {
 		defer close(vc)
 		defer close(pc)
-		var keyMarker, versionIDMarker *string
+		defer close(bc)
+		var km, vidm *string
+		if keyMarker != "" {
+			km = aws.String(keyMarker)
+		}
+		if versionIDMarker != "" {
+			vidm = aws.String(versionIDMarker)
+		}
 		delimiter := "/"
 		if recursive {
 			delimiter = ""
@@ -112,8 +132,8 @@ func (c *S3Client) ListVersions(ctx context.Context, bucket, prefix string, recu
 				Bucket:          aws.String(bucket),
 				Prefix:          aws.String(prefix),
 				Delimiter:       aws.String(delimiter),
-				KeyMarker:       keyMarker,
-				VersionIdMarker: versionIDMarker,
+				KeyMarker:       km,
+				VersionIdMarker: vidm,
 			})
 			if c.latency != nil {
 				c.latency.Record(time.Since(start))
@@ -146,11 +166,15 @@ func (c *S3Client) ListVersions(ctx context.Context, bucket, prefix string, recu
 			if !aws.ToBool(out.IsTruncated) {
 				return
 			}
-			keyMarker = out.NextKeyMarker
-			versionIDMarker = out.NextVersionIdMarker
+			km = out.NextKeyMarker
+			vidm = out.NextVersionIdMarker
+			bc <- PageBoundary{
+				NextKeyMarker:       aws.ToString(km),
+				NextVersionIDMarker: aws.ToString(vidm),
+			}
 		}
 	}()
-	return vc, pc
+	return vc, pc, bc
 }
 
 // BucketExists 探测桶是否存在/可达。

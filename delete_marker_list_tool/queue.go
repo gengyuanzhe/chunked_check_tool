@@ -6,11 +6,13 @@ import (
 )
 
 // queue 是无界前缀队列（BFS）。slice + mutex + cond，ctx-aware Pop。
+// items 是 RetryEntry 而非纯 prefix——retry 模式初始入队条目带页级续传 marker；
+// BFS 发现的新 common prefix 入队时 markers 空（从第一页扫）。
 // 对齐 chunked_check_tool/queue.go 的形态，但砍掉 Drain（本工具无优雅退出）。
 type queue struct {
-	mu   sync.Mutex
-	cond *sync.Cond
-	items []string
+	mu    sync.Mutex
+	cond  *sync.Cond
+	items []RetryEntry
 	done  bool
 }
 
@@ -20,16 +22,16 @@ func newQueue() *queue {
 	return q
 }
 
-// Push 入队一个前缀。
-func (q *queue) Push(p string) {
+// Push 入队一个条目（prefix + 可选 markers）。
+func (q *queue) Push(p RetryEntry) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.items = append(q.items, p)
 	q.cond.Signal()
 }
 
-// Pop 取一个前缀。返回 (prefix, true)；ctx 取消或 SignalDone 后返回 ("", false)。
-func (q *queue) Pop(ctx context.Context) (string, bool) {
+// Pop 取一个条目。返回 (entry, true)；ctx 取消或 SignalDone 后返回 (zero, false)。
+func (q *queue) Pop(ctx context.Context) (RetryEntry, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -53,15 +55,15 @@ func (q *queue) Pop(ctx context.Context) (string, bool) {
 		close(stop)
 		select {
 		case <-ctxDone:
-			return "", false
+			return RetryEntry{}, false
 		default:
 		}
 	}
 	if q.done && len(q.items) == 0 {
-		return "", false
+		return RetryEntry{}, false
 	}
 	if len(q.items) == 0 {
-		return "", false
+		return RetryEntry{}, false
 	}
 	p := q.items[0]
 	q.items = q.items[1:]

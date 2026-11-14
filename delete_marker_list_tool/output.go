@@ -29,7 +29,7 @@ type Output struct {
 
 	deleteMarkerCh  chan [3]string // {key, versionID, lastModified}
 	invalidKeysCh   chan [3]string // {key, versionID, lastModified}, key 已 URL 编码
-	listFailedCh    chan string
+	listFailedCh    chan [3]string // [prefix, keyMarker, versionIDMarker]
 
 	deleteMarkerFile *os.File
 	invalidKeysFile   *os.File
@@ -54,7 +54,7 @@ func NewOutput(cfg *Config, bucket string) (*Output, error) {
 		bucket:         bucket,
 		deleteMarkerCh: make(chan [3]string, 1024),
 		invalidKeysCh:  make(chan [3]string, 1024),
-		listFailedCh:   make(chan string, 256),
+		listFailedCh:   make(chan [3]string, 256),
 	}
 
 	var err error
@@ -131,8 +131,10 @@ func (o *Output) startWriter(file *os.File, ch chan [3]string, isListFailed bool
 }
 
 // writeListFailedLine 惰性 open list_failed.txt 并写入一行。
-// 空前缀 = 空行（root prefix 失败）；与"无失败"（文件不存在）明确可区分。
-func (o *Output) writeListFailedLine(prefix string) {
+// 行格式：prefix\x1fkeyMarker\x1fversionIdMarker（空 marker = 从第一页扫）。
+// 空前缀 + 空 marker = 空行 + \x1f + \x1f（root prefix 从第一页扫失败）。
+// 与"无失败"（文件不存在）明确可区分——文件存在即有失败。
+func (o *Output) writeListFailedLine(parts [3]string) {
 	o.listFailedMu.Lock()
 	defer o.listFailedMu.Unlock()
 	if o.listFailedFile == nil {
@@ -140,12 +142,16 @@ func (o *Output) writeListFailedLine(prefix string) {
 			os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
 			// 写 log 文件记录错误，丢这一行。
-			o.listLogger.Error("open list_failed.txt failed", "err", err, "prefix", prefix)
+			o.listLogger.Error("open list_failed.txt failed", "err", err, "prefix", parts[0])
 			return
 		}
 		o.listFailedFile = f
 	}
-	o.listFailedFile.WriteString(prefix)
+	o.listFailedFile.WriteString(parts[0])
+	o.listFailedFile.WriteString("\x1f")
+	o.listFailedFile.WriteString(parts[1])
+	o.listFailedFile.WriteString("\x1f")
+	o.listFailedFile.WriteString(parts[2])
 	o.listFailedFile.WriteString("\n")
 }
 
@@ -178,8 +184,9 @@ func (o *Output) WriteInvalidKey(key, versionID, lastModified string) {
 }
 
 // WriteListFailed 写一行到 list_failed.txt（惰性 open）。
-func (o *Output) WriteListFailed(prefix string) {
-	o.listFailedCh <- prefix
+// prefix + (keyMarker, versionIDMarker) 三元组——非空 marker 表示页级续传点。
+func (o *Output) WriteListFailed(prefix, keyMarker, versionIDMarker string) {
+	o.listFailedCh <- [3]string{prefix, keyMarker, versionIDMarker}
 }
 
 // WriteListFailedLog 写一条 slog 详情到 list_failed.log。

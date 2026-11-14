@@ -51,7 +51,7 @@ func TestLister_Mode1_HappyPath(t *testing.T) {
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
 	l := NewLister(cfg, client, out, &stats, progress)
-	if err := l.Run(context.Background(), "testbucket", []string{""}); err != nil {
+	if err := l.Run(context.Background(), "testbucket", []RetryEntry{{Prefix: ""}}); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()
@@ -83,7 +83,7 @@ func TestLister_Mode1_HappyPath(t *testing.T) {
 }
 
 // TestLister_Mode2_RetryMultiplePrefixes 验证 Run 接受初始 prefix 列表——
-// retry 工作流的前置：l.Run(ctx, bucket, []string{"a/", "b/"}) 应让 BFS 从两个
+// retry 工作流的前置：l.Run(ctx, bucket, []RetryEntry{{Prefix: "a/"}, {Prefix: "b/"}}) 应让 BFS 从两个
 // 前缀同时开始扫。fake S3 按 query prefix 返回不同 XML。
 func TestLister_Mode2_RetryMultiplePrefixes(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -138,7 +138,7 @@ func TestLister_Mode2_RetryMultiplePrefixes(t *testing.T) {
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
 	l := NewLister(cfg, client, out, &stats, progress)
-	if err := l.Run(context.Background(), "testbucket", []string{"a/", "b/"}); err != nil {
+	if err := l.Run(context.Background(), "testbucket", []RetryEntry{{Prefix: "a/"}, {Prefix: "b/"}}); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()
@@ -213,7 +213,7 @@ func TestLister_Mode2_KeyEndingInSlashWithNullVersion(t *testing.T) {
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
 	l := NewLister(cfg, client, out, &stats, progress)
-	if err := l.Run(context.Background(), "testbucket", []string{""}); err != nil {
+	if err := l.Run(context.Background(), "testbucket", []RetryEntry{{Prefix: ""}}); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()
@@ -282,7 +282,7 @@ func TestLister_Mode2_KeyEndingInSlashAsVersion(t *testing.T) {
 	// worker 重列该前缀 → 服务端又返回同样的 key → 再入队…… 永不终止。
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := l.Run(ctx, "testbucket", []string{""}); err != nil {
+	if err := l.Run(ctx, "testbucket", []RetryEntry{{Prefix: ""}}); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()
@@ -365,7 +365,7 @@ func TestLister_Mode2_BFSWithCommonPrefix(t *testing.T) {
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
 	l := NewLister(cfg, client, out, &stats, progress)
-	if err := l.Run(context.Background(), "testbucket", []string{""}); err != nil {
+	if err := l.Run(context.Background(), "testbucket", []RetryEntry{{Prefix: ""}}); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()
@@ -422,7 +422,7 @@ func TestLister_RetryRejectedByMode1(t *testing.T) {
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
 	l := NewLister(cfg, client, out, &stats, progress)
-	err = l.Run(context.Background(), "testbucket", []string{"a/", "b/"})
+	err = l.Run(context.Background(), "testbucket", []RetryEntry{{Prefix: "a/"}, {Prefix: "b/"}})
 	if err == nil {
 		out.FlushAndWait()
 		out.Close()

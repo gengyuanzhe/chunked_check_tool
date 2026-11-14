@@ -52,18 +52,20 @@ GOOS=linux GOARCH=arm64 go build -o delete_marker_list_arm64 .
 | `-c` | 是 | 配置文件路径（YAML） |
 | `-bkt` | 是 | 桶名 |
 | `-prefix` | 否 | 列举起点前缀，默认空（整个桶）。与 `-retry` 互斥 |
-| `-retry` | 否 | retry 前缀文件，每行一个 prefix；用于续扫上一次失败的 prefix（详见"续传工作流"）。与 `-prefix` 互斥；mode 1 + ≥2 prefix 时报错 |
+| `-retry` | 否 | retry 续扫文件，每行 `prefix\x1fkeyMarker\x1fversionIdMarker`（详见"续传工作流"）。与 `-prefix` 互斥；mode 1 + ≥2 entry 时报错 |
 
 无其他 flag。不支持 `-nextmarker`、`-check-file`、`-list-file`、`-backup-file`、`-resume-list`、`-resume-journal`（这些是 chunked_check_tool 的文件输入/断点续跑 flag，本工具刻意砍掉）。
 
 ## 续传工作流
 
-mode 2 列举失败会写到 `<output_dir>/list_failed.txt`（一行一个 prefix，空行 = root prefix）。续传流程：
+mode 2 列举失败会写到 `<output_dir>/list_failed.txt`，每行格式 `prefix\x1fkeyMarker\x1fversionIdMarker`——失败 prefix 已扫完的最后一页的 next-marker 一并记下，retry 时从该 marker 起续扫（不重扫已扫页）。空 marker = 从第一页扫；三个 marker 都空 + 空 prefix = root prefix 从第一页扫。
+
+续传流程：
 
 ```
 list（首次扫，-prefix 或全桶）
   → 看 <output_dir>/list_failed.txt 有失败 prefix
-  → -retry <上一轮 output_dir>/list_failed.txt（重扫失败 prefix，新失败写本轮 list_failed.txt）
+  → -retry <上一轮 output_dir>/list_failed.txt（从 marker 续扫失败 prefix，新失败写本轮 list_failed.txt）
   → 再看本轮 list_failed.txt
   → 循环直到本轮 list_failed.txt 为空
 ```
@@ -71,8 +73,9 @@ list（首次扫，-prefix 或全桶）
 注意：
 
 - **`output_dir_timestamp: true`（默认）**：每次运行 output_dir 不同，retry 文件需指向**上一轮**的 `<output_dir>_<ts>/list_failed.txt`，不是本轮目录里的文件（本轮的 list_failed.txt 是这次失败才会写）。设 `output_dir_timestamp: false` 可固定目录、反复 append 到同一个 list_failed.txt，但要注意 append 模式下文件不会自动清空。
-- **`-retry` 是 prefix 粒度重扫**，不是页级断点续传：失败 prefix 已成功的前 N 页会重扫。`delete_markers.txt` 是 `O_APPEND`，已写入的 marker 会重复追加；续传场景下失败前根本没扫到那些 marker，所以实际不重复；但**嵌套失败**（`a/` 失败前已 enqueue `a/b/`，`a/b/` 也失败）retry 时 `a/` 重扫会再次 enqueue `a/b/`，导致 `a/b/` 扫两次、marker 重复——下游 cleanup 工具按 append-union 处理，重复无害。
-- **mode 1 + `-retry`**：mode 1 是单流递归，多 prefix 入口与单流语义冲突——`-retry` 文件含 ≥2 prefix 时报错；只含 1 prefix 时不报错，等价于 `-prefix <that prefix>` 单流重扫。
+- **`-retry` 是 next-marker 页级续传**：失败 prefix 已扫完的最后一页的 NextKeyMarker/NextVersionIdMarker 被写入 `list_failed.txt`，retry 时 `ListVersions` 从该 marker 起续扫。已扫页不会重扫——`delete_markers.txt` 不会重复。
+- **`list_failed.txt` 行格式**：`prefix\x1fkeyMarker\x1fversionIdMarker\n`。无 `\x1f` 行向后兼容旧格式（纯 prefix，从第一页扫）。**prefix 含 `\x1f` 不支持**——`\x1f` 是字段分隔符，无法在 3-field 格式里无歧义表示（与 `delete_markers.txt` 用 `\x1f` 分隔 key 同理的限制；S3 key/prefix 极少含 `\x1f`）。
+- **mode 1 + `-retry`**：mode 1 是单流递归，多 entry 入口与单流语义冲突——`-retry` 文件含 ≥2 entry 时报错；只含 1 entry 时不报错，从该 entry 的 marker 续扫该 prefix。
 
 ## 配置
 
@@ -118,7 +121,7 @@ latency_window_sec: 60              # 请求时延统计窗口秒数（progress 
 | `delete_markers.txt` | **结果文件**，全桶 delete marker | `bkt\x1fkey\x1fversion_id`（`\x1f` 分隔，三段） |
 | `invalid_keys.txt` | key 含 `\x1f` 的 marker（兜底，正常桶该文件为空） | `bkt\x1f<urlencoded-key>\x1fversion_id`（key 经 `url.QueryEscape` 编码） |
 | `run.log` | 进程日志：stdout/stderr tee、配置快照（sk 掩码）、进度行、summary | 纯文本 |
-| `list_failed.txt` | 列举失败的前缀（惰性创建：文件不存在=无失败） | 裸前缀一行；空前缀=空行 |
+| `list_failed.txt` | 列举失败的前缀+页级 marker（惰性创建：文件不存在=无失败） | `prefix\x1fkeyMarker\x1fversionIdMarker`；空 marker=从第一页扫 |
 | `list_failed.log` | 失败详情（slog text） | `bucket`/`prefix`/`http_code`/`s3_code`/`req_id`/`err` |
 
 **行分隔符 `\x1f`**（ASCII Unit Separator，控制字符）：S3 key 规范上允许 `|`，实务里偶有出现；`\x1f` 是控制字符，key 中基本不出现，撞概率比 `|` 低一两个数量级。`\x1f` 在终端不可见，查看用：

@@ -29,7 +29,7 @@ func TestRun_EndToEnd_HappyPath(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := run(cfgPath, "testbucket", []string{""}); err != nil {
+	if err := run(cfgPath, "testbucket", []RetryEntry{{Prefix: ""}}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	// run.log exists with summary
@@ -69,7 +69,7 @@ func TestRun_RejectsInvalidListType(t *testing.T) {
 		"",
 	}, "\n")
 	os.WriteFile(cfgPath, []byte(cfgBody), 0644)
-	err := run(cfgPath, "testbucket", []string{""})
+	err := run(cfgPath, "testbucket", []RetryEntry{{Prefix: ""}})
 	if err == nil {
 		t.Errorf("expected error for list_type=5")
 	}
@@ -95,67 +95,68 @@ func TestRun_BucketDoesNotExist(t *testing.T) {
 	os.WriteFile(cfgPath, []byte(cfgBody), 0644)
 	// fake server returns 200 for HEAD on testbucket; use a different bucket name
 	// so BucketExists returns false.
-	err := run(cfgPath, "nonexistentbucket", []string{""})
+	err := run(cfgPath, "nonexistentbucket", []RetryEntry{{Prefix: ""}})
 	if err == nil {
 		t.Errorf("expected error for non-existent bucket")
 	}
 }
 
-// TestResolvePrefixes_MutuallyExclusive 验证 -retry 和 -prefix 同时给时报错——
-// 互斥语义防误用。直接测生产路径 resolvePrefixes（main.go:29 调用）。
-func TestResolvePrefixes_MutuallyExclusive(t *testing.T) {
-	_, err := resolvePrefixes("someprefix", "retry.txt")
+// TestResolveEntries_MutuallyExclusive 验证 -retry 和 -prefix 同时给时报错——
+// 互斥语义防误用。直接测生产路径 resolveEntries（main.go 调用）。
+func TestResolveEntries_MutuallyExclusive(t *testing.T) {
+	_, err := resolveEntries("someprefix", "retry.txt")
 	if err == nil {
 		t.Errorf("expected error when both -prefix and -retry are set")
 	}
 }
 
-// TestResolvePrefixes_RetryFileNotFound 验证 -retry 文件不存在时报错——
-// resolvePrefixes 内部调 readRetryPrefixes，文件缺失在 BFS 启动前报出。
-func TestResolvePrefixes_RetryFileNotFound(t *testing.T) {
-	_, err := resolvePrefixes("", filepath.Join(t.TempDir(), "nope.txt"))
+// TestResolveEntries_RetryFileNotFound 验证 -retry 文件不存在时报错——
+// resolveEntries 内部调 readRetryEntries，文件缺失在 BFS 启动前报出。
+func TestResolveEntries_RetryFileNotFound(t *testing.T) {
+	_, err := resolveEntries("", filepath.Join(t.TempDir(), "nope.txt"))
 	if err == nil {
 		t.Errorf("expected error when -retry file does not exist")
 	}
 }
 
-// TestResolvePrefixes_OnlyRetryReturnsPrefixes 验证只给 -retry（存在文件）
-// 返回文件里的 prefix 列表，不报错。
-func TestResolvePrefixes_OnlyRetryReturnsPrefixes(t *testing.T) {
+// TestResolveEntries_OnlyRetryReturnsEntries 验证只给 -retry（存在文件）
+// 返回文件里的 RetryEntry 列表，不报错。
+func TestResolveEntries_OnlyRetryReturnsEntries(t *testing.T) {
 	dir := t.TempDir()
 	retryPath := filepath.Join(dir, "retry.txt")
 	if err := os.WriteFile(retryPath, []byte("a/\nb/\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	out, err := resolvePrefixes("", retryPath)
+	out, err := resolveEntries("", retryPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(out) != 2 || out[0] != "a/" || out[1] != "b/" {
-		t.Errorf("got %v, want [a/ b/]", out)
+	want := []RetryEntry{{Prefix: "a/"}, {Prefix: "b/"}}
+	if len(out) != 2 || out[0] != want[0] || out[1] != want[1] {
+		t.Errorf("got %v, want %v", out, want)
 	}
 }
 
-// TestResolvePrefixes_OnlyPrefix 验证只给 -prefix 返回单元素 slice。
-func TestResolvePrefixes_OnlyPrefix(t *testing.T) {
-	out, err := resolvePrefixes("someprefix", "")
+// TestResolveEntries_OnlyPrefix 验证只给 -prefix 返回单元素 slice。
+func TestResolveEntries_OnlyPrefix(t *testing.T) {
+	out, err := resolveEntries("someprefix", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(out) != 1 || out[0] != "someprefix" {
-		t.Errorf("got %v, want [someprefix]", out)
+	if len(out) != 1 || out[0].Prefix != "someprefix" {
+		t.Errorf("got %v, want [{someprefix}]", out)
 	}
 }
 
-// TestResolvePrefixes_BothEmptyIsRoot 验证两者都空时返回 root prefix [""]——
+// TestResolveEntries_BothEmptyIsRoot 验证两者都空时返回 root prefix——
 // 扫整个 bucket。
-func TestResolvePrefixes_BothEmptyIsRoot(t *testing.T) {
-	out, err := resolvePrefixes("", "")
+func TestResolveEntries_BothEmptyIsRoot(t *testing.T) {
+	out, err := resolveEntries("", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(out) != 1 || out[0] != "" {
-		t.Errorf("got %v, want [\"\"]", out)
+	if len(out) != 1 || out[0].Prefix != "" {
+		t.Errorf("got %v, want [{Prefix:\"\"}]", out)
 	}
 }
 
@@ -214,7 +215,7 @@ func TestRun_RetryMode_ScansRetryPrefixes(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := run(cfgPath, "testbucket", []string{"a/", "b/"}); err != nil {
+	if err := run(cfgPath, "testbucket", []RetryEntry{{Prefix: "a/"}, {Prefix: "b/"}}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	dm, err := os.ReadFile(filepath.Join(dir, "out", "delete_markers.txt"))

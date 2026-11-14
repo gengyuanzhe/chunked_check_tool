@@ -147,11 +147,11 @@ func TestIntegration_Mode2_RetryFromFailedList(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prefixes, err := readRetryPrefixes(retryPath)
+	entries, err := readRetryEntries(retryPath)
 	if err != nil {
-		t.Fatalf("readRetryPrefixes: %v", err)
+		t.Fatalf("readRetryEntries: %v", err)
 	}
-	if err := run(cfgPath, bucket, prefixes); err != nil {
+	if err := run(cfgPath, bucket, entries); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 
@@ -174,6 +174,95 @@ func TestIntegration_Mode2_RetryFromFailedList(t *testing.T) {
 	// + 2 个 delete_markers。scanned_versions 包含所有版本（含 put），不是只算 marker。
 	if !strings.Contains(string(rl), "scanned_versions=4") {
 		t.Errorf("run.log missing scanned_versions=4: %q", rl)
+	}
+	if !strings.Contains(string(rl), "delete_markers=2") {
+		t.Errorf("run.log missing delete_markers=2: %q", rl)
+	}
+}
+
+// TestIntegration_Mode2_PageLevelMarkerResume 验证页级 marker 续传：
+// 用 ListObjectVersions 直接拿到第 1 页后的 NextKeyMarker/NextVersionIdMarker，
+// 写入 retry 文件（prefix\x1fkeyMarker\x1fversionIdMarker），调 run 应从该 marker
+// 起续扫——只扫第 2 页之后的内容，不重扫第 1 页。
+//
+// 数据布局：bucket 下 a/ 前缀放 3 个 delete marker 对象（每个含 put+delete = 2 版本），
+// 共 6 个版本——超过 S3 默认每页 1000 keys 不会分页，所以本测试用 admin client
+// 直接取 ListObjectVersions 第 1 页的 NextKeyMarker/NextVersionIdMarker 模拟
+// "扫完第 1 页失败"的场景。
+func TestIntegration_Mode2_PageLevelMarkerResume(t *testing.T) {
+	endpoint, ak, sk := skipIfNoMinIO(t)
+	admin := newAdminClient(t, endpoint, ak, sk)
+	bucket := fmt.Sprintf("list-tool-marker-it-%d", time.Now().UnixNano())
+	setupBucket(t, admin, bucket)
+	defer teardownBucket(t, admin, bucket)
+
+	// 制造 3 个 delete marker（每个 put+delete = 2 版本，共 6 个版本）。
+	for _, k := range []string{"a/m1.txt", "a/m2.txt", "a/m3.txt"} {
+		putObject(t, admin, bucket, k, "v1")
+		removeObject(t, admin, bucket, k)
+	}
+
+	// 用 admin client 取第 1 页（MaxKeys=2 强制分页）的 NextKeyMarker/NextVersionIdMarker。
+	// 模拟"扫完第 1 页（2 个版本）失败"——retry 时从该 marker 起，只扫剩下 4 个版本。
+	firstPage, err := admin.ListObjectVersions(context.Background(), &s3.ListObjectVersionsInput{
+		Bucket: aws.String(bucket), Prefix: aws.String("a/"), MaxKeys: aws.Int32(2),
+	})
+	if err != nil {
+		t.Fatalf("first page ListObjectVersions: %v", err)
+	}
+	if !aws.ToBool(firstPage.IsTruncated) {
+		t.Fatalf("expected truncated first page, got IsTruncated=false")
+	}
+	km := aws.ToString(firstPage.NextKeyMarker)
+	vidm := aws.ToString(firstPage.NextVersionIdMarker)
+	if km == "" || vidm == "" {
+		t.Fatalf("expected non-empty markers, got km=%q vidm=%q", km, vidm)
+	}
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgBody := strings.Join([]string{
+		"endpoints:",
+		"  - " + endpoint,
+		"scheme: http",
+		"ak: " + ak,
+		"sk: " + sk,
+		"list_type: 2",
+		"list_concurrency: 1",
+		"output_dir: " + filepath.Join(dir, "out"),
+		"output_dir_timestamp: false",
+		"progress_interval: 1000",
+		"",
+	}, "\n")
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// retry 文件用 marker 续传格式：a/\x1f<km>\x1f<vidm>\n
+	retryContent := "a/\x1f" + km + "\x1f" + vidm + "\n"
+	retryPath := filepath.Join(dir, "retry.txt")
+	if err := os.WriteFile(retryPath, []byte(retryContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := readRetryEntries(retryPath)
+	if err != nil {
+		t.Fatalf("readRetryEntries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Prefix != "a/" || entries[0].KeyMarker != km || entries[0].VersionIDMarker != vidm {
+		t.Fatalf("parsed entry wrong: %+v", entries)
+	}
+	if err := run(cfgPath, bucket, entries); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	rl, err := os.ReadFile(filepath.Join(dir, "out", "run.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 第 1 页扫了 2 个版本（m1.txt 的 put+delete），retry 从 marker 起只扫剩下 4 个版本
+	// （m2.txt 和 m3.txt 各 put+delete）。
+	if !strings.Contains(string(rl), "scanned_versions=4") {
+		t.Errorf("run.log missing scanned_versions=4 (marker resume): %q", rl)
 	}
 	if !strings.Contains(string(rl), "delete_markers=2") {
 		t.Errorf("run.log missing delete_markers=2: %q", rl)

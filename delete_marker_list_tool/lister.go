@@ -40,23 +40,24 @@ func NewLister(cfg *Config, client *S3Client, out *Output, stats *Stats, progres
 
 // Run 按 cfg.ListType 驱动。
 // mode 1 流中断返回 error；mode 2 单前缀失败只记录不返回，全部扫完后返回 nil。
-// prefixes 是初始入队前缀列表（至少 1 个元素）；mode 1 只用 prefixes[0]，
-// mode 2 全部入队。retry 工作流传入 list_failed.txt 读出的多个 prefix。
-// mode 1 不支持 -retry（多 prefix 入口）——单流语义与多入口冲突，报错让用户
-// 改用 -prefix 单值。
-func (l *Lister) Run(ctx context.Context, bucket string, prefixes []string) error {
-	if l.cfg.ListType == 1 && len(prefixes) > 1 {
+// entries 是初始入队条目列表（至少 1 个元素）；mode 1 只用 entries[0]，
+// mode 2 全部入队。retry 工作流传入 list_failed.txt 读出的多个 (prefix, markers) 三元组。
+// mode 1 不支持 -retry 多入口（单流语义与多入口冲突），报错让用户改用 -prefix 单值；
+// mode 1 + 单 entry retry 支持——从该 entry 的 marker 续扫该 prefix。
+func (l *Lister) Run(ctx context.Context, bucket string, entries []RetryEntry) error {
+	if l.cfg.ListType == 1 && len(entries) > 1 {
 		return fmt.Errorf("mode 1 does not support -retry (multiple prefixes); use -prefix instead")
 	}
 	if l.cfg.ListType == 1 {
-		return l.runMode1(ctx, bucket, prefixes[0])
+		return l.runMode1(ctx, bucket, entries[0])
 	}
-	return l.runMode2(ctx, bucket, prefixes)
+	return l.runMode2(ctx, bucket, entries)
 }
 
-// runMode1: 单流递归。流中断记 list_failed + 返回 error。
-func (l *Lister) runMode1(ctx context.Context, bucket, prefix string) error {
-	vc, pc := l.client.ListVersions(ctx, bucket, prefix, true)
+// runMode1: 单流递归。流中断记 list_failed（含 marker）+ 返回 error。
+// entry.KeyMarker/VersionIDMarker 非空 = 从该 marker 起续扫（retry 场景）。
+func (l *Lister) runMode1(ctx context.Context, bucket string, entry RetryEntry) error {
+	vc, pc, bc := l.client.ListVersions(ctx, bucket, entry.Prefix, true, entry.KeyMarker, entry.VersionIDMarker)
 	var localCount int
 	interval := l.progress.Interval()
 	// recursive=true 不会有 common prefix；pc 单独排空防 goroutine 泄漏。
@@ -66,9 +67,21 @@ func (l *Lister) runMode1(ctx context.Context, bucket, prefix string) error {
 		}
 		close(pcClosed)
 	}()
+	// bc 由独立 goroutine 接收，更新当前 marker——vc.Err 出现时用当前 marker
+	// 写 list_failed（页级续传点）。
+	var curKeyMarker, curVersionIDMarker string
+	bcDone := make(chan struct{})
+	go func() {
+		defer close(bcDone)
+		for pb := range bc {
+			curKeyMarker = pb.NextKeyMarker
+			curVersionIDMarker = pb.NextVersionIDMarker
+		}
+	}()
 	for obj := range vc {
 		if obj.Err != nil {
-			l.recordListFailed(prefix, obj.Err)
+			<-bcDone
+			l.recordListFailed(entry.Prefix, curKeyMarker, curVersionIDMarker, obj.Err)
 			l.stats.IncrListFailed()
 			<-pcClosed
 			return obj.Err
@@ -85,12 +98,14 @@ func (l *Lister) runMode1(ctx context.Context, bucket, prefix string) error {
 		}
 	}
 	l.progress.MaybePrint(l.stats, "scanned", localCount)
+	<-bcDone
 	<-pcClosed
 	return nil
 }
 
-// runMode2: BFS delimiter 并发。prefixes 是初始入队前缀列表（至少 1 个）。
-func (l *Lister) runMode2(ctx context.Context, bucket string, prefixes []string) error {
+// runMode2: BFS delimiter 并发。entries 是初始入队条目列表（至少 1 个）。
+// BFS 发现的新 common prefix 入队为 RetryEntry{Prefix: p}（markers 空，从第一页扫）。
+func (l *Lister) runMode2(ctx context.Context, bucket string, entries []RetryEntry) error {
 	q := newQueue()
 	var inflight atomic.Int64
 
@@ -98,9 +113,9 @@ func (l *Lister) runMode2(ctx context.Context, bucket string, prefixes []string)
 		return QueueSnapshot{Prefix: q.Len(), Inflight: int(inflight.Load())}
 	})
 
-	for _, p := range prefixes {
+	for _, e := range entries {
 		inflight.Add(1)
-		q.Push(p)
+		q.Push(e)
 	}
 
 	conc := l.cfg.ListConcurrency
@@ -114,11 +129,11 @@ func (l *Lister) runMode2(ctx context.Context, bucket string, prefixes []string)
 			defer wg.Done()
 			lc := &localCounter{}
 			for {
-				p, ok := q.Pop(ctx)
+				e, ok := q.Pop(ctx)
 				if !ok {
 					return
 				}
-				l.processPrefix(ctx, bucket, p, q, &inflight, lc)
+				l.processPrefix(ctx, bucket, e, q, &inflight, lc)
 			}
 		}()
 	}
@@ -144,27 +159,44 @@ func (l *Lister) runMode2(ctx context.Context, bucket string, prefixes []string)
 	return nil
 }
 
-// processPrefix 处理一个前缀：消费版本化列举流，分类条目。
+// processPrefix 处理一个条目：消费版本化列举流，分类条目。
 // AWS SDK 把 <Version>/<DeleteMarker>/<CommonPrefixes> 解析到独立 slice，
-// ListVersions 返回两个 channel：vc（版本，含 marker）+ pc（common prefix）。
+// ListVersions 返回三个 channel：vc（版本，含 marker）+ pc（common prefix）+ bc（页边界）。
 // 不再有 isCommonPrefix 启发式——key 以 / 结尾的真实版本不会被误判。
-func (l *Lister) processPrefix(ctx context.Context, bucket, prefix string, q *queue, inflight *atomic.Int64, lc *localCounter) {
+// entry.KeyMarker/VersionIDMarker 非空 = 从该 marker 起续扫（retry 场景）。
+// bc goroutine 实时更新 curKeyMarker/curVersionIDMarker——vc.Err 出现时用其写
+// list_failed（页级续传点，下页起始 marker）。bc 与 vc 都是无缓冲 channel，
+// ListVersions 发 PageBoundary 时本页所有 entry 已被消费——严格同步点。
+func (l *Lister) processPrefix(ctx context.Context, bucket string, entry RetryEntry, q *queue, inflight *atomic.Int64, lc *localCounter) {
 	defer inflight.Add(-1)
 	interval := l.progress.Interval()
-	vc, pc := l.client.ListVersions(ctx, bucket, prefix, false)
-	// pc 由独立 goroutine 排空并把 common prefix 入队——vc、pc 独立消费，
+	vc, pc, bc := l.client.ListVersions(ctx, bucket, entry.Prefix, false, entry.KeyMarker, entry.VersionIDMarker)
+	// pc 由独立 goroutine 排空并把 common prefix 入队——vc、pc、bc 独立消费，
 	// 不互相阻塞。vc 排空即该前缀完成。
 	pcDone := make(chan struct{})
 	go func() {
 		for p := range pc {
 			inflight.Add(1)
-			q.Push(p)
+			// 新发现的 common prefix 从第一页扫（markers 空）。
+			q.Push(RetryEntry{Prefix: p})
 		}
 		close(pcDone)
 	}()
+	// bc goroutine 接收 PageBoundary，更新 curKeyMarker/curVersionIDMarker。
+	// 出现 Err 后等 bcDone 确保最新 marker 已写入本地变量（无 race）。
+	var curKeyMarker, curVersionIDMarker string
+	bcDone := make(chan struct{})
+	go func() {
+		defer close(bcDone)
+		for pb := range bc {
+			curKeyMarker = pb.NextKeyMarker
+			curVersionIDMarker = pb.NextVersionIDMarker
+		}
+	}()
 	for obj := range vc {
 		if obj.Err != nil {
-			l.recordListFailed(prefix, obj.Err)
+			<-bcDone
+			l.recordListFailed(entry.Prefix, curKeyMarker, curVersionIDMarker, obj.Err)
 			l.stats.IncrListFailed()
 			<-pcDone
 			return
@@ -180,18 +212,21 @@ func (l *Lister) processPrefix(ctx context.Context, bucket, prefix string, q *qu
 			lc.count = 0
 		}
 	}
+	<-bcDone
 	<-pcDone
 }
 
 // recordListFailed 从 err 提取 HTTP/S3 code + reqID，写 list_failed.txt + log。
-func (l *Lister) recordListFailed(prefix string, err error) {
+// keyMarker/versionIDMarker 是失败时已扫完的最后一页的 next-marker；
+// 同 prefix 重扫时从该 marker 起续扫（页级续传）。
+func (l *Lister) recordListFailed(prefix, keyMarker, versionIDMarker string, err error) {
 	var re *awshttp.ResponseError
 	if errors.As(err, &re) {
-		l.out.WriteListFailed(prefix)
+		l.out.WriteListFailed(prefix, keyMarker, versionIDMarker)
 		l.out.WriteListFailedLog(prefix, re.Response.StatusCode, "", re.Response.Header.Get("x-amz-request-id"), err)
 		return
 	}
-	l.out.WriteListFailed(prefix)
+	l.out.WriteListFailed(prefix, keyMarker, versionIDMarker)
 	l.out.WriteListFailedLog(prefix, 0, "", "", err)
 }
 
