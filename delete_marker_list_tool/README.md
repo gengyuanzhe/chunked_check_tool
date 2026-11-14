@@ -47,9 +47,28 @@ GOOS=linux GOARCH=arm64 go build -o delete_marker_list_arm64 .
 |---|---|---|
 | `-c` | 是 | 配置文件路径（YAML） |
 | `-bkt` | 是 | 桶名 |
-| `-prefix` | 否 | 列举起点前缀，默认空（整个桶） |
+| `-prefix` | 否 | 列举起点前缀，默认空（整个桶）。与 `-retry` 互斥 |
+| `-retry` | 否 | retry 前缀文件，每行一个 prefix；用于续扫上一次失败的 prefix（详见"续传工作流"）。与 `-prefix` 互斥，仅支持 mode 2 |
 
 无其他 flag。不支持 `-nextmarker`、`-check-file`、`-list-file`、`-backup-file`、`-resume-list`、`-resume-journal`（这些是 chunked_check_tool 的文件输入/断点续跑 flag，本工具刻意砍掉）。
+
+## 续传工作流
+
+mode 2 列举失败会写到 `<output_dir>/list_failed.txt`（一行一个 prefix，空行 = root prefix）。续传流程：
+
+```
+list（首次扫，-prefix 或全桶）
+  → 看 list_failed.txt 有失败 prefix
+  → -retry list_failed.txt（重扫失败 prefix，新失败继续写到 list_failed.txt）
+  → 再看 list_failed.txt
+  → 循环直到 list_failed.txt 为空
+```
+
+注意：
+
+- `-retry` 是 **prefix 粒度重扫**，不是页级断点续传：失败 prefix 已成功的前 N 页会重扫。但因 `delete_markers.txt` 是 `O_APPEND`，已写入的 marker 会重复追加；续传场景下失败前根本没扫到那些 marker，所以实际不重复。
+- 若手动构造 retry 文件（含已扫完的 prefix），已扫到的 marker 会重复写入 `delete_markers.txt`，需下游自行去重。
+- `-retry` 仅支持 mode 2（mode 1 单流不支持多 prefix 入口）。
 
 ## 配置
 
