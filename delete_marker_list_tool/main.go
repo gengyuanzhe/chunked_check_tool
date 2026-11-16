@@ -153,4 +153,5 @@ func printConfigSnapshot(w io.Writer, cfg *Config, bucket, prefix string) {
 	fmt.Fprintf(w, "dial_timeout=%d\n", cfg.DialTimeout)
 	fmt.Fprintf(w, "response_header_timeout=%d\n", cfg.ResponseHeaderTimeout)
 	fmt.Fprintf(w, "debug_log=%v\n", cfg.DebugLog)
+	fmt.Fprintf(w, "max_keys=%d\n", cfg.MaxKeys)
 }

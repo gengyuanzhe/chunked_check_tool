@@ -25,6 +25,7 @@ type S3Client struct {
 	client  *s3.Client
 	latency *LatencyTracker // 可选——nil 不记录。main 启动时注入 &stats.Latency。
 	logger  *slog.Logger    // 可选——nil 不打诊断。main 在 cfg.DebugLog=true 时注入 Debug-level logger。
+	maxKeys int32           // 每页 MaxKeys；0=用 SDK 默认 1000（不显式设）。NewS3Client 从 cfg.MaxKeys 读。
 }
 
 // SetLatencyTracker 注入窗口式时延统计器。main 在 NewS3Client 后调一次。
@@ -82,7 +83,7 @@ func NewS3Client(cfg *Config, endpoint string) (*S3Client, error) {
 		o.UsePathStyle = true
 		o.HTTPClient = &http.Client{Transport: tr}
 	})
-	return &S3Client{client: client}, nil
+	return &S3Client{client: client, maxKeys: cfg.MaxKeys}, nil
 }
 
 // VersionEntry 把 AWS SDK 的 <Version> 和 <DeleteMarker> 摊平成一条目——
@@ -128,16 +129,21 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 	if c.logger != nil {
 		c.logger.Debug("list-page req",
 			"bucket", bucket, "prefix", prefix, "recursive", recursive,
-			"km", keyMarker, "vidm", versionIDMarker)
+			"km", keyMarker, "vidm", versionIDMarker, "maxKeys", c.maxKeys)
 	}
 	start := time.Now()
-	out, err := c.client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+	input := &s3.ListObjectVersionsInput{
 		Bucket:          aws.String(bucket),
 		Prefix:          aws.String(prefix),
 		Delimiter:       aws.String(delimiter),
 		KeyMarker:       reqKeyMarker,
 		VersionIdMarker: reqVersionIDMarker,
-	})
+	}
+	// maxKeys=0 时不设 MaxKeys（用 SDK 默认 1000，跟旧行为一致）；非 0 时显式设。
+	if c.maxKeys > 0 {
+		input.MaxKeys = aws.Int32(c.maxKeys)
+	}
+	out, err := c.client.ListObjectVersions(ctx, input)
 	if c.latency != nil {
 		c.latency.Record(time.Since(start))
 	}

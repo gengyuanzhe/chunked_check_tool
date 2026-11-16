@@ -26,6 +26,7 @@ type Config struct {
 	ResponseHeaderTimeout  int64    `yaml:"response_header_timeout"`
 	LatencyWindowSec       int      `yaml:"latency_window_sec"`
 	DebugLog               bool     `yaml:"debug_log"`
+	MaxKeys                int32    `yaml:"max_keys"`
 }
 
 // LoadConfig 读 YAML 配置并应用默认值 + 校验。timestamp 后缀逻辑对齐
@@ -97,6 +98,10 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.LatencyWindowSec < 1 {
 		return nil, fmt.Errorf("config: latency_window_sec must be >= 1, got %d", cfg.LatencyWindowSec)
+	}
+	// max_keys: 0=用 SDK 默认 1000（不显式设 MaxKeys）；S3 上限 1000，超过服务端截断。
+	if cfg.MaxKeys < 0 || cfg.MaxKeys > 1000 {
+		return nil, fmt.Errorf("config: max_keys must be 0 (sdk default) or 1..1000, got %d", cfg.MaxKeys)
 	}
 
 	// timestamp 后缀。
