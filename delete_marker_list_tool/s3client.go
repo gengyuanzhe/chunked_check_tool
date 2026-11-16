@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -217,7 +218,27 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 	}
 	page.CommonPrefixes = make([]string, 0, len(out.CommonPrefixes))
 	for i := range out.CommonPrefixes {
-		page.CommonPrefixes = append(page.CommonPrefixes, aws.ToString(out.CommonPrefixes[i].Prefix))
+		cp := aws.ToString(out.CommonPrefixes[i].Prefix)
+		// encoding_type_url=true 时 CommonPrefix 是 URL 编码——list 工具内部 BFS 把它作为
+		// 下一轮 prefix 入队，发请求时 SDK 会再 URL 编码一次。若不解码：编码的 prefix 被 SDK
+		// 二次编码（photos%2F → photos%252F），服务端解一次得到 photos%2F，匹配不到真实目录，
+		// BFS 漏扫。所以 CommonPrefixes 在 s3client 出口解码为原始 prefix。
+		// 注意：delete_markers.txt 的 key 仍然保持 URL 编码（落盘不解码），与 CommonPrefixes
+		// 不同——key 是给下游 cleanup 工具消费的，CommonPrefixes 是 list 工具内部 BFS 状态。
+		if c.encodingTypeURL {
+			dec, err := url.QueryUnescape(cp)
+			if err != nil {
+				// CommonPrefix 编码非法——服务端 bug。原样保留（BFS 该路径大概率扫不到，
+				// 走 list_failed 兜底）；同时打 Warn 便于定位。
+				if c.logger != nil {
+					c.logger.Warn("common-prefix url decode failed",
+						"bucket", bucket, "prefix", prefix, "raw", cp, "err", err)
+				}
+			} else {
+				cp = dec
+			}
+		}
+		page.CommonPrefixes = append(page.CommonPrefixes, cp)
 	}
 	return page, nil
 }

@@ -271,3 +271,57 @@ func TestListVersionsPage_EncodingTypeURLPassedToRequest(t *testing.T) {
 		t.Errorf("EncodingTypeURL=false: expected no encoding-type query, got %q", sawEncodingType)
 	}
 }
+
+// TestListVersionsPage_EncodingTypeURL_DecodesCommonPrefix 验证 encoding_type_url=true 时
+// CommonPrefix 在 s3client 出口被 url.QueryUnescape 解码——list 工具 BFS 用 CommonPrefix
+// 作下一轮 prefix 入队，编码形式会让 SDK 二次编码（photos%2F → photos%252F），服务端解一次得到
+// photos%2F 匹配不到真实目录。delete_markers.txt 的 key 仍保持 URL 编码（与 CommonPrefix 不同）。
+func TestListVersionsPage_EncodingTypeURL_DecodesCommonPrefix(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix><EncodingType>url</EncodingType><IsTruncated>false</IsTruncated>
+<CommonPrefixes><Prefix>photos%2F</Prefix></CommonPrefixes>
+<CommonPrefixes><Prefix>photos%2F2024%2F</Prefix></CommonPrefixes>
+</ListVersionsResult>`))
+	}))
+	defer srv.Close()
+
+	// case 1: EncodingTypeURL=true → CommonPrefix 解码后返回（photos/、photos/2024/）
+	cfgOn := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, EncodingTypeURL: true}
+	cOn, err := NewS3Client(cfgOn, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := cOn.ListVersionsPage(context.Background(), "testbucket", "", false, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCP := []string{"photos/", "photos/2024/"}
+	if len(page.CommonPrefixes) != len(wantCP) {
+		t.Fatalf("CommonPrefixes count=%d want %d", len(page.CommonPrefixes), len(wantCP))
+	}
+	for i, want := range wantCP {
+		if page.CommonPrefixes[i] != want {
+			t.Errorf("CommonPrefixes[%d]=%q want %q", i, page.CommonPrefixes[i], want)
+		}
+	}
+
+	// case 2: EncodingTypeURL=false → CommonPrefix 原样返回（不解码）
+	cfgOff := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, EncodingTypeURL: false}
+	cOff, err := NewS3Client(cfgOff, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err = cOff.ListVersionsPage(context.Background(), "testbucket", "", false, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRaw := []string{"photos%2F", "photos%2F2024%2F"}
+	for i, want := range wantRaw {
+		if page.CommonPrefixes[i] != want {
+			t.Errorf("CommonPrefixes[%d]=%q want %q (no decode)", i, page.CommonPrefixes[i], want)
+		}
+	}
+}
