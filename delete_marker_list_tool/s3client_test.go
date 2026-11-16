@@ -83,6 +83,52 @@ func TestListVersions_ServerError(t *testing.T) {
 	}
 }
 
+// TestListVersionsPage_MaxKeysPassedToRequest 验证 cfg.MaxKeys 配置确实把
+// max-keys=N 传进了 ListObjectVersions 请求 query。用 fake server 抓 query。
+func TestListVersionsPage_MaxKeysPassedToRequest(t *testing.T) {
+	var sawMaxKeys string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if q.Has("versions") {
+			sawMaxKeys = q.Get("max-keys")
+		}
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix><IsTruncated>false</IsTruncated>
+</ListVersionsResult>`))
+	}))
+	defer srv.Close()
+
+	// case 1: MaxKeys=0 → 不该有 max-keys query（用 SDK 默认）
+	cfg0 := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s"}
+	c0, err := NewS3Client(cfg0, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawMaxKeys = ""
+	if _, err := c0.ListVersionsPage(context.Background(), "testbucket", "", true, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if sawMaxKeys != "" {
+		t.Errorf("MaxKeys=0: expected no max-keys query, got %q", sawMaxKeys)
+	}
+
+	// case 2: MaxKeys=500 → 应有 max-keys=500
+	cfg500 := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500}
+	c500, err := NewS3Client(cfg500, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawMaxKeys = ""
+	if _, err := c500.ListVersionsPage(context.Background(), "testbucket", "", true, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if sawMaxKeys != "500" {
+		t.Errorf("MaxKeys=500: expected max-keys=500, got %q", sawMaxKeys)
+	}
+}
+
 func TestBucketExists(t *testing.T) {
 	srv, _ := newFakeVersionedS3(t, versionsXMLOneMarker)
 	defer srv.Close()
