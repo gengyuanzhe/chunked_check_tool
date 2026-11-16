@@ -68,6 +68,62 @@ func TestWriteInvalidKey_UrlEncodesKey(t *testing.T) {
 	}
 }
 
+// TestWriteInvalidKey_NewlineRoutedToInvalidKeys 验证含 \n / \r 的 key 也被
+// 路由到 invalid_keys.txt（防止撕裂 delete_markers.txt 行结构）。
+// \x1f 撕裂字段、\n/\r 撕裂整行——三类字符走同一兜底路径。
+func TestWriteInvalidKey_NewlineRoutedToInvalidKeys(t *testing.T) {
+	cases := []struct{ name, key, escaped string }{
+		{"lf", "a\nb", "a%0Ab"},
+		{"cr", "a\rb", "a%0Db"},
+		{"crlf", "a\r\nb", "a%0D%0Ab"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			o, dir := newTestOutput(t)
+			o.WriteDeleteMarker(c.key, "v1", "2026-11-13T15:30:00Z")
+			o.FlushAndWait()
+			o.Close()
+			b, err := os.ReadFile(filepath.Join(dir, "invalid_keys.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			line := strings.TrimRight(string(b), "\n")
+			want := "testbucket\x1f" + c.escaped + "\x1fv1\x1f2026-11-13T15:30:00Z"
+			if line != want {
+				t.Errorf("got %q want %q", line, want)
+			}
+			// delete_markers.txt must be empty (single-line key only there).
+			dm, err := os.ReadFile(filepath.Join(dir, "delete_markers.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(string(dm)) != "" {
+				t.Errorf("delete_markers.txt should be empty, got %q", string(dm))
+			}
+		})
+	}
+}
+
+// TestContainsRowSep 覆盖三类撕裂字符：\x1f（字段分隔）、\n/\r（行分隔）。
+func TestContainsRowSep(t *testing.T) {
+	for _, c := range []struct {
+		s    string
+		want bool
+	}{
+		{"photos/a.jpg", false},
+		{"", false},
+		{"a\x1fb", true},
+		{"a\nb", true},
+		{"a\rb", true},
+		{"a\r\nb", true},
+		{"a\x1f\nb", true},
+	} {
+		if got := containsRowSep(c.s); got != c.want {
+			t.Errorf("containsRowSep(%q)=%v want %v", c.s, got, c.want)
+		}
+	}
+}
+
 func TestWriteListFailed_Contract(t *testing.T) {
 	o, dir := newTestOutput(t)
 	o.WriteListFailed("photos/", "", "") // non-empty prefix, no markers (from page 1)

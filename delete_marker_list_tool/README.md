@@ -123,7 +123,7 @@ max_keys: 500                       # 每页 MaxKeys，必填 1..1000（用于�
 | 文件 | 内容 | 行格式 |
 |---|---|---|
 | `delete_markers.txt` | **结果文件**，全桶 delete marker | `bkt\x1fkey\x1fversion_id`（`\x1f` 分隔，三段） |
-| `invalid_keys.txt` | key 含 `\x1f` 的 marker（兜底，正常桶该文件为空） | `bkt\x1f<urlencoded-key>\x1fversion_id`（key 经 `url.QueryEscape` 编码） |
+| `invalid_keys.txt` | key 含 `\x1f` / `\n` / `\r` 的 marker（撕裂行结构的字符；正常桶该文件为空） | `bkt\x1f<urlencoded-key>\x1fversion_id`（key 经 `url.QueryEscape` 编码） |
 | `run.log` | 进程日志：stdout/stderr tee、配置快照（sk 掩码）、进度行、summary | 纯文本 |
 | `list_failed.txt` | 列举失败的前缀+页级 marker（惰性创建：文件不存在=无失败） | `prefix\x1fkeyMarker\x1fversionIdMarker`；空 marker=从第一页扫 |
 | `list_failed.log` | 失败详情（slog text） | `bucket`/`prefix`/`http_code`/`s3_code`/`req_id`/`err` |
@@ -195,7 +195,7 @@ less delete_markers.txt   # 看着字段黏在一起，但数据完整
 
 ## 已知限制
 
-- **key 含 `\n`** 会撕裂结果行（chunked_check_tool 同样不防护，S3 key 含换行极罕见）
+- **key 含 `\n` / `\r` / `\x1f`** 会被路由到 `invalid_keys.txt`（url 编码后落盘），不进 `delete_markers.txt`——撕裂行结构的字符走兜底文件，主结果文件保持一行一条
 - **kill -9** 丢尾部整行无提示（run.log 里 summary 不会打出来）；靠 `list_failed.txt` 为空 + 行数稳定来人工确认完整性
 - **mode 1 无并发**，大桶会慢——这正是该模式的语义
 - **同秒内连续启动两次**（`output_dir_timestamp: true`）会撞目录并发 append 撕裂尾部行；靠下游解析时丢弃格式非法行兜底

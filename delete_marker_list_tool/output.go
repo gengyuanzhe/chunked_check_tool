@@ -255,10 +255,14 @@ func (o *Output) Close() error {
 	return firstErr
 }
 
-// containsRowSep 检查 key 是否含 \x1f（行分隔符）。
+// containsRowSep 检查 key 是否含行分隔符/换行符——\x1f（字段分隔符）或 \n/\r
+// （行分隔符）。含任一字符都会撕裂 delete_markers.txt 的行结构：
+// \x1f 撕裂字段、\n/\r 撕裂整行（下游解析一行当一条记录，多行变多条缺字段记录）。
+// 撕裂类 key 一律路由到 invalid_keys.txt（url.QueryEscape 把 \x1f→%1F、\n→%0A、\r→%0D）。
 func containsRowSep(s string) bool {
 	for i := 0; i < len(s); i++ {
-		if s[i] == 0x1f {
+		c := s[i]
+		if c == 0x1f || c == '\n' || c == '\r' {
 			return true
 		}
 	}
