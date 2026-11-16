@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -14,6 +15,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )
 
 // S3Client 包装单个 s3.Client。本工具用 ListObjectVersions（版本化列举）
@@ -141,9 +143,15 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 	}
 	if err != nil {
 		if c.logger != nil {
+			// req_id 从 *awshttp.ResponseError 提（失败响应一定有 HTTP response）。
+			reqID := ""
+			var re *awshttp.ResponseError
+			if errors.As(err, &re) {
+				reqID = re.Response.Header.Get("x-amz-request-id")
+			}
 			c.logger.Debug("list-page err",
 				"bucket", bucket, "prefix", prefix,
-				"km", keyMarker, "vidm", versionIDMarker, "err", err)
+				"km", keyMarker, "vidm", versionIDMarker, "req_id", reqID, "err", err)
 		}
 		return nil, err
 	}
