@@ -25,7 +25,7 @@
 |---|---|
 | `main.go` | flag 解析（`-c`/`-bkt`/`-prefix`）、`run` 编排、run.log 打开（第一个 open）、配置快照打印（sk 掩码）、BucketExists 预检、summary 打印。无信号处理器 |
 | `config.go` | `Config` 结构体 + `LoadConfig`（YAML，带默认值 + 校验 + 时间戳后缀重写） |
-| `s3client.go` | `S3Client`（s3.Client 包装）、`ListVersionsPage(ctx, bkt, prefix, recursive, keyMarker, versionIDMarker) (*VersionPage, error)`（page-at-a-time：每调一次返回一页 Version+DeleteMarker+CommonPrefixes）、`BucketExists`、`SetDebugLogger`（cfg.DebugLog=true 时注入 Debug-level slog，打每次请求的 marker req/resp/err）。transport 调优对齐 chunked_check_tool |
+| `s3client.go` | `S3Client`（s3.Client 包装）、`ListVersionsPage(ctx, bkt, prefix, recursive, keyMarker, versionIDMarker) (*VersionPage, error)`（page-at-a-time：每调一次返回一页 Version+DeleteMarker+CommonPrefixes）、`BucketExists`、`SetLogger`（cfg.DebugLog=true 时注入 Debug-level slog，打每次请求的 marker req/resp/err）。transport 调优对齐 chunked_check_tool |
 | `lister.go` | `Lister`：mode 1 单流 + mode 2 BFS 两种驱动；分页循环在 worker 内部（keyMarker/versionIDMarker 是局部变量，失败时即续传点）；不再有 `isCommonPrefix` 启发式（AWS SDK 按 XML 标签区分 Version/DeleteMarker/CommonPrefixes）；`recordListFailed` 从 `*awshttp.ResponseError` 提 StatusCode + reqID |
 | `queue.go` | 无界前缀队列（slice + mutex + cond），ctx-aware Pop，`SignalDone` 终止。对齐 chunked_check_tool/queue.go 形态，砍掉 Drain（无优雅退出） |
 | `output.go` | `Output`：三个 writer goroutine（delete_markers / invalid_keys / list_failed）+ slog listLogger；`\x1f` 行分隔符；key 含 `\x1f` 自动路由到 invalid_keys + URL 编码；list_failed.txt 惰性 open；3 秒定时 flush |

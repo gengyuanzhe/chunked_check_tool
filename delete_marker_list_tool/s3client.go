@@ -22,16 +22,16 @@ import (
 type S3Client struct {
 	client  *s3.Client
 	latency *LatencyTracker // 可选——nil 不记录。main 启动时注入 &stats.Latency。
-	diag    *slog.Logger    // 可选——nil 不打诊断。main 在 cfg.DebugLog=true 时注入 Debug-level logger。
+	logger  *slog.Logger    // 可选——nil 不打诊断。main 在 cfg.DebugLog=true 时注入 Debug-level logger。
 }
 
 // SetLatencyTracker 注入窗口式时延统计器。main 在 NewS3Client 后调一次。
 // nil 表示不记录（test 默认 nil，不影响功能）。
 func (c *S3Client) SetLatencyTracker(l *LatencyTracker) { c.latency = l }
 
-// SetDebugLogger 注入诊断 logger。main 在 cfg.DebugLog=true 时调一次，
+// SetLogger 注入诊断 logger。main 在 cfg.DebugLog=true 时调一次，
 // 传入 Debug-level slog logger（输出到 run.log + 终端）。nil 表示不打诊断。
-func (c *S3Client) SetDebugLogger(l *slog.Logger) { c.diag = l }
+func (c *S3Client) SetLogger(l *slog.Logger) { c.logger = l }
 
 // NewS3Client 构造绑定到单个 endpoint 的 s3.Client。
 // transport 调优对齐 chunked_check_tool：MaxIdleConnsPerHost=32、
@@ -123,8 +123,8 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 	}
 	// [diag] 每次请求的入参 marker（=进 URL 的 key-marker/version-id-marker）。
 	// cfg.DebugLog=true 时打——追 version-id-marker=0 来源看 req vidm 是否非预期地是 "0"。
-	if c.diag != nil {
-		c.diag.Debug("list-page req",
+	if c.logger != nil {
+		c.logger.Debug("list-page req",
 			"bucket", bucket, "prefix", prefix, "recursive", recursive,
 			"km", keyMarker, "vidm", versionIDMarker)
 	}
@@ -140,8 +140,8 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 		c.latency.Record(time.Since(start))
 	}
 	if err != nil {
-		if c.diag != nil {
-			c.diag.Debug("list-page err",
+		if c.logger != nil {
+			c.logger.Debug("list-page err",
 				"bucket", bucket, "prefix", prefix,
 				"km", keyMarker, "vidm", versionIDMarker, "err", err)
 		}
@@ -149,8 +149,8 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 	}
 	// [diag] 服务端返回的 next-marker——下一页请求用的 marker，也是失败时
 	// （下一页）写进 list_failed 的续传点。nVer/nDM/nCP 是三个 slice 的计数。
-	if c.diag != nil {
-		c.diag.Debug("list-page resp",
+	if c.logger != nil {
+		c.logger.Debug("list-page resp",
 			"bucket", bucket, "prefix", prefix,
 			"nextKM", aws.ToString(out.NextKeyMarker), "nextVIDM", aws.ToString(out.NextVersionIdMarker),
 			"truncated", aws.ToBool(out.IsTruncated),

@@ -121,7 +121,7 @@ func run(cfgPath, bucket string, entries []RetryEntry) error {
 	// debug_log: true 时建 Debug-level slog logger 路由到 run.log + 终端，
 	// 注入 S3Client 打每次请求的 marker（req/resp/err）。false 时不注入（nil），零成本静默。
 	if cfg.DebugLog {
-		client.SetDebugLogger(slog.New(slog.NewTextHandler(mwErr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		client.SetLogger(slog.New(slog.NewTextHandler(mwErr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	}
 
 	l := NewLister(cfg, client, out, &stats, progress)
