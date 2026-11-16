@@ -189,6 +189,18 @@ func (o *Output) WriteListFailed(prefix, keyMarker, versionIDMarker string) {
 	o.listFailedCh <- [3]string{prefix, keyMarker, versionIDMarker}
 }
 
+// WriteNextVIDMarkerZeroRewriteLog 写一条 slog 警告到 list_failed.log。
+// 触发条件：服务端返回 NextVersionIdMarker=="0" 且 cfg.NextVIDMarkerZeroToNull=true，
+// s3client 把 "0" 改写成 "null"。非失败，不写 list_failed.txt——但因为是服务端 quirk
+// 信号（同 short-response），保持 Warn 级别便于线上排查定位。
+func (o *Output) WriteNextVIDMarkerZeroRewriteLog(prefix, keyMarker, rawVIDMarker string) {
+	o.listLogger.Warn("next-version-id-marker=0 rewritten to null",
+		"bucket", o.bucket,
+		"prefix", prefix,
+		"key_marker", keyMarker,
+		"raw_version_id_marker", rawVIDMarker)
+}
+
 // WriteShortResponseWarning 写一条 slog 警告到 list_failed.log。
 // 触发条件：服务端返回 IsTruncated=true 但本页条目数（Version+DeleteMarker+
 // CommonPrefix）< 请求的 maxKeys——矛盾状态（说还有更多却又没返回满），

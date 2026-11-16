@@ -68,3 +68,10 @@ max_keys: 500
 # false=不带，原行为（key 含 \x1f 会让整页 XML 反序列化失败进 list_failed；含 \n/\r 兜底进
 # invalid_keys.txt）。新桶推荐 true。
 encoding_type_url: false
+
+# 兼容服务端翻页 quirk：服务端返回 NextVersionIdMarker=="0" 时改写成 "null"。
+# 服务端某些情况下返回 "0" 作为下一页的 version-id-marker，下一页用它做 marker
+# 请求会异常（实测会让列举卡死或返回异常结果）。"null" 是 S3 对"无版本号（旧版本对象）"
+# 的合法字面量，改写后能正常翻页。opt-in，默认 false 不改写。
+# list_failed.txt 记录的也是改写后的 "null"（list_failed 是失败页的 next-marker）。
+next_vid_marker_zero_to_null: false

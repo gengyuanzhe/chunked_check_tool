@@ -23,11 +23,12 @@ import (
 // + HeadBucket（探测桶存在）。AWS SDK 把 <Version>/<DeleteMarker>/
 // <CommonPrefixes> 解析到独立 slice 字段，靠 XML 标签区分，不靠启发式。
 type S3Client struct {
-	client          *s3.Client
-	latency         *LatencyTracker // 可选——nil 不记录。main 启动时注入 &stats.Latency。
-	logger          *slog.Logger    // 可选——nil 不打诊断。main 在 cfg.DebugLog=true 时注入 Debug-level logger。
-	maxKeys         int32           // 每页 MaxKeys；0=用 SDK 默认 1000（不显式设）。NewS3Client 从 cfg.MaxKeys 读。
-	encodingTypeURL bool            // true=请求带 EncodingType=url（wire 上 key URL 编码，避免 \x1f 等控制字符撕裂 XML）。SDK 不自动解码——cleanup 工具读 delete_markers.txt 时自行 url.QueryUnescape。
+	client                 *s3.Client
+	latency                *LatencyTracker // 可选——nil 不记录。main 启动时注入 &stats.Latency。
+	logger                 *slog.Logger    // 可选——nil 不打诊断。main 在 cfg.DebugLog=true 时注入 Debug-level logger。
+	maxKeys                int32           // 每页 MaxKeys；0=用 SDK 默认 1000（不显式设）。NewS3Client 从 cfg.MaxKeys 读。
+	encodingTypeURL        bool            // true=请求带 EncodingType=url（wire 上 key URL 编码，避免 \x1f 等控制字符撕裂 XML）。SDK 不自动解码——cleanup 工具读 delete_markers.txt 时自行 url.QueryUnescape。
+	nextVIDMarkerZeroToNull bool          // true=服务端返回 NextVersionIdMarker=="0" 时改写成 "null" 再返回。兼容服务端翻页 quirk（NextVersionIdMarker=0 会导致下一页请求异常）。
 }
 
 // SetLatencyTracker 注入窗口式时延统计器。main 在 NewS3Client 后调一次。
@@ -85,7 +86,7 @@ func NewS3Client(cfg *Config, endpoint string) (*S3Client, error) {
 		o.UsePathStyle = true
 		o.HTTPClient = &http.Client{Transport: tr}
 	})
-	return &S3Client{client: client, maxKeys: cfg.MaxKeys, encodingTypeURL: cfg.EncodingTypeURL}, nil
+	return &S3Client{client: client, maxKeys: cfg.MaxKeys, encodingTypeURL: cfg.EncodingTypeURL, nextVIDMarkerZeroToNull: cfg.NextVIDMarkerZeroToNull}, nil
 }
 
 // VersionEntry 把 AWS SDK 的 <Version> 和 <DeleteMarker> 摊平成一条目——
@@ -101,12 +102,16 @@ type VersionEntry struct {
 // ListVersionsPage 时传入的本次请求用的 marker；err 非 nil 时这两个值就是
 // 续传点（直接写 list_failed）。NextKeyMarker/NextVersionIDMarker 是下一页
 // 用的 marker——IsTruncated=false 时这两个值无意义。
+// NextVIDMarkerRewritten=true 表示服务端返回的 NextVersionIdMarker=="0"
+// 被 s3client 改写成 "null"（cfg.NextVIDMarkerZeroToNull=true 时）——lister
+// 据此打 Warn 日志到 list_failed.log（与 short-response 一致，便于线上排查）。
 type VersionPage struct {
-	Versions            []VersionEntry
-	CommonPrefixes      []string
-	NextKeyMarker       string
-	NextVersionIDMarker string
-	IsTruncated         bool
+	Versions                []VersionEntry
+	CommonPrefixes          []string
+	NextKeyMarker           string
+	NextVersionIDMarker     string
+	IsTruncated             bool
+	NextVIDMarkerRewritten  bool
 }
 
 // ListVersionsPage 列举一页。recursive=true 不带 delimiter（所有 key 所有版本）；
@@ -180,6 +185,16 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 		NextKeyMarker:       aws.ToString(out.NextKeyMarker),
 		NextVersionIDMarker: aws.ToString(out.NextVersionIdMarker),
 		IsTruncated:         aws.ToBool(out.IsTruncated),
+	}
+	// 兼容服务端 quirk：NextVersionIdMarker=="0" 时改写成 "null"。
+	// 服务端某些情况下返回 "0" 作为 next-marker，下一页用它做 version-id-marker
+	// 请求会异常；"null" 是 S3 对"无版本号（旧版本对象）"的合法字面量，改写后能正常翻页。
+	// opt-in，默认 false 不改写。改写发生在 s3client 出口——lister 和 list_failed.txt
+	// 看到的都是改写后的值，下一页请求也用改写后的值。改写命中时设 NextVIDMarkerRewritten=true，
+	// lister 据此打 Warn 日志到 list_failed.log（与 short-response 一致）。
+	if c.nextVIDMarkerZeroToNull && page.NextVersionIDMarker == "0" {
+		page.NextVersionIDMarker = "null"
+		page.NextVIDMarkerRewritten = true
 	}
 	page.Versions = make([]VersionEntry, 0, len(out.Versions)+len(out.DeleteMarkers))
 	for i := range out.Versions {

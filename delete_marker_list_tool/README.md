@@ -99,6 +99,7 @@ latency_window_sec: 60              # 请求时延统计窗口秒数（progress 
 debug_log: false                   # true=打每次 ListObjectVersions 请求的 marker 诊断行到 run.log
 max_keys: 500                       # 每页 MaxKeys，必填 1..1000（用于检测服务端 short-response quirk）
 encoding_type_url: false            # true=请求带 EncodingType=url，wire 上 key URL 编码（防 \x1f 等撕裂 XML）；delete_markers.txt 落盘编码 key，cleanup 工具按同名配置解码
+next_vid_marker_zero_to_null: false # true=服务端返回 NextVersionIdMarker=="0" 时改写成 "null"（兼容服务端翻页 quirk）
 ```
 
 | 字段 | 类型 | 默认 | 必填 | 说明 |
@@ -117,6 +118,7 @@ encoding_type_url: false            # true=请求带 EncodingType=url，wire 上
 | `debug_log` | bool | `false` | 否 | true=打每次请求的 marker 诊断行（req/resp/err）到 run.log，排翻页异常用；false 零成本静默 |
 | `max_keys` | int | — | 是 | 每页 MaxKeys，必填 1..1000（S3 上限 1000，超过服务端截断）；客户端用此值检测"截断了却没返回满"的服务端翻页 quirk |
 | `encoding_type_url` | bool | `false` | 否 | true=请求带 `EncodingType=url`，wire 上 key URL 编码（防 `\x1f` 等 XML 1.0 非法控制字符撕裂反序列化）；`delete_markers.txt` 落盘的是 URL 编码 key，cleanup 工具按同名配置决定是否 `url.QueryUnescape` 解码。false=原行为，含 `\x1f` 的 key 会让整页 XML 解析失败进 `list_failed.txt` |
+| `next_vid_marker_zero_to_null` | bool | `false` | 否 | true=服务端返回 `NextVersionIdMarker=="0"` 时改写成 `"null"`（兼容服务端翻页 quirk——`"0"` 作为下一页的 version-id-marker 会让列举异常）。改写发生在 s3client 出口，`list_failed.txt` 记录的也是改写后的 `"null"` |
 
 **可直接复用 chunked_check_tool 的 config.yaml**——本工具只读自己认识的字段，未识别字段（`is_check`、`multipart_*`、`backup_*`、`check_concurrency` 等）被 YAML 解析器忽略，不报错。
 

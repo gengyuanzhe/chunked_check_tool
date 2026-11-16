@@ -69,6 +69,7 @@ func (l *Lister) runMode1(ctx context.Context, bucket string, entry RetryEntry) 
 			return err
 		}
 		l.checkShortResponse(entry.Prefix, keyMarker, versionIDMarker, page)
+		l.checkNextVIDMarkerRewrite(entry.Prefix, keyMarker, page)
 		for _, obj := range page.Versions {
 			l.stats.IncrScannedVersions()
 			localCount++
@@ -159,6 +160,7 @@ func (l *Lister) processPrefix(ctx context.Context, bucket string, entry RetryEn
 			return
 		}
 		l.checkShortResponse(entry.Prefix, keyMarker, versionIDMarker, page)
+		l.checkNextVIDMarkerRewrite(entry.Prefix, keyMarker, page)
 		for _, p := range page.CommonPrefixes {
 			inflight.Add(1)
 			// 新发现的 common prefix 从第一页扫（markers 空）。
@@ -180,6 +182,15 @@ func (l *Lister) processPrefix(ctx context.Context, bucket string, entry RetryEn
 			return
 		}
 		keyMarker, versionIDMarker = page.NextKeyMarker, page.NextVersionIDMarker
+	}
+}
+
+// checkNextVIDMarkerRewrite 在 s3client 把服务端返回的 NextVersionIdMarker=="0"
+// 改写成 "null" 命中时打 Warn 日志到 list_failed.log。与 short-response 警告一致，
+// 非失败不写 list_failed.txt——服务端 quirk 信号便于线上排查。
+func (l *Lister) checkNextVIDMarkerRewrite(prefix, keyMarker string, page *VersionPage) {
+	if page.NextVIDMarkerRewritten {
+		l.out.WriteNextVIDMarkerZeroRewriteLog(prefix, keyMarker, "0")
 	}
 }
 

@@ -28,6 +28,7 @@ type Config struct {
 	DebugLog               bool     `yaml:"debug_log"`
 	MaxKeys                int32    `yaml:"max_keys"`
 	EncodingTypeURL        bool     `yaml:"encoding_type_url"`
+	NextVIDMarkerZeroToNull bool    `yaml:"next_vid_marker_zero_to_null"`
 }
 
 // LoadConfig 读 YAML 配置并应用默认值 + 校验。timestamp 后缀逻辑对齐

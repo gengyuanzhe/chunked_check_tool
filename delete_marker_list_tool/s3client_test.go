@@ -133,6 +133,90 @@ func TestBucketExists(t *testing.T) {
 	}
 }
 
+// TestListVersionsPage_NextVIDMarkerZeroRewrittenToNull 验证 cfg.NextVIDMarkerZeroToNull=true
+// 时，服务端返回 NextVersionIdMarker=="0" 被改写成 "null"，下一页请求带的 version-id-marker
+// 是 "null" 而不是 "0"。
+func TestListVersionsPage_NextVIDMarkerZeroRewrittenToNull(t *testing.T) {
+	const page1XML = `<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix>
+<IsTruncated>true</IsTruncated>
+<NextKeyMarker>k1</NextKeyMarker><NextVersionIdMarker>0</NextVersionIdMarker>
+<DeleteMarker><Key>a.txt</Key><VersionId>dm-1</VersionId><IsLatest>true</IsLatest><LastModified>2024-01-01T00:00:00.000Z</LastModified></DeleteMarker>
+</ListVersionsResult>`
+	const page2XML = `<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix><IsTruncated>false</IsTruncated>
+</ListVersionsResult>`
+
+	var sawPage2VIDMarker string
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if !q.Has("versions") {
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+			return
+		}
+		callCount++
+		if callCount == 1 {
+			w.Write([]byte(page1XML))
+			return
+		}
+		sawPage2VIDMarker = q.Get("version-id-marker")
+		w.Write([]byte(page2XML))
+	}))
+	defer srv.Close()
+
+	// case 1: rewrite=true → page1 返回 NextVersionIdMarker=0 被改写成 null，
+	//         page2 请求带的 version-id-marker 应是 "null"
+	cfgOn := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, NextVIDMarkerZeroToNull: true}
+	cOn, err := NewS3Client(cfgOn, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := cOn.ListVersionsPage(context.Background(), "testbucket", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.NextVersionIDMarker != "null" {
+		t.Errorf("rewrite=true: NextVersionIDMarker=%q want %q", page.NextVersionIDMarker, "null")
+	}
+	// 下一页请求带上改写后的 marker
+	if _, err := cOn.ListVersionsPage(context.Background(), "testbucket", "", true, page.NextKeyMarker, page.NextVersionIDMarker); err != nil {
+		t.Fatal(err)
+	}
+	if sawPage2VIDMarker != "null" {
+		t.Errorf("rewrite=true: page2 version-id-marker=%q want %q", sawPage2VIDMarker, "null")
+	}
+
+	// case 2: rewrite=false → page1 返回 0 原样透传，page2 请求带 "0"
+	callCount = 0
+	sawPage2VIDMarker = ""
+	cfgOff := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, NextVIDMarkerZeroToNull: false}
+	cOff, err := NewS3Client(cfgOff, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err = cOff.ListVersionsPage(context.Background(), "testbucket", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.NextVersionIDMarker != "0" {
+		t.Errorf("rewrite=false: NextVersionIDMarker=%q want %q", page.NextVersionIDMarker, "0")
+	}
+	if _, err := cOff.ListVersionsPage(context.Background(), "testbucket", "", true, page.NextKeyMarker, page.NextVersionIDMarker); err != nil {
+		t.Fatal(err)
+	}
+	if sawPage2VIDMarker != "0" {
+		t.Errorf("rewrite=false: page2 version-id-marker=%q want %q", sawPage2VIDMarker, "0")
+	}
+}
+
 // TestListVersionsPage_EncodingTypeURLPassedToRequest 验证 cfg.EncodingTypeURL=true
 // 时请求 URL 带 encoding-type=url，且 SDK 不自动解码返回的 URL 编码 key。
 func TestListVersionsPage_EncodingTypeURLPassedToRequest(t *testing.T) {
