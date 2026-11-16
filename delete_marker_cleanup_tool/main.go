@@ -58,7 +58,7 @@ func run(cfgPath, mode, inputPath string) error {
 
 	// 预检：解析输入首行取 bkt，用 endpoints[0] 跑一次 BucketExists。
 	// 传输错误硬退出；exists==false 只 warning + 继续（多桶输入保护）。
-	firstBkt, ok := readFirstRowBucket(inputPath)
+	firstBkt, ok := readFirstRowBucket(inputPath, cfg.EncodingTypeURL)
 	if !ok {
 		return fmt.Errorf("preflight: first input row unparseable (torn or empty file)")
 	}
@@ -97,22 +97,22 @@ func run(cfgPath, mode, inputPath string) error {
 }
 
 // readFirstRowBucket 读输入文件第一个非空行，按 \x1f 分隔解析三段
-// （basename == invalid_keys.txt 时 URL 解码 key），返回 bkt 字段。
+// （basename == invalid_keys.txt 或 encoding_type_url=true 时 URL 解码 key），返回 bkt 字段。
 // 返回 ok=false 表示文件空或首行格式错误。
-func readFirstRowBucket(inputPath string) (string, bool) {
+func readFirstRowBucket(inputPath string, encodingTypeURL bool) (string, bool) {
 	f, err := os.Open(inputPath)
 	if err != nil {
 		return "", false
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	scanner.Buffer(make(([]byte), 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
 			continue
 		}
-		row, ok := ParseRow(line, filepath.Base(inputPath))
+		row, ok := ParseRow(line, filepath.Base(inputPath), encodingTypeURL)
 		if !ok {
 			return "", false
 		}
@@ -136,4 +136,5 @@ func printConfigSnapshot(w io.Writer, cfg *Config, mode, inputPath string) {
 	fmt.Fprintf(w, "progress_interval=%d\n", cfg.ProgressInterval)
 	fmt.Fprintf(w, "dial_timeout=%d\n", cfg.DialTimeout)
 	fmt.Fprintf(w, "response_header_timeout=%d\n", cfg.ResponseHeaderTimeout)
+	fmt.Fprintf(w, "encoding_type_url=%v\n", cfg.EncodingTypeURL)
 }

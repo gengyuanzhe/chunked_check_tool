@@ -14,8 +14,11 @@ import (
 )
 
 // Row 是输入文件解析后的一行——bkt / key / versionID / lastModified 四段。
-// KeyEncoded 标记 key 是否来自 invalid_keys.txt（URL 编码过）——
-// 写输出行时需重新 QueryEscape 以保持行格式契约。
+// KeyEncoded 标记 key 是否从 URL 编码形式解码而来（需在输出时重新 QueryEscape
+// 以保持行格式契约，避免解码后的控制字符 \x1f/\n/\r 撕裂行）。两种来源：
+//   - delete_markers.txt 在 list 工具开了 encoding_type_url 时，key 是 URL 编码（list 不解码）
+//   - invalid_keys.txt 永远是 URL 编码（list 兜底分流时 url.QueryEscape 编码过）
+//
 // LastModified 透传 lister 的输出，可能是 RFC3339 字符串或空串（旧 3 段输入）。
 type Row struct {
 	Bkt, Key, VersionID, LastModified string
@@ -23,14 +26,19 @@ type Row struct {
 }
 
 // ParseRow 把一行 \x1f 分隔的字符串解析为 Row。
-// 输入 basename == "invalid_keys.txt" 时对 key 字段做 URL 解码（lister 的兜底
-// 分流文件，key 被 url.QueryEscape 编码过）。返回 ok=false 表示字段数 != 3 且 != 4
-// 或 URL 解码失败。
+// 解码时机：
+//   - encodingTypeURL=true：delete_markers.txt 的 key 是 URL 编码，需 url.QueryUnescape。
+//     解码失败 → ok=false（scanner 走 torn line 路径，写 failed.txt + slog 详情）。
+//   - basename == "invalid_keys.txt"：key 永远 URL 编码（list 兜底路径），无视
+//     encodingTypeURL 独立解码；失败 → ok=false（同上走 torn line）。
+//   - encodingTypeURL=false 且 basename == "delete_markers.txt"：key 原样，不解码。
+//
+// 返回 ok=false 仅当字段数 != 3 且 != 4，或 URL 解码失败。
 //
 // 兼容 3 段（旧输入：bkt\x1fkey\x1fversionID）和 4 段（新输入：
 // bkt\x1fkey\x1fversionID\x1flastModified）。3 段输入的 LastModified 为空串，
 // 输出时第四列写空串，保持下游解析稳定。
-func ParseRow(line, inputBasename string) (Row, bool) {
+func ParseRow(line, inputBasename string, encodingTypeURL bool) (Row, bool) {
 	parts := strings.Split(line, "\x1f")
 	if len(parts) != 3 && len(parts) != 4 {
 		return Row{}, false
@@ -40,7 +48,14 @@ func ParseRow(line, inputBasename string) (Row, bool) {
 	if len(parts) == 4 {
 		lastMod = parts[3]
 	}
-	encoded := filepath.Base(inputBasename) == "invalid_keys.txt"
+	encoded := false
+	if filepath.Base(inputBasename) == "invalid_keys.txt" {
+		// invalid_keys.txt 永远 URL 编码（list 兜底路径），与 encoding_type_url 独立。
+		encoded = true
+	} else if encodingTypeURL {
+		// delete_markers.txt 在 list 工具开了 encoding_type_url 时 key 是 URL 编码。
+		encoded = true
+	}
 	if encoded {
 		dec, err := url.QueryUnescape(key)
 		if err != nil {
@@ -51,8 +66,15 @@ func ParseRow(line, inputBasename string) (Row, bool) {
 	return Row{Bkt: bkt, Key: key, VersionID: vid, LastModified: lastMod, KeyEncoded: encoded}, true
 }
 
-// outputKey 返回 key 的输出形态——invalid_keys.txt 来源的行重新 QueryEscape，
-// 保持 3/4 段行格式契约（解码后的 key 可能含 \x1f，撕裂行字段）。
+// outputKey 返回 key 的输出形态——KeyEncoded=true（key 是从 URL 编码形式解码的）
+// 时重新 QueryEscape，保持 3/4 段行格式契约（解码后的 key 可能含 \x1f/\n/\r，撕裂行）。
+// 输出文件（delete_failed.txt / deleted.txt / check_results.txt 等）下游仍由 cleanup
+// 工具消费，KeyEncoded 标记需要通过文件名约定传递——目前 cleanup 工具自身读输入时
+// 只对 invalid_keys.txt basename 做强制解码；delete_failed.txt 等中间文件的 key 若被
+// 重新 QueryEscape，再次跑 cleanup 时不会自动解码，会按字面量百分号 key 处理。
+// 现状：保留 QueryEscape 是为了一致性（与 lister 的 invalid_keys 输出格式一致）；
+// 已知 tradeoff：delete_failed.txt 重跑 cleanup 时 key 不会被解码，可能找不到对象。
+// 实务里 delete_failed.txt 一般人工核对后单独处理，不直接重跑 cleanup。
 func (r Row) outputKey() string {
 	if r.KeyEncoded {
 		return url.QueryEscape(r.Key)
@@ -126,12 +148,12 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, out *O
 		if line == "" {
 			continue
 		}
-		row, ok := ParseRow(line, inputBasename)
+		row, ok := ParseRow(line, inputBasename, cfg.EncodingTypeURL)
 		if !ok {
 			if mode == "check" {
-				out.WriteHeadFailedLog("", "", "", 0, "", "", errors.New("torn line, field count != 3"))
+				out.WriteHeadFailedLog("", "", "", 0, "", "", errors.New("torn line, field count != 3/4 or url decode failed"))
 			} else {
-				out.WriteDeleteFailedLog("", "", "", 0, "", "", errors.New("torn line, field count != 3"))
+				out.WriteDeleteFailedLog("", "", "", 0, "", "", errors.New("torn line, field count != 3/4 or url decode failed"))
 			}
 			continue
 		}

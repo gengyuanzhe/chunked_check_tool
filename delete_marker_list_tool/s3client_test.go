@@ -132,3 +132,58 @@ func TestBucketExists(t *testing.T) {
 		t.Errorf("exists=false want true")
 	}
 }
+
+// TestListVersionsPage_EncodingTypeURLPassedToRequest 验证 cfg.EncodingTypeURL=true
+// 时请求 URL 带 encoding-type=url，且 SDK 不自动解码返回的 URL 编码 key。
+func TestListVersionsPage_EncodingTypeURLPassedToRequest(t *testing.T) {
+	var sawEncodingType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if q.Has("versions") {
+			sawEncodingType = q.Get("encoding-type")
+		}
+		// 服务端返回 URL 编码后的 key（a%1Fb），模拟 wire 上的编码形态。
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix><EncodingType>url</EncodingType><IsTruncated>false</IsTruncated>
+<DeleteMarker><Key>a%1Fb</Key><VersionId>dm-1</VersionId><IsLatest>true</IsLatest><LastModified>2026-01-02T00:00:00.000Z</LastModified></DeleteMarker>
+</ListVersionsResult>`))
+	}))
+	defer srv.Close()
+
+	// case 1: EncodingTypeURL=true → 请求带 encoding-type=url，key 不解码（保留 a%1Fb）
+	cfgOn := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, EncodingTypeURL: true}
+	cOn, err := NewS3Client(cfgOn, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawEncodingType = ""
+	page, err := cOn.ListVersionsPage(context.Background(), "testbucket", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sawEncodingType != "url" {
+		t.Errorf("EncodingTypeURL=true: expected encoding-type=url in request, got %q", sawEncodingType)
+	}
+	if len(page.Versions) != 1 {
+		t.Fatalf("got %d entries, want 1", len(page.Versions))
+	}
+	if page.Versions[0].Key != "a%1Fb" {
+		t.Errorf("SDK should NOT auto-decode, got key=%q want %q", page.Versions[0].Key, "a%1Fb")
+	}
+
+	// case 2: EncodingTypeURL=false → 请求不带 encoding-type
+	cfgOff := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, EncodingTypeURL: false}
+	cOff, err := NewS3Client(cfgOff, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawEncodingType = "__sentinel__"
+	if _, err := cOff.ListVersionsPage(context.Background(), "testbucket", "", true, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if sawEncodingType != "" {
+		t.Errorf("EncodingTypeURL=false: expected no encoding-type query, got %q", sawEncodingType)
+	}
+}

@@ -27,6 +27,7 @@ type Config struct {
 	LatencyWindowSec       int      `yaml:"latency_window_sec"`
 	DebugLog               bool     `yaml:"debug_log"`
 	MaxKeys                int32    `yaml:"max_keys"`
+	EncodingTypeURL        bool     `yaml:"encoding_type_url"`
 }
 
 // LoadConfig 读 YAML 配置并应用默认值 + 校验。timestamp 后缀逻辑对齐

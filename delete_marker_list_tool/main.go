@@ -154,4 +154,5 @@ func printConfigSnapshot(w io.Writer, cfg *Config, bucket, prefix string) {
 	fmt.Fprintf(w, "response_header_timeout=%d\n", cfg.ResponseHeaderTimeout)
 	fmt.Fprintf(w, "debug_log=%v\n", cfg.DebugLog)
 	fmt.Fprintf(w, "max_keys=%d\n", cfg.MaxKeys)
+	fmt.Fprintf(w, "encoding_type_url=%v\n", cfg.EncodingTypeURL)
 }

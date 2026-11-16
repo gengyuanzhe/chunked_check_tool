@@ -98,6 +98,7 @@ response_header_timeout: 0           # 等服务端响应头超时秒数（0=不
 latency_window_sec: 60              # 请求时延统计窗口秒数（progress 的 latency_avg/max 每 N 秒重置）
 debug_log: false                   # true=打每次 ListObjectVersions 请求的 marker 诊断行到 run.log
 max_keys: 500                       # 每页 MaxKeys，必填 1..1000（用于检测服务端 short-response quirk）
+encoding_type_url: false            # true=请求带 EncodingType=url，wire 上 key URL 编码（防 \x1f 等撕裂 XML）；delete_markers.txt 落盘编码 key，cleanup 工具按同名配置解码
 ```
 
 | 字段 | 类型 | 默认 | 必填 | 说明 |
@@ -115,6 +116,7 @@ max_keys: 500                       # 每页 MaxKeys，必填 1..1000（用于�
 | `latency_window_sec` | int | `60` | 否 | 请求时延统计窗口秒数；progress 的 latency_avg_ms/max_ms 每该秒数重置 |
 | `debug_log` | bool | `false` | 否 | true=打每次请求的 marker 诊断行（req/resp/err）到 run.log，排翻页异常用；false 零成本静默 |
 | `max_keys` | int | — | 是 | 每页 MaxKeys，必填 1..1000（S3 上限 1000，超过服务端截断）；客户端用此值检测"截断了却没返回满"的服务端翻页 quirk |
+| `encoding_type_url` | bool | `false` | 否 | true=请求带 `EncodingType=url`，wire 上 key URL 编码（防 `\x1f` 等 XML 1.0 非法控制字符撕裂反序列化）；`delete_markers.txt` 落盘的是 URL 编码 key，cleanup 工具按同名配置决定是否 `url.QueryUnescape` 解码。false=原行为，含 `\x1f` 的 key 会让整页 XML 解析失败进 `list_failed.txt` |
 
 **可直接复用 chunked_check_tool 的 config.yaml**——本工具只读自己认识的字段，未识别字段（`is_check`、`multipart_*`、`backup_*`、`check_concurrency` 等）被 YAML 解析器忽略，不报错。
 

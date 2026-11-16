@@ -12,7 +12,7 @@ import (
 )
 
 func TestParseRow_ThreeFields(t *testing.T) {
-	r, ok := ParseRow("bkt\x1fkey/a\x1fv1", "delete_markers.txt")
+	r, ok := ParseRow("bkt\x1fkey/a\x1fv1", "delete_markers.txt", false)
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -22,7 +22,7 @@ func TestParseRow_ThreeFields(t *testing.T) {
 }
 
 func TestParseRow_InvalidKeysBasenameURLDecodesKey(t *testing.T) {
-	r, ok := ParseRow("bkt\x1fa%1Fb\x1fv1", "invalid_keys.txt")
+	r, ok := ParseRow("bkt\x1fa%1Fb\x1fv1", "invalid_keys.txt", false)
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -32,16 +32,16 @@ func TestParseRow_InvalidKeysBasenameURLDecodesKey(t *testing.T) {
 }
 
 func TestParseRow_WrongFieldCount(t *testing.T) {
-	if _, ok := ParseRow("only\x1ftwo", "delete_markers.txt"); ok {
+	if _, ok := ParseRow("only\x1ftwo", "delete_markers.txt", false); ok {
 		t.Errorf("expected ok=false for 2-field line")
 	}
-	if _, ok := ParseRow("bkt\x1fk\x1fv\x1flm\x1fextra", "delete_markers.txt"); ok {
+	if _, ok := ParseRow("bkt\x1fk\x1fv\x1flm\x1fextra", "delete_markers.txt", false); ok {
 		t.Errorf("expected ok=false for 5-field line")
 	}
 }
 
 func TestParseRow_NullVersionIdPassesThrough(t *testing.T) {
-	r, ok := ParseRow("bkt\x1fk\x1fnull", "delete_markers.txt")
+	r, ok := ParseRow("bkt\x1fk\x1fnull", "delete_markers.txt", false)
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -53,7 +53,7 @@ func TestParseRow_NullVersionIdPassesThrough(t *testing.T) {
 // ParseRow 兼容 3 段（旧输入）和 4 段（新输入带 lastModified）。
 func TestParseRow_Accepts3And4Fields(t *testing.T) {
 	// 3 段：LastModified 为空
-	r3, ok := ParseRow("bkt\x1fk\x1fv1", "delete_markers.txt")
+	r3, ok := ParseRow("bkt\x1fk\x1fv1", "delete_markers.txt", false)
 	if !ok {
 		t.Fatal("expected ok for 3-field line")
 	}
@@ -61,12 +61,51 @@ func TestParseRow_Accepts3And4Fields(t *testing.T) {
 		t.Errorf("LastModified=%q want empty for 3-field line", r3.LastModified)
 	}
 	// 4 段：LastModified 透传
-	r4, ok := ParseRow("bkt\x1fk\x1fv1\x1f2026-11-13T15:30:00Z", "delete_markers.txt")
+	r4, ok := ParseRow("bkt\x1fk\x1fv1\x1f2026-11-13T15:30:00Z", "delete_markers.txt", false)
 	if !ok {
 		t.Fatal("expected ok for 4-field line")
 	}
 	if r4.LastModified != "2026-11-13T15:30:00Z" {
 		t.Errorf("LastModified=%q want %q", r4.LastModified, "2026-11-13T15:30:00Z")
+	}
+}
+
+// encoding_type_url=true 时，delete_markers.txt 的 key 是 URL 编码
+// （list 工具开了 EncodingType=url 但不在本地解码）。cleanup 读时需 url.QueryUnescape。
+func TestParseRow_EncodingTypeURLDecodesDeleteMarkersKey(t *testing.T) {
+	r, ok := ParseRow("bkt\x1fa%1Fb\x1fv1", "delete_markers.txt", true)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if r.Key != "a\x1fb" {
+		t.Errorf("Key=%q want %q", r.Key, "a\x1fb")
+	}
+	if !r.KeyEncoded {
+		t.Errorf("KeyEncoded=false want true（outputKey 时需重新 QueryEscape）")
+	}
+}
+
+// encoding_type_url=true 时 URL 解码失败 → ok=false（scanner 走 torn line 路径，
+// 写 failed.txt + slog 详情，与 delete 失败一致）。
+func TestParseRow_EncodingTypeURLDecodeFailureReturnsFalse(t *testing.T) {
+	// "%XX" 末尾不完整 → QueryUnescape 报错。
+	if _, ok := ParseRow("bkt\x1fa%\x1fv1", "delete_markers.txt", true); ok {
+		t.Errorf("expected ok=false for invalid url-encoded key")
+	}
+}
+
+// encoding_type_url=false 时 delete_markers.txt 的 key 不解码（原样），
+// 哪怕 key 字面量含 %（合法 S3 key 字符）。
+func TestParseRow_EncodingTypeURLFalseNoDecode(t *testing.T) {
+	r, ok := ParseRow("bkt\x1fa%1Fb\x1fv1", "delete_markers.txt", false)
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if r.Key != "a%1Fb" {
+		t.Errorf("Key=%q want %q (no decode)", r.Key, "a%1Fb")
+	}
+	if r.KeyEncoded {
+		t.Errorf("KeyEncoded=true want false")
 	}
 }
 

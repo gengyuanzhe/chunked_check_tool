@@ -71,6 +71,7 @@ progress_interval: 5000             # 进度行间隔（处理条目数）
 dial_timeout: 10                    # TCP 建连超时秒数
 response_header_timeout: 0          # 等服务端响应头超时秒数（0=不限）
 latency_window_sec: 60              # 请求时延统计窗口秒数（progress 的 latency_avg/max 每 N 秒重置）
+encoding_type_url: false            # true=输入 key URL 编码，读行时 url.QueryUnescape 解码；与 list 工具同名配置配套
 ```
 
 | 字段 | 类型 | 默认 | 必填 | 说明 |
@@ -85,6 +86,7 @@ latency_window_sec: 60              # 请求时延统计窗口秒数（progress 
 | `dial_timeout` | int64 | `10` | 否 | TCP 建连超时秒数 |
 | `response_header_timeout` | int64 | `0` | 否 | 等响应头超时秒数；0=不限 |
 | `latency_window_sec` | int | `60` | 否 | 请求时延统计窗口秒数；progress 的 latency_avg_ms/max_ms 每该秒数重置 |
+| `encoding_type_url` | bool | `false` | 否 | true=delete_markers.txt 的 key 是 URL 编码（与 list 工具的 `encoding_type_url=true` 配套），cleanup 读每行时 `url.QueryUnescape` 解码；解码失败走 torn line 路径（写 `delete_failed.txt` + slog，不进 `invalid_keys.txt`）。`invalid_keys.txt` 永远 URL 编码，无视此配置独立解码 |
 
 **可直接复用 `delete_marker_list_tool` / `chunked_check_tool` 的 config.yaml**——本工具只读自己认识的字段，未识别字段（`list_type`、`list_concurrency`、`is_check`、`multipart_*`、`backup_*` 等）被 YAML 解析器忽略，不报错。
 

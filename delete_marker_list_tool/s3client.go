@@ -15,6 +15,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 )
 
@@ -22,10 +23,11 @@ import (
 // + HeadBucket（探测桶存在）。AWS SDK 把 <Version>/<DeleteMarker>/
 // <CommonPrefixes> 解析到独立 slice 字段，靠 XML 标签区分，不靠启发式。
 type S3Client struct {
-	client  *s3.Client
-	latency *LatencyTracker // 可选——nil 不记录。main 启动时注入 &stats.Latency。
-	logger  *slog.Logger    // 可选——nil 不打诊断。main 在 cfg.DebugLog=true 时注入 Debug-level logger。
-	maxKeys int32           // 每页 MaxKeys；0=用 SDK 默认 1000（不显式设）。NewS3Client 从 cfg.MaxKeys 读。
+	client          *s3.Client
+	latency         *LatencyTracker // 可选——nil 不记录。main 启动时注入 &stats.Latency。
+	logger          *slog.Logger    // 可选——nil 不打诊断。main 在 cfg.DebugLog=true 时注入 Debug-level logger。
+	maxKeys         int32           // 每页 MaxKeys；0=用 SDK 默认 1000（不显式设）。NewS3Client 从 cfg.MaxKeys 读。
+	encodingTypeURL bool            // true=请求带 EncodingType=url（wire 上 key URL 编码，避免 \x1f 等控制字符撕裂 XML）。SDK 不自动解码——cleanup 工具读 delete_markers.txt 时自行 url.QueryUnescape。
 }
 
 // SetLatencyTracker 注入窗口式时延统计器。main 在 NewS3Client 后调一次。
@@ -83,7 +85,7 @@ func NewS3Client(cfg *Config, endpoint string) (*S3Client, error) {
 		o.UsePathStyle = true
 		o.HTTPClient = &http.Client{Transport: tr}
 	})
-	return &S3Client{client: client, maxKeys: cfg.MaxKeys}, nil
+	return &S3Client{client: client, maxKeys: cfg.MaxKeys, encodingTypeURL: cfg.EncodingTypeURL}, nil
 }
 
 // VersionEntry 把 AWS SDK 的 <Version> 和 <DeleteMarker> 摊平成一条目——
@@ -141,6 +143,12 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 	}
 	// maxKeys 是必填字段（config 校验保证 1..1000），故总是显式设 MaxKeys。
 	input.MaxKeys = aws.Int32(c.maxKeys)
+	// encoding_type_url=true 时请求带 EncodingType=url——wire 上 key URL 编码，
+	// 避免 \x1f 等 XML 1.0 非法控制字符撕裂 XML 反序列化。SDK 不自动解码，
+	// delete_markers.txt 落盘的是 URL 编码 key；cleanup 工具读时按 url.QueryUnescape 解码。
+	if c.encodingTypeURL {
+		input.EncodingType = types.EncodingTypeUrl
+	}
 	out, err := c.client.ListObjectVersions(ctx, input)
 	if c.latency != nil {
 		c.latency.Record(time.Since(start))

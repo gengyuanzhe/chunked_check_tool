@@ -23,6 +23,7 @@ type Config struct {
 	DialTimeout           int64    `yaml:"dial_timeout"`
 	ResponseHeaderTimeout int64    `yaml:"response_header_timeout"`
 	LatencyWindowSec      int      `yaml:"latency_window_sec"`
+	EncodingTypeURL       bool     `yaml:"encoding_type_url"`
 }
 
 // LoadConfig 读 YAML 配置并应用默认值 + 校验。timestamp 后缀逻辑对齐
