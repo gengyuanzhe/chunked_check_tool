@@ -139,10 +139,8 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 		KeyMarker:       reqKeyMarker,
 		VersionIdMarker: reqVersionIDMarker,
 	}
-	// maxKeys=0 时不设 MaxKeys（用 SDK 默认 1000，跟旧行为一致）；非 0 时显式设。
-	if c.maxKeys > 0 {
-		input.MaxKeys = aws.Int32(c.maxKeys)
-	}
+	// maxKeys 是必填字段（config 校验保证 1..1000），故总是显式设 MaxKeys。
+	input.MaxKeys = aws.Int32(c.maxKeys)
 	out, err := c.client.ListObjectVersions(ctx, input)
 	if c.latency != nil {
 		c.latency.Record(time.Since(start))

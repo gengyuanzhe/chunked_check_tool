@@ -57,5 +57,6 @@ latency_window_sec: 60
 debug_log: false
 
 # 每页 MaxKeys（S3 上限 1000，超过服务端截断）。
-# 0=用 SDK 默认 1000（不显式设）；1..1000=显式设。调试翻页或控制每页返回量时用。
+# 必填，范围 1..1000——不给默认值。客户端需显式页大小才能用
+# "返回数 < max_keys && IsTruncated=true" 检测服务端翻页 quirk（异常 short response）。
 max_keys: 500

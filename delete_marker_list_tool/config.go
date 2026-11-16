@@ -99,9 +99,11 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.LatencyWindowSec < 1 {
 		return nil, fmt.Errorf("config: latency_window_sec must be >= 1, got %d", cfg.LatencyWindowSec)
 	}
-	// max_keys: 0=用 SDK 默认 1000（不显式设 MaxKeys）；S3 上限 1000，超过服务端截断。
-	if cfg.MaxKeys < 0 || cfg.MaxKeys > 1000 {
-		return nil, fmt.Errorf("config: max_keys must be 0 (sdk default) or 1..1000, got %d", cfg.MaxKeys)
+	// max_keys: 必填，范围 1..1000（S3 上限 1000，超过服务端截断）。
+	// 必填而非默认——客户端需要显式页大小才能用"返回数<max_keys && truncated"判定
+	// 服务端翻页 quirk（异常 short response）。
+	if cfg.MaxKeys < 1 || cfg.MaxKeys > 1000 {
+		return nil, fmt.Errorf("config: max_keys must be 1..1000, got %d", cfg.MaxKeys)
 	}
 
 	// timestamp 后缀。

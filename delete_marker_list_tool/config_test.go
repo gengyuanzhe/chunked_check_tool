@@ -24,6 +24,7 @@ scheme: http
 ak: myak
 sk: mysk
 list_type: 2
+max_keys: 500
 list_concurrency: 4
 output_dir: ./out
 `)
@@ -69,6 +70,7 @@ endpoints: ["1.2.3.4:80"]
 ak: a
 sk: s
 list_type: 2
+max_keys: 500
 output_dir: ./out/
 output_dir_timestamp: true
 `)
@@ -92,6 +94,7 @@ endpoints: ["1.2.3.4:80"]
 ak: a
 sk: s
 list_type: 2
+max_keys: 500
 output_dir: ./fixed
 output_dir_timestamp: false
 `)
@@ -111,6 +114,7 @@ endpoints: ["1.2.3.4:80"]
 ak: a
 sk: s
 list_type: 2
+max_keys: 500
 unknown_field: whatever
 is_check: true
 multipart_check_mode: 1
@@ -131,6 +135,7 @@ scheme: http
 ak: a
 sk: s
 list_type: 2
+max_keys: 500
 `)
 	cfg, err := LoadConfig(p)
 	if err != nil {
@@ -148,6 +153,7 @@ scheme: http
 ak: a
 sk: s
 list_type: 2
+max_keys: 500
 latency_window_sec: 30
 `)
 	cfg, err := LoadConfig(p)
@@ -164,6 +170,7 @@ scheme: http
 ak: a
 sk: s
 list_type: 2
+max_keys: 500
 latency_window_sec: -1
 `)
 	if _, err := LoadConfig(pBad); err == nil {

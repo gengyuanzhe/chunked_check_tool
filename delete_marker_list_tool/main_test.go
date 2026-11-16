@@ -21,6 +21,7 @@ func TestRun_EndToEnd_HappyPath(t *testing.T) {
 		"ak: a",
 		"sk: s",
 		"list_type: 2",
+		"max_keys: 500",
 		"list_concurrency: 1",
 		"output_dir: " + filepath.Join(dir, "out"),
 		"output_dir_timestamp: false",
@@ -87,6 +88,7 @@ func TestRun_BucketDoesNotExist(t *testing.T) {
 		"ak: a",
 		"sk: s",
 		"list_type: 2",
+		"max_keys: 500",
 		"list_concurrency: 1",
 		"output_dir: " + filepath.Join(dir, "out"),
 		"output_dir_timestamp: false",
@@ -160,7 +162,85 @@ func TestResolveEntries_BothEmptyIsRoot(t *testing.T) {
 	}
 }
 
-// TestRun_RetryMode_ScansRetryPrefixes 验证 retry 模式从文件读 prefix 列表
+// TestRun_ShortResponseWarning 验证服务端返回 IsTruncated=true 但本页条目数
+// < max_keys 时，警告行被写入 list_failed.log（非失败，list_failed.txt 仍为空）。
+// 这正是用户实际遇到的翻页 quirk 场景——服务端说截断了却没返回满页。
+func TestRun_ShortResponseWarning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if !q.Has("versions") {
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+			return
+		}
+		// 第一页：1 条 + IsTruncated=true，但 max_keys=500 —— short response quirk。
+		// 第二页（带 key-marker）：空页 + IsTruncated=false，正常收尾。
+		if q.Get("key-marker") == "" {
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix>
+<IsTruncated>true</IsTruncated>
+<NextKeyMarker>k1</NextKeyMarker><NextVersionIdMarker>v1</NextVersionIdMarker>
+<DeleteMarker><Key>a.txt</Key><VersionId>dm-a</VersionId><IsLatest>true</IsLatest><LastModified>2026-01-02T15:04:05.000Z</LastModified></DeleteMarker>
+</ListVersionsResult>`))
+			return
+		}
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix><IsTruncated>false</IsTruncated>
+</ListVersionsResult>`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgBody := strings.Join([]string{
+		"endpoints:",
+		"  - " + srv.Listener.Addr().String(),
+		"scheme: http",
+		"ak: a",
+		"sk: s",
+		"list_type: 1",
+		"max_keys: 500",
+		"list_concurrency: 1",
+		"output_dir: " + filepath.Join(dir, "out"),
+		"output_dir_timestamp: false",
+		"",
+	}, "\n")
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(cfgPath, "testbucket", []RetryEntry{{Prefix: ""}}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// list_failed.log 含 short response 警告。
+	logBytes, err := os.ReadFile(filepath.Join(dir, "out", "list_failed.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logStr := string(logBytes)
+	if !strings.Contains(logStr, "short response while truncated") {
+		t.Errorf("list_failed.log missing short-response warning: %q", logStr)
+	}
+	if !strings.Contains(logStr, "returned_count=1") || !strings.Contains(logStr, "max_keys=500") {
+		t.Errorf("warning missing counts: %q", logStr)
+	}
+	// list_failed.txt 不应被创建——这是警告不是失败。
+	if _, err := os.Stat(filepath.Join(dir, "out", "list_failed.txt")); !os.IsNotExist(err) {
+		t.Errorf("list_failed.txt should not exist for a warning: %v", err)
+	}
+	// delete_markers.txt 含第一页扫出的 marker。
+	dm, err := os.ReadFile(filepath.Join(dir, "out", "delete_markers.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(dm), "testbucket\x1fa.txt\x1fdm-a") {
+		t.Errorf("delete_markers.txt missing a.txt marker: %q", dm)
+	}
+}
 // 扫——run 接受 prefixes []string，多 prefix 入队。
 func TestRun_RetryMode_ScansRetryPrefixes(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +287,7 @@ func TestRun_RetryMode_ScansRetryPrefixes(t *testing.T) {
 		"ak: a",
 		"sk: s",
 		"list_type: 2",
+		"max_keys: 500",
 		"list_concurrency: 2",
 		"output_dir: " + filepath.Join(dir, "out"),
 		"output_dir_timestamp: false",

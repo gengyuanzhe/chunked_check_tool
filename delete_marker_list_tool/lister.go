@@ -68,6 +68,7 @@ func (l *Lister) runMode1(ctx context.Context, bucket string, entry RetryEntry) 
 			l.stats.IncrListFailed()
 			return err
 		}
+		l.checkShortResponse(entry.Prefix, keyMarker, versionIDMarker, page)
 		for _, obj := range page.Versions {
 			l.stats.IncrScannedVersions()
 			localCount++
@@ -157,6 +158,7 @@ func (l *Lister) processPrefix(ctx context.Context, bucket string, entry RetryEn
 			l.stats.IncrListFailed()
 			return
 		}
+		l.checkShortResponse(entry.Prefix, keyMarker, versionIDMarker, page)
 		for _, p := range page.CommonPrefixes {
 			inflight.Add(1)
 			// 新发现的 common prefix 从第一页扫（markers 空）。
@@ -178,6 +180,20 @@ func (l *Lister) processPrefix(ctx context.Context, bucket string, entry RetryEn
 			return
 		}
 		keyMarker, versionIDMarker = page.NextKeyMarker, page.NextVersionIDMarker
+	}
+}
+
+// checkShortResponse 检测"截断了却没返回满"的矛盾响应并写警告到 list_failed.log。
+// 条件：IsTruncated=true 且本页条目数（Version+DeleteMarker+CommonPrefix）< maxKeys。
+// 服务端在正常翻页下 IsTruncated=true 的页一定返回满 maxKeys；不满预示服务端
+// 翻页 quirk（如返回异常 next-marker）。非失败，不写 list_failed.txt。
+func (l *Lister) checkShortResponse(prefix, keyMarker, versionIDMarker string, page *VersionPage) {
+	if !page.IsTruncated {
+		return
+	}
+	count := int32(len(page.Versions) + len(page.CommonPrefixes))
+	if count < l.cfg.MaxKeys {
+		l.out.WriteShortResponseWarning(prefix, keyMarker, versionIDMarker, count, l.cfg.MaxKeys)
 	}
 }
 

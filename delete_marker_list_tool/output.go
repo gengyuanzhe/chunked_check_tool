@@ -189,6 +189,21 @@ func (o *Output) WriteListFailed(prefix, keyMarker, versionIDMarker string) {
 	o.listFailedCh <- [3]string{prefix, keyMarker, versionIDMarker}
 }
 
+// WriteShortResponseWarning 写一条 slog 警告到 list_failed.log。
+// 触发条件：服务端返回 IsTruncated=true 但本页条目数（Version+DeleteMarker+
+// CommonPrefix）< 请求的 maxKeys——矛盾状态（说还有更多却又没返回满），
+// 常预示服务端翻页 quirk（如返回异常 next-marker）。非失败，不写 list_failed.txt。
+// 仅在 cfg.MaxKeys>0 时调（maxKeys=0 时客户端不知实际 max，无法判定）。
+func (o *Output) WriteShortResponseWarning(prefix, keyMarker, versionIDMarker string, returnedCount, maxKeys int32) {
+	o.listLogger.Warn("short response while truncated",
+		"bucket", o.bucket,
+		"prefix", prefix,
+		"key_marker", keyMarker,
+		"version_id_marker", versionIDMarker,
+		"returned_count", returnedCount,
+		"max_keys", maxKeys)
+}
+
 // WriteListFailedLog 写一条 slog 详情到 list_failed.log。
 // keyMarker/versionIDMarker 是失败请求用的 marker（=续传点），便于定位翻页位置。
 func (o *Output) WriteListFailedLog(prefix, keyMarker, versionIDMarker string, statusCode int, s3Code, reqID string, err error) {

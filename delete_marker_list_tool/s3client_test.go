@@ -100,28 +100,15 @@ func TestListVersionsPage_MaxKeysPassedToRequest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// case 1: MaxKeys=0 → 不该有 max-keys query（用 SDK 默认）
-	cfg0 := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s"}
-	c0, err := NewS3Client(cfg0, srv.Listener.Addr().String())
+	// MaxKeys=500 → 应有 max-keys=500。
+	// （MaxKeys 必填 1..1000，不再有 0 值，故仅测一个有效值。）
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	sawMaxKeys = ""
-	if _, err := c0.ListVersionsPage(context.Background(), "testbucket", "", true, "", ""); err != nil {
-		t.Fatal(err)
-	}
-	if sawMaxKeys != "" {
-		t.Errorf("MaxKeys=0: expected no max-keys query, got %q", sawMaxKeys)
-	}
-
-	// case 2: MaxKeys=500 → 应有 max-keys=500
-	cfg500 := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500}
-	c500, err := NewS3Client(cfg500, srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sawMaxKeys = ""
-	if _, err := c500.ListVersionsPage(context.Background(), "testbucket", "", true, "", ""); err != nil {
+	if _, err := c.ListVersionsPage(context.Background(), "testbucket", "", true, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if sawMaxKeys != "500" {
