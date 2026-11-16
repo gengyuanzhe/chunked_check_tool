@@ -51,3 +51,11 @@ response_header_timeout: 0
 # 请求时延统计窗口秒数（progress 行的 latency_avg_ms/latency_max_ms 每该秒数
 # 重置一次，看"最近一批"的时延而非全局平均）。默认 60。
 latency_window_sec: 60
+
+# 是否打每次 ListObjectVersions 请求的 marker 诊断行（req/resp/err）到 run.log。
+# 排查翻页异常（如服务端返回异常 next-marker）时开 true。默认 false 零成本静默。
+debug_log: false
+
+# 每页 MaxKeys（S3 上限 1000，超过服务端截断）。
+# 0=用 SDK 默认 1000（不显式设）；1..1000=显式设。调试翻页或控制每页返回量时用。
+max_keys: 500
