@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -22,11 +22,16 @@ import (
 type S3Client struct {
 	client  *s3.Client
 	latency *LatencyTracker // 可选——nil 不记录。main 启动时注入 &stats.Latency。
+	diag    *slog.Logger    // 可选——nil 不打诊断。main 在 cfg.DebugLog=true 时注入 Debug-level logger。
 }
 
 // SetLatencyTracker 注入窗口式时延统计器。main 在 NewS3Client 后调一次。
 // nil 表示不记录（test 默认 nil，不影响功能）。
 func (c *S3Client) SetLatencyTracker(l *LatencyTracker) { c.latency = l }
+
+// SetDebugLogger 注入诊断 logger。main 在 cfg.DebugLog=true 时调一次，
+// 传入 Debug-level slog logger（输出到 run.log + 终端）。nil 表示不打诊断。
+func (c *S3Client) SetDebugLogger(l *slog.Logger) { c.diag = l }
 
 // NewS3Client 构造绑定到单个 endpoint 的 s3.Client。
 // transport 调优对齐 chunked_check_tool：MaxIdleConnsPerHost=32、
@@ -116,9 +121,13 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 	if versionIDMarker != "" {
 		reqVersionIDMarker = aws.String(versionIDMarker)
 	}
-	// [diag] 记录每次请求的入参 marker（=进 URL 的 key-marker/version-id-marker）。
-	// 追 version-id-marker=0 来源：看 reqVIDM 是否非预期地是 "0"。
-	log.Printf("[list-page] req bucket=%s prefix=%q recursive=%v km=%q vidm=%q", bucket, prefix, recursive, keyMarker, versionIDMarker)
+	// [diag] 每次请求的入参 marker（=进 URL 的 key-marker/version-id-marker）。
+	// cfg.DebugLog=true 时打——追 version-id-marker=0 来源看 req vidm 是否非预期地是 "0"。
+	if c.diag != nil {
+		c.diag.Debug("list-page req",
+			"bucket", bucket, "prefix", prefix, "recursive", recursive,
+			"km", keyMarker, "vidm", versionIDMarker)
+	}
 	start := time.Now()
 	out, err := c.client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
 		Bucket:          aws.String(bucket),
@@ -131,16 +140,22 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 		c.latency.Record(time.Since(start))
 	}
 	if err != nil {
-		// [diag] 请求失败也打返回值（err 里无 marker）——入参已在上面记录。
-		log.Printf("[list-page] err bucket=%s prefix=%q km=%q vidm=%q err=%v", bucket, prefix, keyMarker, versionIDMarker, err)
+		if c.diag != nil {
+			c.diag.Debug("list-page err",
+				"bucket", bucket, "prefix", prefix,
+				"km", keyMarker, "vidm", versionIDMarker, "err", err)
+		}
 		return nil, err
 	}
-	// [diag] 记录服务端返回的 next-marker——这是下一页请求用的 marker，
-	// 也是失败时（下一页）写进 list_failed 的续传点。
-	log.Printf("[list-page] resp bucket=%s prefix=%q nextKM=%q nextVIDM=%q truncated=%v nVer=%d nDM=%d nCP=%d",
-		bucket, prefix,
-		aws.ToString(out.NextKeyMarker), aws.ToString(out.NextVersionIdMarker),
-		aws.ToBool(out.IsTruncated), len(out.Versions), len(out.DeleteMarkers), len(out.CommonPrefixes))
+	// [diag] 服务端返回的 next-marker——下一页请求用的 marker，也是失败时
+	// （下一页）写进 list_failed 的续传点。nVer/nDM/nCP 是三个 slice 的计数。
+	if c.diag != nil {
+		c.diag.Debug("list-page resp",
+			"bucket", bucket, "prefix", prefix,
+			"nextKM", aws.ToString(out.NextKeyMarker), "nextVIDM", aws.ToString(out.NextVersionIdMarker),
+			"truncated", aws.ToBool(out.IsTruncated),
+			"nVer", len(out.Versions), "nDM", len(out.DeleteMarkers), "nCP", len(out.CommonPrefixes))
+	}
 	page := &VersionPage{
 		NextKeyMarker:       aws.ToString(out.NextKeyMarker),
 		NextVersionIDMarker: aws.ToString(out.NextVersionIdMarker),

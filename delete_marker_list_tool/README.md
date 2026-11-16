@@ -96,6 +96,7 @@ progress_interval: 5000             # 进度行间隔（处理条目数）
 dial_timeout: 10                    # TCP 建连超时秒数（黑洞 IP 默认 10s 兜底）
 response_header_timeout: 0           # 等服务端响应头超时秒数（0=不限）
 latency_window_sec: 60              # 请求时延统计窗口秒数（progress 的 latency_avg/max 每 N 秒重置）
+debug_log: false                   # true=打每次 ListObjectVersions 请求的 marker 诊断行到 run.log
 ```
 
 | 字段 | 类型 | 默认 | 必填 | 说明 |
@@ -111,6 +112,7 @@ latency_window_sec: 60              # 请求时延统计窗口秒数（progress 
 | `dial_timeout` | int64 | `10` | 否 | TCP 建连超时秒数 |
 | `response_header_timeout` | int64 | `0` | 否 | 等响应头超时秒数；0=不限 |
 | `latency_window_sec` | int | `60` | 否 | 请求时延统计窗口秒数；progress 的 latency_avg_ms/max_ms 每该秒数重置 |
+| `debug_log` | bool | `false` | 否 | true=打每次请求的 marker 诊断行（req/resp/err）到 run.log，排翻页异常用；false 零成本静默 |
 
 **可直接复用 chunked_check_tool 的 config.yaml**——本工具只读自己认识的字段，未识别字段（`is_check`、`multipart_*`、`backup_*`、`check_concurrency` 等）被 YAML 解析器忽略，不报错。
 

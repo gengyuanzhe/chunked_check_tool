@@ -5,7 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,8 +80,6 @@ func run(cfgPath, bucket string, entries []RetryEntry) error {
 	defer runLog.Close()
 	mwOut := io.MultiWriter(os.Stdout, runLog)
 	mwErr := io.MultiWriter(os.Stderr, runLog)
-	// [diag] 标准库 log 路由到 run.log + stderr——ListVersionsPage 的诊断行由此进 run.log。
-	log.SetOutput(mwErr)
 
 	// 配置快照（sk 掩码）。prefix 显示：单 prefix 直显，多 prefix（retry 模式）
 	// 显示数量避免 run.log 一行过长。
@@ -120,6 +118,11 @@ func run(cfgPath, bucket string, entries []RetryEntry) error {
 	progress.SetInterval(cfg.ProgressInterval)
 	stats.Latency.SetWindow(time.Duration(cfg.LatencyWindowSec) * time.Second)
 	client.SetLatencyTracker(&stats.Latency)
+	// debug_log: true 时建 Debug-level slog logger 路由到 run.log + 终端，
+	// 注入 S3Client 打每次请求的 marker（req/resp/err）。false 时不注入（nil），零成本静默。
+	if cfg.DebugLog {
+		client.SetDebugLogger(slog.New(slog.NewTextHandler(mwErr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	}
 
 	l := NewLister(cfg, client, out, &stats, progress)
 	listErr := l.Run(ctx, bucket, entries)
@@ -149,4 +152,5 @@ func printConfigSnapshot(w io.Writer, cfg *Config, bucket, prefix string) {
 	fmt.Fprintf(w, "progress_interval=%d\n", cfg.ProgressInterval)
 	fmt.Fprintf(w, "dial_timeout=%d\n", cfg.DialTimeout)
 	fmt.Fprintf(w, "response_header_timeout=%d\n", cfg.ResponseHeaderTimeout)
+	fmt.Fprintf(w, "debug_log=%v\n", cfg.DebugLog)
 }
