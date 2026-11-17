@@ -74,8 +74,11 @@ func (l *Lister) runMode1(ctx context.Context, bucket string, entry RetryEntry) 
 			l.stats.IncrScannedVersions()
 			localCount++
 			if obj.IsDeleteMarker {
-				l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified))
-				l.stats.IncrDeleteMarkers()
+				if l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified)) {
+					l.stats.IncrInvalidKeys()
+				} else {
+					l.stats.IncrDeleteMarkers()
+				}
 			}
 			if localCount >= interval {
 				l.progress.MaybePrint(l.stats, "scanned", localCount)
@@ -170,8 +173,11 @@ func (l *Lister) processPrefix(ctx context.Context, bucket string, entry RetryEn
 			l.stats.IncrScannedVersions()
 			lc.count++
 			if obj.IsDeleteMarker {
-				l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified))
-				l.stats.IncrDeleteMarkers()
+				if l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified)) {
+					l.stats.IncrInvalidKeys()
+				} else {
+					l.stats.IncrDeleteMarkers()
+				}
 			}
 			if lc.count >= interval {
 				l.progress.MaybePrint(l.stats, "scanned", lc.count)

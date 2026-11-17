@@ -167,15 +167,17 @@ func writeRow(w *bufio.Writer, bkt, key, versionID, lastModified string) {
 	w.WriteByte('\n')
 }
 
-// WriteDeleteMarker 把一条 marker 送进结果文件 writer。key 含 \x1f 时
+// WriteDeleteMarker 把一条 marker 送进结果文件 writer。key 含 \x1f/\n/\r 时
 // 自动路由到 invalid_keys.txt，key 经 URL 编码。lastModified 是 RFC3339
 // 形式的 UTC 时间字符串（从 AWS SDK time.Time 格式化）。
-func (o *Output) WriteDeleteMarker(key, versionID, lastModified string) {
+// 返回 true 表示走了 invalid_keys 兜底路径（调用方据此 incr invalid_keys 统计）。
+func (o *Output) WriteDeleteMarker(key, versionID, lastModified string) bool {
 	if containsRowSep(key) {
 		o.invalidKeysCh <- [3]string{url.QueryEscape(key), versionID, lastModified}
-	} else {
-		o.deleteMarkerCh <- [3]string{key, versionID, lastModified}
+		return true
 	}
+	o.deleteMarkerCh <- [3]string{key, versionID, lastModified}
+	return false
 }
 
 // WriteInvalidKey 显式路由到 invalid_keys.txt（key 已由调用方 URL 编码）。

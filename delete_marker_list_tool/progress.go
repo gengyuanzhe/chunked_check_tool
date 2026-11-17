@@ -71,13 +71,13 @@ func (p *ProgressPrinter) MaybePrint(s *Stats, label string, count int) {
 	defer p.mu.Unlock()
 	if p.queueSnapshot != nil {
 		fmt.Fprintf(p.w,
-			"[progress] scanned=%d markers=%d list_failed=%d (q=%d) latency_avg_ms=%.2f latency_max_ms=%.2f heap=%.1fMiB\n",
-			snap.ScannedVersions, snap.DeleteMarkers, snap.ListFailed,
+			"[progress] scanned=%d markers=%d invalid_keys=%d list_failed=%d (q=%d) latency_avg_ms=%.2f latency_max_ms=%.2f heap=%.1fMiB\n",
+			snap.ScannedVersions, snap.DeleteMarkers, snap.InvalidKeys, snap.ListFailed,
 			qs.Prefix, lat.AvgMs, lat.MaxMs, heapMiB)
 	} else {
 		fmt.Fprintf(p.w,
-			"[progress] scanned=%d markers=%d list_failed=%d latency_avg_ms=%.2f latency_max_ms=%.2f heap=%.1fMiB\n",
-			snap.ScannedVersions, snap.DeleteMarkers, snap.ListFailed, lat.AvgMs, lat.MaxMs, heapMiB)
+			"[progress] scanned=%d markers=%d invalid_keys=%d list_failed=%d latency_avg_ms=%.2f latency_max_ms=%.2f heap=%.1fMiB\n",
+			snap.ScannedVersions, snap.DeleteMarkers, snap.InvalidKeys, snap.ListFailed, lat.AvgMs, lat.MaxMs, heapMiB)
 	}
 }
 

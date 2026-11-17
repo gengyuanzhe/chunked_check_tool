@@ -13,6 +13,7 @@ import (
 type Stats struct {
 	scannedVersions atomic.Int64
 	deleteMarkers   atomic.Int64
+	invalidKeys     atomic.Int64
 	listFailed      atomic.Int64
 	totalDurationNs atomic.Int64
 	Latency         LatencyTracker
@@ -22,12 +23,14 @@ type Stats struct {
 type StatsSnapshot struct {
 	ScannedVersions int64
 	DeleteMarkers   int64
+	InvalidKeys     int64
 	ListFailed      int64
 	TotalSec        float64
 }
 
 func (s *Stats) IncrScannedVersions() { s.scannedVersions.Add(1) }
 func (s *Stats) IncrDeleteMarkers()   { s.deleteMarkers.Add(1) }
+func (s *Stats) IncrInvalidKeys()     { s.invalidKeys.Add(1) }
 func (s *Stats) IncrListFailed()      { s.listFailed.Add(1) }
 
 func (s *Stats) SetTotalDuration(d time.Duration) {
@@ -38,6 +41,7 @@ func (s *Stats) Snapshot() StatsSnapshot {
 	return StatsSnapshot{
 		ScannedVersions: s.scannedVersions.Load(),
 		DeleteMarkers:   s.deleteMarkers.Load(),
+		InvalidKeys:     s.invalidKeys.Load(),
 		ListFailed:      s.listFailed.Load(),
 		TotalSec:        float64(s.totalDurationNs.Load()) / 1e9,
 	}
@@ -51,6 +55,7 @@ func (s *Stats) PrintSummary(w io.Writer) {
 	fmt.Fprintf(w, "=== summary ===\n")
 	fmt.Fprintf(w, "scanned_versions=%d\n", snap.ScannedVersions)
 	fmt.Fprintf(w, "delete_markers=%d\n", snap.DeleteMarkers)
+	fmt.Fprintf(w, "invalid_keys=%d\n", snap.InvalidKeys)
 	fmt.Fprintf(w, "list_failed=%d\n", snap.ListFailed)
 	fmt.Fprintf(w, "total_sec=%.2f\n", snap.TotalSec)
 }

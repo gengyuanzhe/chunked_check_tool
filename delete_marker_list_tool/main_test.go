@@ -241,6 +241,100 @@ func TestRun_ShortResponseWarning(t *testing.T) {
 		t.Errorf("delete_markers.txt missing a.txt marker: %q", dm)
 	}
 }
+// TestRun_EncodingTypeURL_InvalidKeysShouldBeEmpty_WarnsIfNonZero 验证 encoding_type_url=true
+// 时若 invalid_keys 命中（不应发生），run.log 含 warning 行提示人工核对。
+// 触发方式：fake server 直接返回含 \x1f 的 <Key>（XML 合法因为 \x1f 是 ASCII 控制字符但
+// XML 1.0 禁止——会反序列化失败；改用 \n 触发 containsRowSep，但 \n 同样 XML 非法）。
+// 改用 encoding_type_url=true 时让 fake server 不带 EncodingType 响应，且 key 含字面量
+// \x1f（XML 解析会失败）——这条路径测不到。
+// 实际可测路径：encoding_type_url=false + key 含 \n（XML 合法）→ containsRowSep 命中 →
+// invalid_keys=1。但 encoding_type_url=false 时不打 warning。所以本测试改用直接断言
+// stats 行为：encoding_type_url=true 跑出来 invalid_keys 应永远为 0（不写 warning）。
+// 这里测的是 encoding_type_url=true + 无 \x1f key 的正常路径：warning 不打。
+func TestRun_EncodingTypeURL_NoWarningWhenInvalidKeysZero(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if !q.Has("versions") {
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+			return
+		}
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix><EncodingType>url</EncodingType><IsTruncated>false</IsTruncated>
+<DeleteMarker><Key>plain.txt</Key><VersionId>dm-1</VersionId><IsLatest>true</IsLatest><LastModified>2026-01-02T15:04:05.000Z</LastModified></DeleteMarker>
+</ListVersionsResult>`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgBody := strings.Join([]string{
+		"endpoints:",
+		"  - " + srv.Listener.Addr().String(),
+		"scheme: http",
+		"ak: a",
+		"sk: s",
+		"list_type: 1",
+		"max_keys: 500",
+		"encoding_type_url: true",
+		"list_concurrency: 1",
+		"output_dir: " + filepath.Join(dir, "out"),
+		"output_dir_timestamp: false",
+		"",
+	}, "\n")
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(cfgPath, "testbucket", []RetryEntry{{Prefix: ""}}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	rl, err := os.ReadFile(filepath.Join(dir, "out", "run.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rl), "[warning] encoding_type_url=true but invalid_keys=") {
+		t.Errorf("should not warn when invalid_keys=0: %q", rl)
+	}
+}
+
+// TestWarnInvalidKeysNonzeroUnderEncodingTypeURL 直接测 warning 函数：
+// encoding_type_url=true 且 stats.InvalidKeys>0 时打 warning；其他情况不打。
+func TestWarnInvalidKeysNonzeroUnderEncodingTypeURL(t *testing.T) {
+	cases := []struct {
+		name           string
+		encodingTypeURL bool
+		invalidKeys    int64
+		wantWarning    bool
+	}{
+		{"encoding_on_invalid_nonzero", true, 3, true},
+		{"encoding_on_invalid_zero", true, 0, false},
+		{"encoding_off_invalid_nonzero", false, 3, false},
+		{"encoding_off_invalid_zero", false, 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var stats Stats
+			for i := int64(0); i < c.invalidKeys; i++ {
+				stats.IncrInvalidKeys()
+			}
+			cfg := &Config{EncodingTypeURL: c.encodingTypeURL}
+			var sb strings.Builder
+			warnInvalidKeysNonzeroUnderEncodingTypeURL(&sb, cfg, &stats)
+			got := sb.String()
+			if c.wantWarning && !strings.Contains(got, "[warning] encoding_type_url=true but invalid_keys=") {
+				t.Errorf("want warning, got %q", got)
+			}
+			if !c.wantWarning && got != "" {
+				t.Errorf("want no warning, got %q", got)
+			}
+		})
+	}
+}
+
 // 扫——run 接受 prefixes []string，多 prefix 入队。
 func TestRun_RetryMode_ScansRetryPrefixes(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

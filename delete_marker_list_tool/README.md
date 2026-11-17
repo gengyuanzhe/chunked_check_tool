@@ -138,15 +138,15 @@ next_vid_marker_zero_to_null: false # true=服务端返回 NextVersionIdMarker==
 
 ```
 # mode 2（BFS）
-[progress] scanned=12345 markers=678 list_failed=0 (q=42) latency_avg_ms=42.5 latency_max_ms=210.0 heap=128.5MiB
+[progress] scanned=12345 markers=678 invalid_keys=0 list_failed=0 (q=42) latency_avg_ms=42.5 latency_max_ms=210.0 heap=128.5MiB
 
 # mode 1（单流）
-[progress] scanned=12345 markers=678 list_failed=0 latency_avg_ms=42.5 latency_max_ms=210.0 heap=128.5MiB
+[progress] scanned=12345 markers=678 invalid_keys=0 list_failed=0 latency_avg_ms=42.5 latency_max_ms=210.0 heap=128.5MiB
 ```
 
 字段说明：
 
-- `scanned` / `markers` / `list_failed`：scanned_versions / delete_markers / list_failed 的累计计数
+- `scanned` / `markers` / `invalid_keys` / `list_failed`：scanned_versions / delete_markers / invalid_keys / list_failed 的累计计数
 - `q`（mode 2）：BFS 队列长度——待扫的 prefix 数。宽桶百万级 common prefix 下会涨到几十万，是剩余工作量，不是并发请求数
 - `latency_avg_ms` / `latency_max_ms`：`ListObjectVersions` 在最近 `latency_window_sec` 秒窗口内的平均/最大时延（不是全局平均）
 - `heap`：`runtime.MemStats.HeapInuse`（当前堆已分配含碎片，单位 MiB）。BFS 队列堆积是驻留内存，GC 回收不了——`heap` 涨到接近 OS / `GOMEMLIMIT` 上限时考虑 Ctrl-C 后 `-retry list_failed.txt` 续传
