@@ -29,6 +29,8 @@ type Config struct {
 	MaxKeys                int32    `yaml:"max_keys"`
 	EncodingTypeURL        bool     `yaml:"encoding_type_url"`
 	NextVIDMarkerZeroToNull bool    `yaml:"next_vid_marker_zero_to_null"`
+	FailureThreshold        int      `yaml:"failure_threshold"`
+	SlowModeIntervalSec    int64    `yaml:"slow_mode_interval_sec"`
 }
 
 // LoadConfig 读 YAML 配置并应用默认值 + 校验。timestamp 后缀逻辑对齐
@@ -77,6 +79,15 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.LatencyWindowSec == 0 {
 		cfg.LatencyWindowSec = 60
 	}
+	// FailureThreshold 默认 3：连续失败 3 次后 worker 进入慢速模式。
+	// 0 视为默认——必填校验对 0 无意义，用 sentinel 改写。
+	if cfg.FailureThreshold == 0 {
+		cfg.FailureThreshold = 3
+	}
+	// SlowModeIntervalSec 默认 60s——1 分钟一条 entry，足够 S3 节点重启/恢复。
+	if cfg.SlowModeIntervalSec == 0 {
+		cfg.SlowModeIntervalSec = 60
+	}
 	// ResponseHeaderTimeout 默认 0（不限），不在此强制。
 
 	// 校验。
@@ -100,6 +111,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.LatencyWindowSec < 1 {
 		return nil, fmt.Errorf("config: latency_window_sec must be >= 1, got %d", cfg.LatencyWindowSec)
+	}
+	if cfg.FailureThreshold < 1 {
+		return nil, fmt.Errorf("config: failure_threshold must be >= 1, got %d", cfg.FailureThreshold)
+	}
+	if cfg.SlowModeIntervalSec < 1 {
+		return nil, fmt.Errorf("config: slow_mode_interval_sec must be >= 1, got %d", cfg.SlowModeIntervalSec)
 	}
 	// max_keys: 必填，范围 1..1000（S3 上限 1000，超过服务端截断）。
 	// 必填而非默认——客户端需要显式页大小才能用"返回数<max_keys && truncated"判定

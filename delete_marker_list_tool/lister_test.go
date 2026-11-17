@@ -50,7 +50,7 @@ func TestLister_Mode1_HappyPath(t *testing.T) {
 	}
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
-	l := NewLister(cfg, client, out, &stats, progress)
+	l := NewLister(cfg, []*S3Client{client}, out, &stats, progress)
 	if err := l.Run(context.Background(), "testbucket", []RetryEntry{{Prefix: ""}}); err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestLister_Mode2_RetryMultiplePrefixes(t *testing.T) {
 	}
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
-	l := NewLister(cfg, client, out, &stats, progress)
+	l := NewLister(cfg, []*S3Client{client}, out, &stats, progress)
 	if err := l.Run(context.Background(), "testbucket", []RetryEntry{{Prefix: "a/"}, {Prefix: "b/"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestLister_Mode2_KeyEndingInSlashWithNullVersion(t *testing.T) {
 	}
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
-	l := NewLister(cfg, client, out, &stats, progress)
+	l := NewLister(cfg, []*S3Client{client}, out, &stats, progress)
 	if err := l.Run(context.Background(), "testbucket", []RetryEntry{{Prefix: ""}}); err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestLister_Mode2_KeyEndingInSlashAsVersion(t *testing.T) {
 	}
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
-	l := NewLister(cfg, client, out, &stats, progress)
+	l := NewLister(cfg, []*S3Client{client}, out, &stats, progress)
 	// 加超时防死循环——bug 路径下 isCommonPrefix 误判 → 入队 94-abc-0/ →
 	// worker 重列该前缀 → 服务端又返回同样的 key → 再入队…… 永不终止。
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -364,7 +364,7 @@ func TestLister_Mode2_BFSWithCommonPrefix(t *testing.T) {
 	}
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
-	l := NewLister(cfg, client, out, &stats, progress)
+	l := NewLister(cfg, []*S3Client{client}, out, &stats, progress)
 	if err := l.Run(context.Background(), "testbucket", []RetryEntry{{Prefix: ""}}); err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +421,7 @@ func TestLister_RetryRejectedByMode1(t *testing.T) {
 	}
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
-	l := NewLister(cfg, client, out, &stats, progress)
+	l := NewLister(cfg, []*S3Client{client}, out, &stats, progress)
 	err = l.Run(context.Background(), "testbucket", []RetryEntry{{Prefix: "a/"}, {Prefix: "b/"}})
 	if err == nil {
 		out.FlushAndWait()

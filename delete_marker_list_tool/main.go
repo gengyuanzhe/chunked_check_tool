@@ -91,21 +91,32 @@ func run(cfgPath, bucket string, entries []RetryEntry) error {
 
 	start := time.Now()
 
-	client, err := NewS3Client(cfg, cfg.Endpoints[0])
-	if err != nil {
-		return err
-	}
-
 	ctx := context.Background()
 
-	// BucketExists 预检（防桶名手滑）。
-	exists, err := client.BucketExists(ctx, bucket)
-	if err != nil {
-		fmt.Fprintf(mwErr, "bucket exists probe failed: %v\n", err)
-		return err
+	// 启动期创建并预检所有需要的 client——fail-fast：
+	// mode 1 持 1 个 client（Endpoints[0]）；mode 2 持 len(Endpoints) 个（每个 endpoint 一个）。
+	// 任一 BucketExists 失败直接 return err，进程退出，不让 worker 半启动后才暴露死 endpoint。
+	// 预检通过的 client 在 runMode1/runMode2 直接复用——runMode2 不再创建 client。
+	nClients := 1
+	if cfg.ListType == 2 {
+		nClients = len(cfg.Endpoints)
 	}
-	if !exists {
-		return fmt.Errorf("bucket %s does not exist", bucket)
+	clients := make([]*S3Client, 0, nClients)
+	for i := 0; i < nClients; i++ {
+		endpoint := cfg.Endpoints[i%len(cfg.Endpoints)]
+		c, err := NewS3Client(cfg, endpoint)
+		if err != nil {
+			return fmt.Errorf("create client for endpoint %s: %w", endpoint, err)
+		}
+		exists, err := c.BucketExists(ctx, bucket)
+		if err != nil {
+			fmt.Fprintf(mwErr, "bucket exists probe failed for endpoint %s: %v\n", endpoint, err)
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("bucket %s does not exist (probed via %s)", bucket, endpoint)
+		}
+		clients = append(clients, c)
 	}
 
 	out, err := NewOutput(cfg, bucket)
@@ -117,14 +128,19 @@ func run(cfgPath, bucket string, entries []RetryEntry) error {
 	progress := NewProgressPrinter(mwOut)
 	progress.SetInterval(cfg.ProgressInterval)
 	stats.Latency.SetWindow(time.Duration(cfg.LatencyWindowSec) * time.Second)
-	client.SetLatencyTracker(&stats.Latency)
+	for _, c := range clients {
+		c.SetLatencyTracker(&stats.Latency)
+	}
 	// debug_log: true 时建 Debug-level slog logger 路由到 run.log + 终端，
-	// 注入 S3Client 打每次请求的 marker（req/resp/err）。false 时不注入（nil），零成本静默。
+	// 注入所有 S3Client 打每次请求的 marker（req/resp/err）。false 时不注入（nil），零成本静默。
 	if cfg.DebugLog {
-		client.SetLogger(slog.New(slog.NewTextHandler(mwErr, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		logger := slog.New(slog.NewTextHandler(mwErr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		for _, c := range clients {
+			c.SetLogger(logger)
+		}
 	}
 
-	l := NewLister(cfg, client, out, &stats, progress)
+	l := NewLister(cfg, clients, out, &stats, progress)
 	listErr := l.Run(ctx, bucket, entries)
 
 	stats.SetTotalDuration(time.Since(start))
@@ -174,4 +190,6 @@ func printConfigSnapshot(w io.Writer, cfg *Config, bucket, prefix string) {
 	fmt.Fprintf(w, "max_keys=%d\n", cfg.MaxKeys)
 	fmt.Fprintf(w, "encoding_type_url=%v\n", cfg.EncodingTypeURL)
 	fmt.Fprintf(w, "next_vid_marker_zero_to_null=%v\n", cfg.NextVIDMarkerZeroToNull)
+	fmt.Fprintf(w, "failure_threshold=%d\n", cfg.FailureThreshold)
+	fmt.Fprintf(w, "slow_mode_interval_sec=%d\n", cfg.SlowModeIntervalSec)
 }

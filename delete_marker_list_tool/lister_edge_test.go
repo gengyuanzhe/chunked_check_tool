@@ -96,7 +96,7 @@ func TestLister_Mode2_FailureRecordedOtherPrefixesContinue(t *testing.T) {
 	}
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
-	l := NewLister(cfg, client, out, &stats, progress)
+	l := NewLister(cfg, []*S3Client{client}, out, &stats, progress)
 	if err := l.Run(context.Background(), "testbucket", []RetryEntry{{Prefix: ""}}); err != nil {
 		t.Fatal(err)
 	}

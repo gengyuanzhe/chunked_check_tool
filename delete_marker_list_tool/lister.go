@@ -26,16 +26,20 @@ func formatLastModified(t time.Time) string {
 // mode 1: 单 goroutine 消费一个 recursive 版本化流。
 // mode 2: BFS，list_concurrency 个 worker，每 worker 取前缀做
 //         delimited 版本化列举，common prefix 入队继续扫。
+//
+// 所有 S3Client 在 main 启动期创建并完成 BucketExists 预检——任一失败
+// 进程直接退出（fail-fast）。mode 1 持 1 个 client（Endpoints[0]）；
+// mode 2 持 len(Endpoints) 个，worker 按 idx % N 取。
 type Lister struct {
 	cfg      *Config
-	client   *S3Client
+	clients  []*S3Client
 	out      *Output
 	stats    *Stats
 	progress *ProgressPrinter
 }
 
-func NewLister(cfg *Config, client *S3Client, out *Output, stats *Stats, progress *ProgressPrinter) *Lister {
-	return &Lister{cfg: cfg, client: client, out: out, stats: stats, progress: progress}
+func NewLister(cfg *Config, clients []*S3Client, out *Output, stats *Stats, progress *ProgressPrinter) *Lister {
+	return &Lister{cfg: cfg, clients: clients, out: out, stats: stats, progress: progress}
 }
 
 // Run 按 cfg.ListType 驱动。
@@ -60,8 +64,9 @@ func (l *Lister) runMode1(ctx context.Context, bucket string, entry RetryEntry) 
 	var localCount int
 	interval := l.progress.Interval()
 	keyMarker, versionIDMarker := entry.KeyMarker, entry.VersionIDMarker
+	c := l.clients[0]
 	for {
-		page, err := l.client.ListVersionsPage(ctx, bucket, entry.Prefix, true, keyMarker, versionIDMarker)
+		page, err := c.ListVersionsPage(ctx, bucket, entry.Prefix, true, keyMarker, versionIDMarker)
 		if err != nil {
 			// keyMarker/versionIDMarker 就是这次失败请求用的 marker = 续传点。
 			l.recordListFailed(entry.Prefix, keyMarker, versionIDMarker, err)
@@ -94,11 +99,45 @@ func (l *Lister) runMode1(ctx context.Context, bucket string, entry RetryEntry) 
 	return nil
 }
 
+// failureThreshold 默认值——cfg.FailureThreshold=0 视为默认 3（config.go 填充）。
+// 连续 N 次 ListVersionsPage 失败后，worker 进入慢速模式：每 slowModeInterval 消费 1 条 entry，
+// 直到拿到一次成功后重置失败计数恢复正常消费。设计目的是绑死 endpoint 的 worker
+// 不持续打流量到死节点（撒满 list_failed.txt），但仍保留活过来的可能性。
+const defaultFailureThreshold = 3
+
+// slowModeInterval 默认值——cfg.SlowModeIntervalSec=0 视为默认 60s（config.go 填充）。
+// 1 分钟——足够 S3 节点重启/恢复，又不会让队列堆积太久。
+const defaultSlowModeInterval = time.Minute
+
+// failureThreshold 返回配置的连续失败阈值。
+func (l *Lister) failureThreshold() int {
+	if l.cfg.FailureThreshold > 0 {
+		return l.cfg.FailureThreshold
+	}
+	return defaultFailureThreshold
+}
+
+// slowModeInterval 返回配置的慢速模式间隔。
+func (l *Lister) slowModeInterval() time.Duration {
+	if l.cfg.SlowModeIntervalSec > 0 {
+		return time.Duration(l.cfg.SlowModeIntervalSec) * time.Second
+	}
+	return defaultSlowModeInterval
+}
+
 // runMode2: BFS delimiter 并发。entries 是初始入队条目列表（至少 1 个）。
 // BFS 发现的新 common prefix 入队为 RetryEntry{Prefix: p}（markers 空，从第一页扫）。
 // inflight 计数 = 队列里待处理 + worker 正在处理的条目数；归零 = 全扫完。
 // 终止由 worker 事件触发：处理完一个条目后若发现 inflight 归零，该 worker
 // 调 q.SignalDone() 唤醒其他阻塞在 Pop 的 worker（无需轮询 goroutine）。
+//
+// endpoint 绑定：所有 S3Client 在 main 启动期创建并完成 BucketExists 预检
+// （任一失败进程退出），worker 按 idx % len(clients) 取一个直接用——runMode2
+// 不再创建 client。运行中 endpoint 故障由 worker 慢速模式兜底（见下）。
+//
+// 慢速模式：worker 连续失败 failureThreshold 次后，每 slowModeInterval 消费 1 条 entry，
+// 直到拿到一次成功重置失败计数恢复正常消费。设计目的：绑死 endpoint 的 worker 不持续
+// 打流量到死节点（撒满 list_failed.txt），但仍保留活过来的可能性。
 func (l *Lister) runMode2(ctx context.Context, bucket string, entries []RetryEntry) error {
 	q := newQueue()
 	var inflight atomic.Int64
@@ -119,15 +158,34 @@ func (l *Lister) runMode2(ctx context.Context, bucket string, entries []RetryEnt
 	var wg sync.WaitGroup
 	for i := 0; i < conc; i++ {
 		wg.Add(1)
-		go func() {
+		go func(idx int) {
 			defer wg.Done()
+			// worker 按 idx % N 绑一个预创建好的 client——endpoint 已在启动期预检。
+			wc := l.clients[idx%len(l.clients)]
 			lc := &localCounter{}
+			var consecFails int
+			threshold := l.failureThreshold()
+			slowInterval := l.slowModeInterval()
 			for {
+				// 慢速模式：连续失败达阈值后，每条 entry 前等待 slowInterval。
+				// 用 select + ctx.Done() 让进程退出时能立即响应，不等满 slowInterval。
+				if consecFails >= threshold {
+					select {
+					case <-time.After(slowInterval):
+					case <-ctx.Done():
+						return
+					}
+				}
 				e, ok := q.Pop(ctx)
 				if !ok {
 					return
 				}
-				l.processPrefix(ctx, bucket, e, q, &inflight, lc)
+				failed := l.processPrefixWithClient(ctx, wc, bucket, e, q, &inflight, lc)
+				if failed {
+					consecFails++
+				} else {
+					consecFails = 0
+				}
 				// inflight == 0 表示无待处理也无在处理 = 全扫完。
 				// 该 worker 发完成信号唤醒其他阻塞 Pop 的 worker 退出。
 				// 安全性：inflight 统计入队+在处理，归零时不可能有并发 push
@@ -138,35 +196,64 @@ func (l *Lister) runMode2(ctx context.Context, bucket string, entries []RetryEnt
 					return
 				}
 			}
-		}()
+		}(i)
 	}
 
 	wg.Wait()
 	return nil
 }
 
-// processPrefix 处理一个条目：逐页列举，分类条目。
-// AWS SDK 把 <Version>/<DeleteMarker>/<CommonPrefixes> 解析到独立 slice，
-// ListVersionsPage 把它们摊平到 VersionPage.Versions + CommonPrefixes。
-// entry.KeyMarker/VersionIDMarker 非空 = 从该 marker 起续扫（retry 场景）。
-// 失败时 keyMarker/versionIDMarker 就是这次失败请求用的 marker = 续传点，
-// 直接写 list_failed。
-func (l *Lister) processPrefix(ctx context.Context, bucket string, entry RetryEntry, q *queue, inflight *atomic.Int64, lc *localCounter) {
+// processPrefixWithClient 是 processPrefix 的 worker-client 版本——用传入的 wc
+// 替代 l.client，其他逻辑完全相同。mode 2 worker 各自绑 endpoint 时调此版本。
+// 返回 failed=true 表示该 entry 第一次 ListVersionsPage 失败（worker 据此累加
+// 连续失败计数判断是否进慢速模式）。
+func (l *Lister) processPrefixWithClient(ctx context.Context, wc *S3Client, bucket string, entry RetryEntry, q *queue, inflight *atomic.Int64, lc *localCounter) (failed bool) {
 	defer inflight.Add(-1)
 	interval := l.progress.Interval()
 	keyMarker, versionIDMarker := entry.KeyMarker, entry.VersionIDMarker
+	page, err := wc.ListVersionsPage(ctx, bucket, entry.Prefix, false, keyMarker, versionIDMarker)
+	if err != nil {
+		l.recordListFailed(entry.Prefix, keyMarker, versionIDMarker, err)
+		l.stats.IncrListFailed()
+		return true
+	}
+	l.checkShortResponse(entry.Prefix, keyMarker, versionIDMarker, page)
+	l.checkNextVIDMarkerRewrite(entry.Prefix, keyMarker, page)
+	for _, p := range page.CommonPrefixes {
+		inflight.Add(1)
+		// 新发现的 common prefix 从第一页扫（markers 空）。
+		q.Push(RetryEntry{Prefix: p})
+	}
+	for _, obj := range page.Versions {
+		l.stats.IncrScannedVersions()
+		lc.count++
+		if obj.IsDeleteMarker {
+			if l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified)) {
+				l.stats.IncrInvalidKeys()
+			} else {
+				l.stats.IncrDeleteMarkers()
+			}
+		}
+		if lc.count >= interval {
+			l.progress.MaybePrint(l.stats, "scanned", lc.count)
+			lc.count = 0
+		}
+	}
+	if !page.IsTruncated {
+		return false
+	}
+	keyMarker, versionIDMarker = page.NextKeyMarker, page.NextVersionIDMarker
 	for {
-		page, err := l.client.ListVersionsPage(ctx, bucket, entry.Prefix, false, keyMarker, versionIDMarker)
+		page, err := wc.ListVersionsPage(ctx, bucket, entry.Prefix, false, keyMarker, versionIDMarker)
 		if err != nil {
 			l.recordListFailed(entry.Prefix, keyMarker, versionIDMarker, err)
 			l.stats.IncrListFailed()
-			return
+			return true
 		}
 		l.checkShortResponse(entry.Prefix, keyMarker, versionIDMarker, page)
 		l.checkNextVIDMarkerRewrite(entry.Prefix, keyMarker, page)
 		for _, p := range page.CommonPrefixes {
 			inflight.Add(1)
-			// 新发现的 common prefix 从第一页扫（markers 空）。
 			q.Push(RetryEntry{Prefix: p})
 		}
 		for _, obj := range page.Versions {
@@ -185,7 +272,7 @@ func (l *Lister) processPrefix(ctx context.Context, bucket string, entry RetryEn
 			}
 		}
 		if !page.IsTruncated {
-			return
+			return false
 		}
 		keyMarker, versionIDMarker = page.NextKeyMarker, page.NextVersionIDMarker
 	}

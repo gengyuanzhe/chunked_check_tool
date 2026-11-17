@@ -241,6 +241,54 @@ func TestRun_ShortResponseWarning(t *testing.T) {
 		t.Errorf("delete_markers.txt missing a.txt marker: %q", dm)
 	}
 }
+// TestRun_Mode2_StartupEndpointFailureExits 验证 mode 2 启动期 fail-fast：
+// 配置含一个 dead endpoint，启动期对它做 BucketExists 预检失败 → run 直接 return err。
+// 这取代了旧的"运行中 endpoint 故障 worker 继续"测试——新架构下 client 在启动期
+// 全部预创好，启动时 endpoint 不可达就 fail-fast 退出，不存在"运行中挂"的早期检测路径。
+// 运行中 endpoint 故障由 worker 慢速模式兜底（连续失败 3 次后降频），但那个路径
+// 用 httptest 模拟"运行中变死"复杂度太高，不在集成测试覆盖。
+func TestRun_Mode2_StartupEndpointFailureExits(t *testing.T) {
+	goodSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+	}))
+	defer goodSrv.Close()
+
+	// 死 endpoint：httptest server 立即 Close——连接被拒绝。
+	deadSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadAddr := deadSrv.Listener.Addr().String()
+	deadSrv.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgBody := strings.Join([]string{
+		"endpoints:",
+		"  - " + goodSrv.Listener.Addr().String(),
+		"  - " + deadAddr,
+		"scheme: http",
+		"ak: a",
+		"sk: s",
+		"list_type: 2",
+		"max_keys: 500",
+		"list_concurrency: 2",
+		"dial_timeout: 1",
+		"output_dir: " + filepath.Join(dir, "out"),
+		"output_dir_timestamp: false",
+		"",
+	}, "\n")
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+	err := run(cfgPath, "testbucket", []RetryEntry{{Prefix: "a/"}, {Prefix: "b/"}})
+	if err == nil {
+		t.Errorf("expected error: dead endpoint should fail BucketExists at startup")
+	}
+}
+
 // TestRun_EncodingTypeURL_InvalidKeysShouldBeEmpty_WarnsIfNonZero 验证 encoding_type_url=true
 // 时若 invalid_keys 命中（不应发生），run.log 含 warning 行提示人工核对。
 // 触发方式：fake server 直接返回含 \x1f 的 <Key>（XML 合法因为 \x1f 是 ASCII 控制字符但
