@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,6 +95,16 @@ func run(cfgPath, mode, inputPath string) error {
 	progress := NewProgressPrinter(mwOut)
 	progress.SetInterval(cfg.ProgressInterval)
 	stats.Latency.SetWindow(time.Duration(cfg.LatencyWindowSec) * time.Second)
+	// debug_log: true 时建 Debug-level slog logger 路由到 run.log + 终端，
+	// 注入每个 S3Client。StatObject/DeleteObject 在请求前后打 Debug 日志（含
+	// worker idx、endpoint、key、status、elapsed_ms），用于定位 progress 不动
+	// 时具体哪个 worker 卡在哪个 endpoint。false 时 logger=nil 不打诊断。
+	if cfg.DebugLog {
+		logger := slog.New(slog.NewTextHandler(mwErr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		for _, c := range clients {
+			c.SetLogger(logger)
+		}
+	}
 	for _, c := range clients {
 		c.SetLatencyTracker(&stats.Latency)
 	}
@@ -152,4 +163,5 @@ func printConfigSnapshot(w io.Writer, cfg *Config, mode, inputPath string) {
 	fmt.Fprintf(w, "encoding_type_url=%v\n", cfg.EncodingTypeURL)
 	fmt.Fprintf(w, "failure_threshold=%d\n", cfg.FailureThreshold)
 	fmt.Fprintf(w, "slow_mode_interval_sec=%d\n", cfg.SlowModeIntervalSec)
+	fmt.Fprintf(w, "debug_log=%v\n", cfg.DebugLog)
 }

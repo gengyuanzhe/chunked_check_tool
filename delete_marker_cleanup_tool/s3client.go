@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -20,13 +21,19 @@ import (
 
 // S3Client 包装单个 s3.Client。本工具只用 HeadObject / DeleteObject / HeadBucket。
 type S3Client struct {
-	client  *s3.Client
-	latency *LatencyTracker // 可选——nil 不记录。worker 启动时注入 &stats.Latency。
+	client   *s3.Client
+	latency  *LatencyTracker // 可选——nil 不记录。worker 启动时注入 &stats.Latency。
+	logger   *slog.Logger    // 可选——nil 不打诊断。main 在 cfg.DebugLog=true 时注入 Debug-level logger。
+	endpoint string          // 绑定的 endpoint（host:port），日志区分多 client。
 }
 
 // SetLatencyTracker 注入窗口式时延统计器。worker 在 NewS3Client 后调一次。
 // nil 表示不记录（test 默认 nil，不影响功能）。
 func (c *S3Client) SetLatencyTracker(l *LatencyTracker) { c.latency = l }
+
+// SetLogger 注入诊断 logger。main 在 cfg.DebugLog=true 时调一次，
+// 传入 Debug-level slog logger（输出到 run.log + 终端）。nil 表示不打诊断。
+func (c *S3Client) SetLogger(l *slog.Logger) { c.logger = l }
 
 // NewS3Client 构造绑定到单个 endpoint 的 s3.Client。
 // transport 调优对齐 delete_marker_list_tool：MaxIdleConnsPerHost=32、
@@ -75,7 +82,7 @@ func NewS3Client(cfg *Config, endpoint string) (*S3Client, error) {
 		o.UsePathStyle = true
 		o.HTTPClient = &http.Client{Transport: tr}
 	})
-	return &S3Client{client: client}, nil
+	return &S3Client{client: client, endpoint: endpoint}, nil
 }
 
 // HeadResult 是 StatObject 的摊平返回——aws SDK 把成功响应和错误响应都封装，
@@ -92,20 +99,44 @@ type HeadResult struct {
 // StatObject HEAD 一个对象版本。versionID 原样透传（含字面量 "null"）。
 // aws SDK 对 405 返回 (nil, *smithy.OperationError)——错误路径上 classifier
 // 从 ResponseError.Response.StatusCode + header 判定 marker。
-func (c *S3Client) StatObject(ctx context.Context, bucket, key, versionID string) HeadResult {
+// workerIdx 是调用方 worker 的编号（worker goroutine 的 idx），仅用于诊断日志
+// 区分并发 worker——S3Client 自身不持有它（1:1 时与 client idx 相同，N>clients
+// 时多个 worker 共享一个 client）。
+func (c *S3Client) StatObject(ctx context.Context, bucket, key, versionID string, workerIdx int) HeadResult {
+	if c.logger != nil {
+		c.logger.Debug("head req",
+			"worker", workerIdx, "endpoint", c.endpoint, "bucket", bucket,
+			"key", key, "versionID", versionID)
+	}
 	start := time.Now()
 	_, err := c.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket:    aws.String(bucket),
 		Key:       aws.String(key),
 		VersionId: aws.String(versionID),
 	})
+	elapsed := time.Since(start)
 	if c.latency != nil {
-		c.latency.Record(time.Since(start))
+		c.latency.Record(elapsed)
+	}
+	if c.logger != nil {
+		status := 200
+		reqID := ""
+		if err != nil {
+			var re *awshttp.ResponseError
+			if errors.As(err, &re) {
+				status = re.Response.StatusCode
+				reqID = re.Response.Header.Get("x-amz-request-id")
+			}
+		}
+		c.logger.Debug("head resp",
+			"worker", workerIdx, "endpoint", c.endpoint, "bucket", bucket,
+			"key", key, "versionID", versionID,
+			"status", status, "req_id", reqID, "elapsed_ms", elapsed.Milliseconds(), "err", err)
 	}
 	if err == nil {
 		return HeadResult{
 			Key:            key,
-			VersionID:      versionID,
+			VersionID:       versionID,
 			IsDeleteMarker: false,
 			StatusCode:     200,
 		}
@@ -115,15 +146,37 @@ func (c *S3Client) StatObject(ctx context.Context, bucket, key, versionID string
 
 // DeleteObject 删除一个对象版本（对 delete marker 即消除该 marker）。
 // versionID 原样透传（含字面量 "null"）。NoSuchVersion 由调用方判定为成功。
-func (c *S3Client) DeleteObject(ctx context.Context, bucket, key, versionID string) (int, string, error) {
+// workerIdx 仅用于诊断日志，详见 StatObject 注释。
+func (c *S3Client) DeleteObject(ctx context.Context, bucket, key, versionID string, workerIdx int) (int, string, error) {
+	if c.logger != nil {
+		c.logger.Debug("delete req",
+			"worker", workerIdx, "endpoint", c.endpoint, "bucket", bucket,
+			"key", key, "versionID", versionID)
+	}
 	start := time.Now()
 	_, err := c.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket:    aws.String(bucket),
 		Key:       aws.String(key),
 		VersionId: aws.String(versionID),
 	})
+	elapsed := time.Since(start)
 	if c.latency != nil {
-		c.latency.Record(time.Since(start))
+		c.latency.Record(elapsed)
+	}
+	if c.logger != nil {
+		status := 204
+		reqID := ""
+		if err != nil {
+			var re *awshttp.ResponseError
+			if errors.As(err, &re) {
+				status = re.Response.StatusCode
+				reqID = re.Response.Header.Get("x-amz-request-id")
+			}
+		}
+		c.logger.Debug("delete resp",
+			"worker", workerIdx, "endpoint", c.endpoint, "bucket", bucket,
+			"key", key, "versionID", versionID,
+			"status", status, "req_id", reqID, "elapsed_ms", elapsed.Milliseconds(), "err", err)
 	}
 	if err == nil {
 		return 204, "", nil

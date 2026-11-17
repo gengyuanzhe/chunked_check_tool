@@ -54,3 +54,16 @@ latency_window_sec: 60
 # invalid_keys.txt（list 工具兜底分流）的 key 永远 URL 编码，无视此配置独立解码。
 # false（默认）：delete_markers.txt 的 key 原样使用，不解码。
 encoding_type_url: false
+
+# worker 连续失败 failure_threshold 次后进入慢速模式：每行 row 前等待
+# slow_mode_interval_sec。0 视为默认 3。
+failure_threshold: 3
+
+# 慢速模式每行 row 的等待秒数。0 视为默认 60。
+slow_mode_interval_sec: 60
+
+# 诊断日志开关。true 时 S3Client 在每次 HeadObject/DeleteObject 请求前后
+# 打 Debug 日志到 run.log + 终端，含 worker 编号、endpoint、key、status、
+# elapsed_ms、req_id。用于定位 progress 不动时具体哪个 worker 卡在哪个
+# endpoint。默认 false 不打诊断。
+debug_log: false

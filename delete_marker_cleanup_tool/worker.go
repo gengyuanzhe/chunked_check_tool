@@ -133,7 +133,7 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, client
 						return
 					}
 				}
-				failed := handleRow(ctx, c, mode, row, out, stats)
+				failed := handleRow(ctx, c, mode, row, out, stats, idx)
 				if failed {
 					consecFails++
 				} else {
@@ -178,21 +178,22 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, client
 // handleRow 分发到 handleCheck/handleDelete，返回 failed=true 表示操作失败
 // （worker 据此累加连续失败计数判断是否进慢速模式）。NoSuchVersion/NoSuchKey
 // 算幂等成功——failed=false。
-func handleRow(ctx context.Context, c *S3Client, mode string, r Row, out *Output, stats *Stats) (failed bool) {
+// workerIdx 是调用方 worker 的编号，透传到 S3Client 的诊断日志。
+func handleRow(ctx context.Context, c *S3Client, mode string, r Row, out *Output, stats *Stats, workerIdx int) (failed bool) {
 	switch mode {
 	case "check":
-		return handleCheck(ctx, c, r, out, stats)
+		return handleCheck(ctx, c, r, out, stats, workerIdx)
 	case "delete":
-		return handleDelete(ctx, c, r, out, stats)
+		return handleDelete(ctx, c, r, out, stats, workerIdx)
 	}
 	return false
 }
 
 // handleCheck HEAD 一行，三态分类写 check_results.txt；失败写 head_failed。
 // 返回 failed=true 表示 HEAD 失败（worker 据此累加连续失败计数）。
-func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *Stats) (failed bool) {
+func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *Stats, workerIdx int) (failed bool) {
 	stats.IncrProcessed()
-	result := c.StatObject(ctx, r.Bkt, r.Key, r.VersionID)
+	result := c.StatObject(ctx, r.Bkt, r.Key, r.VersionID, workerIdx)
 	state, ok := classifyHead(result)
 	if !ok {
 		stats.IncrHeadFailed()
@@ -214,9 +215,9 @@ func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *St
 
 // handleDelete 删除一行。NoSuchVersion / NoSuchKey 算成功（幂等空操作）；
 // 其他失败写 delete_failed + log。返回 failed=true 表示删除失败（非幂等成功）。
-func handleDelete(ctx context.Context, c *S3Client, r Row, out *Output, stats *Stats) (failed bool) {
+func handleDelete(ctx context.Context, c *S3Client, r Row, out *Output, stats *Stats, workerIdx int) (failed bool) {
 	stats.IncrProcessed()
-	statusCode, requestID, err := c.DeleteObject(ctx, r.Bkt, r.Key, r.VersionID)
+	statusCode, requestID, err := c.DeleteObject(ctx, r.Bkt, r.Key, r.VersionID, workerIdx)
 	if err == nil {
 		stats.IncrDeleted()
 		out.WriteDeleted(r.Bkt, r.outputKey(), r.VersionID, r.LastModified)

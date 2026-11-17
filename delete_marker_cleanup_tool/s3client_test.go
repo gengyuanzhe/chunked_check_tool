@@ -70,7 +70,7 @@ func TestStatObject_MarkerReturns405(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := c.StatObject(context.Background(), "testbucket", "marker.txt", "dm-1")
+	r := c.StatObject(context.Background(), "testbucket", "marker.txt", "dm-1", 0)
 	if !r.IsDeleteMarker {
 		t.Errorf("IsDeleteMarker=false want true (405 + x-amz-delete-marker: true)")
 	}
@@ -87,7 +87,7 @@ func TestStatObject_RegularObjectReturnsInfo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := c.StatObject(context.Background(), "testbucket", "regular.txt", "v-1")
+	r := c.StatObject(context.Background(), "testbucket", "regular.txt", "v-1", 0)
 	if r.Err != nil {
 		t.Fatalf("err: %v", r.Err)
 	}
@@ -104,7 +104,7 @@ func TestStatObject_AbsentReturnsNoSuchVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := c.StatObject(context.Background(), "testbucket", "gone.txt", "v-1")
+	r := c.StatObject(context.Background(), "testbucket", "gone.txt", "v-1", 0)
 	if r.Err == nil {
 		t.Fatal("expected error")
 	}
@@ -123,7 +123,7 @@ func TestDeleteObject_Success(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = c.DeleteObject(context.Background(), "testbucket", "any.txt", "v-1")
+	_, _, err = c.DeleteObject(context.Background(), "testbucket", "any.txt", "v-1", 0)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestDeleteObject_NoSuchVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = c.DeleteObject(context.Background(), "testbucket", "any.txt", "already-deleted")
+	_, _, err = c.DeleteObject(context.Background(), "testbucket", "any.txt", "already-deleted", 0)
 	if err == nil {
 		return
 	}

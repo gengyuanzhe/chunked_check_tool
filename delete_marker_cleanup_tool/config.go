@@ -26,6 +26,7 @@ type Config struct {
 	EncodingTypeURL       bool     `yaml:"encoding_type_url"`
 	FailureThreshold      int      `yaml:"failure_threshold"`
 	SlowModeIntervalSec   int64    `yaml:"slow_mode_interval_sec"`
+	DebugLog              bool     `yaml:"debug_log"`
 }
 
 // LoadConfig 读 YAML 配置并应用默认值 + 校验。timestamp 后缀逻辑对齐
