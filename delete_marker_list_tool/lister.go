@@ -203,49 +203,21 @@ func (l *Lister) runMode2(ctx context.Context, bucket string, entries []RetryEnt
 	return nil
 }
 
-// processPrefixWithClient 是 processPrefix 的 worker-client 版本——用传入的 wc
-// 替代 l.client，其他逻辑完全相同。mode 2 worker 各自绑 endpoint 时调此版本。
-// 返回 failed=true 表示该 entry 第一次 ListVersionsPage 失败（worker 据此累加
+// processPrefixWithClient 处理一个 entry：逐页列举，分类条目。
+// 用传入的 wc 替代 l.client（mode 2 worker 各自绑 endpoint 时调此版本）。
+// 返回 failed=true 表示该 entry 任一页 ListVersionsPage 失败（worker 据此累加
 // 连续失败计数判断是否进慢速模式）。
+//
+// inflight.Add(-1) 在 defer 里——无论失败/成功都把"在处理"计数减掉。
+// 第一页和后续页用同一个 processPage helper，避免逻辑重复。
 func (l *Lister) processPrefixWithClient(ctx context.Context, wc *S3Client, bucket string, entry RetryEntry, q *queue, inflight *atomic.Int64, lc *localCounter) (failed bool) {
 	defer inflight.Add(-1)
 	interval := l.progress.Interval()
 	keyMarker, versionIDMarker := entry.KeyMarker, entry.VersionIDMarker
-	page, err := wc.ListVersionsPage(ctx, bucket, entry.Prefix, false, keyMarker, versionIDMarker)
-	if err != nil {
-		l.recordListFailed(entry.Prefix, keyMarker, versionIDMarker, err)
-		l.stats.IncrListFailed()
-		return true
-	}
-	l.checkShortResponse(entry.Prefix, keyMarker, versionIDMarker, page)
-	l.checkNextVIDMarkerRewrite(entry.Prefix, keyMarker, page)
-	for _, p := range page.CommonPrefixes {
-		inflight.Add(1)
-		// 新发现的 common prefix 从第一页扫（markers 空）。
-		q.Push(RetryEntry{Prefix: p})
-	}
-	for _, obj := range page.Versions {
-		l.stats.IncrScannedVersions()
-		lc.count++
-		if obj.IsDeleteMarker {
-			if l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified)) {
-				l.stats.IncrInvalidKeys()
-			} else {
-				l.stats.IncrDeleteMarkers()
-			}
-		}
-		if lc.count >= interval {
-			l.progress.MaybePrint(l.stats, "scanned", lc.count)
-			lc.count = 0
-		}
-	}
-	if !page.IsTruncated {
-		return false
-	}
-	keyMarker, versionIDMarker = page.NextKeyMarker, page.NextVersionIDMarker
 	for {
 		page, err := wc.ListVersionsPage(ctx, bucket, entry.Prefix, false, keyMarker, versionIDMarker)
 		if err != nil {
+			// keyMarker/versionIDMarker 就是这次失败请求用的 marker = 续传点。
 			l.recordListFailed(entry.Prefix, keyMarker, versionIDMarker, err)
 			l.stats.IncrListFailed()
 			return true
@@ -254,6 +226,7 @@ func (l *Lister) processPrefixWithClient(ctx context.Context, wc *S3Client, buck
 		l.checkNextVIDMarkerRewrite(entry.Prefix, keyMarker, page)
 		for _, p := range page.CommonPrefixes {
 			inflight.Add(1)
+			// 新发现的 common prefix 从第一页扫（markers 空）。
 			q.Push(RetryEntry{Prefix: p})
 		}
 		for _, obj := range page.Versions {
