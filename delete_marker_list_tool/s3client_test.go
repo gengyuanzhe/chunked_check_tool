@@ -133,9 +133,9 @@ func TestBucketExists(t *testing.T) {
 	}
 }
 
-// TestListVersionsPage_NextVIDMarkerZeroRewrittenToNull 验证 cfg.NextVIDMarkerZeroToNull=true
-// 时，服务端返回 NextVersionIdMarker=="0" 被改写成 "null"，下一页请求带的 version-id-marker
-// 是 "null" 而不是 "0"。
+// TestListVersionsPage_NextVIDMarkerZeroRewrittenToNull 验证 cfg.RepairNextVIDMarkerOnShortResponse=true
+// 时，短响应触发下服务端返回 NextVersionIdMarker=="0" 被改写成 "null"（分支 b），下一页请求
+// 带的 version-id-marker 是 "null" 而不是 "0"。
 func TestListVersionsPage_NextVIDMarkerZeroRewrittenToNull(t *testing.T) {
 	const page1XML = `<?xml version="1.0" encoding="UTF-8"?>
 <ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
@@ -174,7 +174,7 @@ func TestListVersionsPage_NextVIDMarkerZeroRewrittenToNull(t *testing.T) {
 
 	// case 1: rewrite=true → page1 返回 NextVersionIdMarker=0 被改写成 null，
 	//         page2 请求带的 version-id-marker 应是 "null"
-	cfgOn := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, NextVIDMarkerZeroToNull: true}
+	cfgOn := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, RepairNextVIDMarkerOnShortResponse: true}
 	cOn, err := NewS3Client(cfgOn, srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -197,7 +197,7 @@ func TestListVersionsPage_NextVIDMarkerZeroRewrittenToNull(t *testing.T) {
 	// case 2: rewrite=false → page1 返回 0 原样透传，page2 请求带 "0"
 	callCount = 0
 	sawPage2VIDMarker = ""
-	cfgOff := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, NextVIDMarkerZeroToNull: false}
+	cfgOff := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, RepairNextVIDMarkerOnShortResponse: false}
 	cOff, err := NewS3Client(cfgOff, srv.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -217,7 +217,261 @@ func TestListVersionsPage_NextVIDMarkerZeroRewrittenToNull(t *testing.T) {
 	}
 }
 
-// TestListVersionsPage_EncodingTypeURLPassedToRequest 验证 cfg.EncodingTypeURL=true
+// TestListVersionsPage_NextVIDMarkerShortResponseBranchC 验证短响应触发下的分支 c：
+// 服务端 NextVersionIdMarker 是非 0 整数（明显坏值），但 NextKeyMarker 与本页尾条目
+// 解码后 key 一致——s3client 用本页尾条目的真实 VersionID 覆盖坏值。
+func TestListVersionsPage_NextVIDMarkerShortResponseBranchC(t *testing.T) {
+	// 本页返回两条 Version：a.txt（vA）与 b.txt（vB）。NextKeyMarker="b.txt" 与本页
+	// 尾条目解码态 key 一致；NextVersionIdMarker="999" 是坏的非 0 整数，应被覆盖为 vB。
+	// maxKeys=500，count=2 → 短响应触发。
+	const page1XML = `<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix>
+<IsTruncated>true</IsTruncated>
+<NextKeyMarker>b.txt</NextKeyMarker><NextVersionIdMarker>999</NextVersionIdMarker>
+<Version><Key>a.txt</Key><VersionId>vA</VersionId><IsLatest>false</IsLatest><LastModified>2024-01-01T00:00:00.000Z</LastModified></Version>
+<Version><Key>b.txt</Key><VersionId>vB</VersionId><IsLatest>true</IsLatest><LastModified>2024-01-02T00:00:00.000Z</LastModified></Version>
+</ListVersionsResult>`
+	const page2XML = `<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix><IsTruncated>false</IsTruncated>
+</ListVersionsResult>`
+
+	var sawPage2VIDMarker string
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if !q.Has("versions") {
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+			return
+		}
+		callCount++
+		if callCount == 1 {
+			w.Write([]byte(page1XML))
+			return
+		}
+		sawPage2VIDMarker = q.Get("version-id-marker")
+		w.Write([]byte(page2XML))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, RepairNextVIDMarkerOnShortResponse: true}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := c.ListVersionsPage(context.Background(), "testbucket", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.NextVIDMarkerRewritten {
+		t.Errorf("NextVIDMarkerRewritten=false want true")
+	}
+	if page.RewrittenRawVIDMarker != "999" {
+		t.Errorf("RewrittenRawVIDMarker=%q want %q", page.RewrittenRawVIDMarker, "999")
+	}
+	if page.NextVersionIDMarker != "vB" {
+		t.Errorf("NextVersionIDMarker=%q want %q (本页尾条目 b.txt 的 VersionID)", page.NextVersionIDMarker, "vB")
+	}
+	if _, err := c.ListVersionsPage(context.Background(), "testbucket", "", true, page.NextKeyMarker, page.NextVersionIDMarker); err != nil {
+		t.Fatal(err)
+	}
+	if sawPage2VIDMarker != "vB" {
+		t.Errorf("page2 version-id-marker=%q want %q", sawPage2VIDMarker, "vB")
+	}
+}
+
+// TestListVersionsPage_NextVIDMarkerShortResponseBranchC_KeyMismatch 验证分支 c 的
+// 不一致兜底：NextKeyMarker 不等于本页尾条目 key（指向本页之外），s3client 不动
+// NextVersionIdMarker——服务端 marker 可能本就对。
+func TestListVersionsPage_NextVIDMarkerShortResponseBranchC_KeyMismatch(t *testing.T) {
+	// 本页返回 a.txt，NextKeyMarker="z.txt"（不在本页），NextVersionIdMarker="999" 是非 0 坏值。
+	// 不一致——不动。
+	const page1XML = `<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix>
+<IsTruncated>true</IsTruncated>
+<NextKeyMarker>z.txt</NextKeyMarker><NextVersionIdMarker>999</NextVersionIdMarker>
+<Version><Key>a.txt</Key><VersionId>vA</VersionId><IsLatest>true</IsLatest><LastModified>2024-01-01T00:00:00.000Z</LastModified></Version>
+</ListVersionsResult>`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if !q.Has("versions") {
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+			return
+		}
+		w.Write([]byte(page1XML))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, RepairNextVIDMarkerOnShortResponse: true}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := c.ListVersionsPage(context.Background(), "testbucket", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.NextVIDMarkerRewritten {
+		t.Errorf("NextVIDMarkerRewritten=true want false（key 不一致时不该修复）")
+	}
+	if page.NextVersionIDMarker != "999" {
+		t.Errorf("NextVersionIDMarker=%q want %q（不一致时不动）", page.NextVersionIDMarker, "999")
+	}
+}
+
+// TestListVersionsPage_NextVIDMarkerShortResponseBranchA_NonInteger 验证分支 a：
+// NextVersionIdMarker 是非整数（如 "null" 或真实 version-id），短响应触发时不动。
+func TestListVersionsPage_NextVIDMarkerShortResponseBranchA_NonInteger(t *testing.T) {
+	const page1XML = `<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix>
+<IsTruncated>true</IsTruncated>
+<NextKeyMarker>a.txt</NextKeyMarker><NextVersionIdMarker>3/L4kqtJlcpXro6omR98P.SnrKt8KQwg</NextVersionIdMarker>
+<Version><Key>a.txt</Key><VersionId>3/L4kqtJlcpXro6omR98P.SnrKt8KQwg</VersionId><IsLatest>true</IsLatest><LastModified>2024-01-01T00:00:00.000Z</LastModified></Version>
+</ListVersionsResult>`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if !q.Has("versions") {
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+			return
+		}
+		w.Write([]byte(page1XML))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, RepairNextVIDMarkerOnShortResponse: true}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := c.ListVersionsPage(context.Background(), "testbucket", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.NextVIDMarkerRewritten {
+		t.Errorf("NextVIDMarkerRewritten=true want false（非整数分支 a 不动）")
+	}
+	want := "3/L4kqtJlcpXro6omR98P.SnrKt8KQwg"
+	if page.NextVersionIDMarker != want {
+		t.Errorf("NextVersionIDMarker=%q want %q", page.NextVersionIDMarker, want)
+	}
+}
+
+// TestListVersionsPage_NextVIDMarkerNotShortResponse 验证非短响应（count==maxKeys）时
+// 即便 NextVersionIdMarker="0" 也不动——修复只发生在短响应触发时。
+func TestListVersionsPage_NextVIDMarkerNotShortResponse(t *testing.T) {
+	// 本页返回 maxKeys=1 条目，count==maxKeys 不触发短响应，"0" 不该被改写。
+	const page1XML = `<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix>
+<IsTruncated>true</IsTruncated>
+<NextKeyMarker>a.txt</NextKeyMarker><NextVersionIdMarker>0</NextVersionIdMarker>
+<Version><Key>a.txt</Key><VersionId>vA</VersionId><IsLatest>true</IsLatest><LastModified>2024-01-01T00:00:00.000Z</LastModified></Version>
+</ListVersionsResult>`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if !q.Has("versions") {
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+			return
+		}
+		w.Write([]byte(page1XML))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 1, RepairNextVIDMarkerOnShortResponse: true}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := c.ListVersionsPage(context.Background(), "testbucket", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.NextVIDMarkerRewritten {
+		t.Errorf("NextVIDMarkerRewritten=true want false（count==maxKeys 非短响应不该修复）")
+	}
+	if page.NextVersionIDMarker != "0" {
+		t.Errorf("NextVersionIDMarker=%q want %q（非短响应不动）", page.NextVersionIDMarker, "0")
+	}
+}
+
+// TestListVersionsPage_NextVIDMarkerShortResponseBranchC_SameKeyLastModifiedTiebreak
+// 验证分支 c 的同 key LastModified 决胜：versions 与 deleteMarkers 尾元素 key 相同，
+// 此时全局尾 = LastModified 更旧者（S3 同 key 内按 LastModified 倒序排，越旧越靠后）。
+// 服务端按全局序返回时 01-03 (Version) 在 01-01 (DeleteMarker) 之前，故全局尾是 01-01。
+func TestListVersionsPage_NextVIDMarkerShortResponseBranchC_SameKeyLastModifiedTiebreak(t *testing.T) {
+	const page1XML = `<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix>
+<IsTruncated>true</IsTruncated>
+<NextKeyMarker>b.txt</NextKeyMarker><NextVersionIdMarker>999</NextVersionIdMarker>
+<Version><Key>b.txt</Key><VersionId>vNewer</VersionId><IsLatest>true</IsLatest><LastModified>2024-01-03T00:00:00.000Z</LastModified></Version>
+<DeleteMarker><Key>b.txt</Key><VersionId>dmOldest</VersionId><IsLatest>false</IsLatest><LastModified>2024-01-01T00:00:00.000Z</LastModified></DeleteMarker>
+</ListVersionsResult>`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if !q.Has("versions") {
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+			return
+		}
+		w.Write([]byte(page1XML))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, RepairNextVIDMarkerOnShortResponse: true}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := c.ListVersionsPage(context.Background(), "testbucket", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.NextVIDMarkerRewritten {
+		t.Errorf("NextVIDMarkerRewritten=false want true")
+	}
+	// 全局尾是 LastModified 更旧的 DeleteMarker（dmOldest），不是 Version 的 vNewer。
+	// 单比 key 不带 LastModified 决胜的旧实现会停在 versions 尾元素 vNewer，是 bug。
+	if page.NextVersionIDMarker != "dmOldest" {
+		t.Errorf("NextVersionIDMarker=%q want %q（同 key 取 LastModified 更旧者）", page.NextVersionIDMarker, "dmOldest")
+	}
+	if page.RewrittenRawVIDMarker != "999" {
+		t.Errorf("RewrittenRawVIDMarker=%q want %q", page.RewrittenRawVIDMarker, "999")
+	}
+}
+
+
 // 时请求 URL 带 encoding-type=url，且 SDK 不自动解码返回的 URL 编码 key。
 func TestListVersionsPage_EncodingTypeURLPassedToRequest(t *testing.T) {
 	var sawEncodingType string

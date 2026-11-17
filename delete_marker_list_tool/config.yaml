@@ -69,9 +69,14 @@ max_keys: 500
 # invalid_keys.txt）。新桶推荐 true。
 encoding_type_url: false
 
-# 兼容服务端翻页 quirk：服务端返回 NextVersionIdMarker=="0" 时改写成 "null"。
-# 服务端某些情况下返回 "0" 作为下一页的 version-id-marker，下一页用它做 marker
-# 请求会异常（实测会让列举卡死或返回异常结果）。"null" 是 S3 对"无版本号（旧版本对象）"
-# 的合法字面量，改写后能正常翻页。opt-in，默认 false 不改写。
-# list_failed.txt 记录的也是改写后的 "null"（list_failed 是失败页的 next-marker）。
-next_vid_marker_zero_to_null: false
+# 短响应触发时修复 NextVersionIdMarker。触发条件：IsTruncated=true 且本页条目数
+# （Version+DeleteMarker+CommonPrefix）< max_keys——矛盾状态，常预示服务端翻页 quirk。
+# 修复分三支按 NextVersionIdMarker 内容分派：
+#   a. 非整数（"" / "null" / 真实 version-id）→ 不动；
+#   b. 整数 0 → 改写为 "null"（覆盖 CommonPrefix 作 NextKeyMarker 的情况——
+#      目录在存储底层无版本概念，version-id 恒为 0/null）；
+#   c. 非 0 整数 → 用本页尾条目（解码后 key 最大者）的 VersionID 覆盖，
+#      前提是本页尾 key 与 NextKeyMarker 解码后一致；不一致不动。
+# opt-in，默认 false 不修。改写命中时 list_failed.log 打 Warn，list_failed.txt
+# 记录的是改写后的值。
+repair_next_vid_marker_on_short_response: false

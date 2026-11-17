@@ -28,7 +28,7 @@ type Config struct {
 	DebugLog               bool     `yaml:"debug_log"`
 	MaxKeys                int32    `yaml:"max_keys"`
 	EncodingTypeURL        bool     `yaml:"encoding_type_url"`
-	NextVIDMarkerZeroToNull bool    `yaml:"next_vid_marker_zero_to_null"`
+	RepairNextVIDMarkerOnShortResponse bool `yaml:"repair_next_vid_marker_on_short_response"`
 	FailureThreshold        int      `yaml:"failure_threshold"`
 	SlowModeIntervalSec    int64    `yaml:"slow_mode_interval_sec"`
 }

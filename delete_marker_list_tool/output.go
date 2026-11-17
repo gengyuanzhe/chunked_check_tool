@@ -192,11 +192,13 @@ func (o *Output) WriteListFailed(prefix, keyMarker, versionIDMarker string) {
 }
 
 // WriteNextVIDMarkerZeroRewriteLog 写一条 slog 警告到 list_failed.log。
-// 触发条件：服务端返回 NextVersionIdMarker=="0" 且 cfg.NextVIDMarkerZeroToNull=true，
-// s3client 把 "0" 改写成 "null"。非失败，不写 list_failed.txt——但因为是服务端 quirk
-// 信号（同 short-response），保持 Warn 级别便于线上排查定位。
+// 触发条件：短响应触发时 s3client 修复了 NextVersionIdMarker（cfg.RepairNextVIDMarkerOnShortResponse=true）。
+// 修复分两支：b. 原值=="0" 改写为 "null"；c. 原值为非 0 整数但与本页尾条目 key 对得上，
+// 用本页尾条目的 VersionID 覆盖。rawVIDMarker 是修复前的原值，便于日志定位。
+// 非失败，不写 list_failed.txt——但因为是服务端 quirk 信号（同 short-response），
+// 保持 Warn 级别便于线上排查定位。
 func (o *Output) WriteNextVIDMarkerZeroRewriteLog(prefix, keyMarker, rawVIDMarker string) {
-	o.listLogger.Warn("next-version-id-marker=0 rewritten to null",
+	o.listLogger.Warn("next-version-id-marker rewritten",
 		"bucket", o.bucket,
 		"prefix", prefix,
 		"key_marker", keyMarker,

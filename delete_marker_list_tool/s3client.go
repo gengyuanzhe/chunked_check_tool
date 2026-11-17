@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,7 +30,7 @@ type S3Client struct {
 	logger                 *slog.Logger    // 可选——nil 不打诊断。main 在 cfg.DebugLog=true 时注入 Debug-level logger。
 	maxKeys                int32           // 每页 MaxKeys；0=用 SDK 默认 1000（不显式设）。NewS3Client 从 cfg.MaxKeys 读。
 	encodingTypeURL        bool            // true=请求带 EncodingType=url（wire 上 key URL 编码，避免 \x1f 等控制字符撕裂 XML）。SDK 不自动解码——cleanup 工具读 delete_markers.txt 时自行 url.QueryUnescape。
-	nextVIDMarkerZeroToNull bool          // true=服务端返回 NextVersionIdMarker=="0" 时改写成 "null" 再返回。兼容服务端翻页 quirk（NextVersionIdMarker=0 会导致下一页请求异常）。
+	repairNextVIDMarkerOnShortResponse bool          // true=短响应触发时按 a/b/c 规则修复 NextVersionIdMarker（见 repairNextVIDMarkerShortResponse）。
 }
 
 // SetLatencyTracker 注入窗口式时延统计器。main 在 NewS3Client 后调一次。
@@ -87,7 +88,7 @@ func NewS3Client(cfg *Config, endpoint string) (*S3Client, error) {
 		o.UsePathStyle = true
 		o.HTTPClient = &http.Client{Transport: tr}
 	})
-	return &S3Client{client: client, maxKeys: cfg.MaxKeys, encodingTypeURL: cfg.EncodingTypeURL, nextVIDMarkerZeroToNull: cfg.NextVIDMarkerZeroToNull}, nil
+	return &S3Client{client: client, maxKeys: cfg.MaxKeys, encodingTypeURL: cfg.EncodingTypeURL, repairNextVIDMarkerOnShortResponse: cfg.RepairNextVIDMarkerOnShortResponse}, nil
 }
 
 // VersionEntry 把 AWS SDK 的 <Version> 和 <DeleteMarker> 摊平成一条目——
@@ -103,9 +104,10 @@ type VersionEntry struct {
 // ListVersionsPage 时传入的本次请求用的 marker；err 非 nil 时这两个值就是
 // 续传点（直接写 list_failed）。NextKeyMarker/NextVersionIDMarker 是下一页
 // 用的 marker——IsTruncated=false 时这两个值无意义。
-// NextVIDMarkerRewritten=true 表示服务端返回的 NextVersionIdMarker=="0"
-// 被 s3client 改写成 "null"（cfg.NextVIDMarkerZeroToNull=true 时）——lister
-// 据此打 Warn 日志到 list_failed.log（与 short-response 一致，便于线上排查）。
+// NextVIDMarkerRewritten=true 表示 s3client 在短响应触发时修复了 NextVersionIDMarker
+// （cfg.RepairNextVIDMarkerOnShortResponse=true 时启用）。修复分三支（见 repairNextVIDMarkerShortResponse）：
+// a. 非整数（含 "null"、真实 version-id）→ 不动；b. 整数 0 → "null"；
+// c. 非 0 整数 → 用本页尾条目推导覆盖。RewrittenRawVIDMarker 存修复前的原值，便于日志定位。
 type VersionPage struct {
 	Versions                []VersionEntry
 	CommonPrefixes          []string
@@ -113,6 +115,7 @@ type VersionPage struct {
 	NextVersionIDMarker     string
 	IsTruncated             bool
 	NextVIDMarkerRewritten  bool
+	RewrittenRawVIDMarker   string
 }
 
 // ListVersionsPage 列举一页。recursive=true 不带 delimiter（所有 key 所有版本）；
@@ -187,16 +190,6 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 		NextVersionIDMarker: aws.ToString(out.NextVersionIdMarker),
 		IsTruncated:         aws.ToBool(out.IsTruncated),
 	}
-	// 兼容服务端 quirk：NextVersionIdMarker=="0" 时改写成 "null"。
-	// 服务端某些情况下返回 "0" 作为 next-marker，下一页用它做 version-id-marker
-	// 请求会异常；"null" 是 S3 对"无版本号（旧版本对象）"的合法字面量，改写后能正常翻页。
-	// opt-in，默认 false 不改写。改写发生在 s3client 出口——lister 和 list_failed.txt
-	// 看到的都是改写后的值，下一页请求也用改写后的值。改写命中时设 NextVIDMarkerRewritten=true，
-	// lister 据此打 Warn 日志到 list_failed.log（与 short-response 一致）。
-	if c.nextVIDMarkerZeroToNull && page.NextVersionIDMarker == "0" {
-		page.NextVersionIDMarker = "null"
-		page.NextVIDMarkerRewritten = true
-	}
 	page.Versions = make([]VersionEntry, 0, len(out.Versions)+len(out.DeleteMarkers))
 	for i := range out.Versions {
 		v := out.Versions[i]
@@ -240,7 +233,111 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 		}
 		page.CommonPrefixes = append(page.CommonPrefixes, cp)
 	}
+	// 短响应触发的 next-marker 修复（cfg.RepairNextVIDMarkerOnShortResponse=true 时启用）。
+	// 触发条件：IsTruncated=true 且本页条目数（Version+DeleteMarker+CommonPrefix）< maxKeys
+	// ——矛盾状态，常预示服务端翻页 quirk。修复 NextVersionIDMarker 的 a/b/c 三支见
+	// repairNextVIDMarkerShortResponse 的注释。改写发生在 s3client 出口——lister 和
+	// list_failed.txt 看到的都是改写后的值，下一页请求也用改写后的值。改写命中时
+	// 设 NextVIDMarkerRewritten=true + RewrittenRawVIDMarker=<原值>，lister 据此打 Warn
+	// 日志到 list_failed.log（与 short-response 一致，便于线上排查）。
+	if c.repairNextVIDMarkerOnShortResponse && page.IsTruncated {
+		count := int32(len(page.Versions) + len(page.CommonPrefixes))
+		if count < c.maxKeys {
+			repairNextVIDMarkerShortResponse(page, out.Versions, out.DeleteMarkers, c.encodingTypeURL)
+		}
+	}
 	return page, nil
+}
+
+// repairNextVIDMarkerShortResponse 在短响应触发时按 a/b/c 规则修复
+// page.NextVersionIDMarker。调用前提：page.IsTruncated=true 且本页条目数 < maxKeys
+// （由调用方判断）。命中修复时设 page.NextVIDMarkerRewritten=true 并把原值存进
+// page.RewrittenRawVIDMarker，便于 lister 打 Warn 日志定位。versions/deleteMarkers
+// 是 SDK 解析出的原始 slice（未被合并）。
+//
+// 修复分支（按 NextVersionIDMarker 的内容分派）：
+//
+//	a. 非整数（"" / "null" / 真实 version-id 等非数字串）→ 不动，认为服务端给得对。
+//	b. 解析为整数 0 → 改写为 "null"。覆盖 CommonPrefix 作 NextKeyMarker 的情况——
+//	   目录在存储底层无版本概念，version-id 恒为 0/null，"0" 是服务端 quirk。
+//	c. 解析为非 0 整数 → 取 versions/deleteMarkers 各自尾元素中按全局序靠后者，
+//	   与 NextKeyMarker 解码后比较；一致→该条目的 VersionID 覆盖 NextVersionIDMarker，
+//	   不一致→不动（NextKeyMarker 指向本页之外，server marker 可能本就对）。
+//
+// 尾元素比较的依据：S3 协议保证 wire 上 Version/DeleteMarker 按全局序交错出现，SDK
+// 按出现顺序灌进各自 slice，故每个 slice 内部都保持全局序——全局尾 = 两个 slice
+// 尾元素中按全局序较大者。全局序规则：先按 key 字典序升序，同 key 内按 LastModified
+// 倒序（新版本在前）。所以两尾 key 不同时取 key 大者；key 相同时取 LastModified 更小
+// （更旧版本）者。VersionId 不参与排序（S3 不保证 version-id 有任何序）。
+//
+// key 解码：encoding_type_url=true 时 SDK 不自动解码，page.Versions[].Key 与
+// NextKeyMarker 都是 wire 态（%XX 编码），比较前 url.QueryUnescape。服务端排序基于
+// 存储里的真实 key（解码态）——编码只是输出的表示层，排序在编码之前发生，故候选必须
+// 统一到解码态比，结果才反映服务端序。
+func repairNextVIDMarkerShortResponse(page *VersionPage, versions []types.ObjectVersion, deleteMarkers []types.DeleteMarkerEntry, encodingTypeURL bool) {
+	vid := page.NextVersionIDMarker
+	if vid == "" {
+		return // 分支 a：空串视为正常
+	}
+	n, err := strconv.ParseInt(vid, 10, 64)
+	if err != nil {
+		return // 分支 a：非整数（含 "null" 与真实 version-id 串）
+	}
+	if n == 0 {
+		// 分支 b：0 → "null"。
+		page.NextVersionIDMarker = "null"
+		page.NextVIDMarkerRewritten = true
+		page.RewrittenRawVIDMarker = vid
+		return
+	}
+	// 分支 c：非 0 整数。用本页尾条目推导真实 version-id。
+	decode := func(s string) string {
+		if !encodingTypeURL {
+			return s
+		}
+		d, err := url.QueryUnescape(s)
+		if err != nil {
+			return s // 解码失败保留原值——后续比较大概率不一致，走"不动"分支
+		}
+		return d
+	}
+	// 协议保证每个 slice 内部保持全局序，故全局尾 = 两个 slice 尾元素中按全局序较大者。
+	// 全局序：key 字典序升序，同 key 内 LastModified 倒序（新版本在前）——所以
+	// key 不同取 key 大者；key 相同取 LastModified 更小（更旧）者。
+	// 候选只需考虑非空 slice 的尾；都空则无 Version/DeleteMarker 可推导，不动。
+	var bestKey, bestVID string
+	var bestLM time.Time
+	found := false
+	consider := func(key, vid string, lm time.Time) {
+		if !found {
+			bestKey, bestVID, bestLM = key, vid, lm
+			found = true
+			return
+		}
+		if key > bestKey || (key == bestKey && lm.Before(bestLM)) {
+			bestKey, bestVID, bestLM = key, vid, lm
+		}
+	}
+	if n := len(versions); n > 0 {
+		v := versions[n-1]
+		consider(decode(aws.ToString(v.Key)), aws.ToString(v.VersionId), aws.ToTime(v.LastModified))
+	}
+	if n := len(deleteMarkers); n > 0 {
+		dm := deleteMarkers[n-1]
+		consider(decode(aws.ToString(dm.Key)), aws.ToString(dm.VersionId), aws.ToTime(dm.LastModified))
+	}
+	if !found {
+		return // 本页无 Version/DeleteMarker（仅 CommonPrefix）——交给分支 b 处理或不动
+	}
+	nextKM := decode(page.NextKeyMarker)
+	if nextKM == bestKey {
+		// 对上了——server 给的 NextKeyMarker 是本页尾条目的 key，但 version-id 错了，
+		// 用本页尾条目的真实 VersionID 覆盖。
+		page.NextVersionIDMarker = bestVID
+		page.NextVIDMarkerRewritten = true
+		page.RewrittenRawVIDMarker = vid
+	}
+	// 不一致——NextKeyMarker 指向本页之外，server marker 可能本就对，不动。
 }
 
 // BucketExists 探测桶是否存在/可达。

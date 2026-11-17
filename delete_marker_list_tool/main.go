@@ -189,7 +189,7 @@ func printConfigSnapshot(w io.Writer, cfg *Config, bucket, prefix string) {
 	fmt.Fprintf(w, "debug_log=%v\n", cfg.DebugLog)
 	fmt.Fprintf(w, "max_keys=%d\n", cfg.MaxKeys)
 	fmt.Fprintf(w, "encoding_type_url=%v\n", cfg.EncodingTypeURL)
-	fmt.Fprintf(w, "next_vid_marker_zero_to_null=%v\n", cfg.NextVIDMarkerZeroToNull)
+	fmt.Fprintf(w, "repair_next_vid_marker_on_short_response=%v\n", cfg.RepairNextVIDMarkerOnShortResponse)
 	fmt.Fprintf(w, "failure_threshold=%d\n", cfg.FailureThreshold)
 	fmt.Fprintf(w, "slow_mode_interval_sec=%d\n", cfg.SlowModeIntervalSec)
 }

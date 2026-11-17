@@ -251,12 +251,13 @@ func (l *Lister) processPrefixWithClient(ctx context.Context, wc *S3Client, buck
 	}
 }
 
-// checkNextVIDMarkerRewrite 在 s3client 把服务端返回的 NextVersionIdMarker=="0"
-// 改写成 "null" 命中时打 Warn 日志到 list_failed.log。与 short-response 警告一致，
-// 非失败不写 list_failed.txt——服务端 quirk 信号便于线上排查。
+// checkNextVIDMarkerRewrite 在 s3client 短响应触发时修复了 NextVersionIdMarker
+// （分支 b 改写为 "null"，或分支 c 用本页尾条目推导覆盖）命中时打 Warn 日志到
+// list_failed.log。与 short-response 警告一致，非失败不写 list_failed.txt——
+// 服务端 quirk 信号便于线上排查。
 func (l *Lister) checkNextVIDMarkerRewrite(prefix, keyMarker string, page *VersionPage) {
 	if page.NextVIDMarkerRewritten {
-		l.out.WriteNextVIDMarkerZeroRewriteLog(prefix, keyMarker, "0")
+		l.out.WriteNextVIDMarkerZeroRewriteLog(prefix, keyMarker, page.RewrittenRawVIDMarker)
 	}
 }
 
