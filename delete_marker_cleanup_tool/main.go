@@ -59,16 +59,14 @@ func run(cfgPath, mode, inputPath string) error {
 	// 预检：解析输入首行取 bkt，对每个 endpoint 跑 BucketExists——fail-fast：
 	// 任一 endpoint 不可达直接退出，不让 worker 半启动后才暴露死 endpoint。
 	// exists==false 不退出（多桶输入保护），只 warning + 继续——只关心 endpoint 可达性。
-	// mode check 用 1 个 client（endpoints[0]）；mode delete 用 len(Endpoints) 个（每 endpoint 一个），
-	// worker 按 idx % N 绑——预创好直接复用，RunWorkers 不再创建 client。
+	// check 与 delete 都用 len(Endpoints) 个 client（每 endpoint 一个），worker 按
+	// idx % N 绑——预创好直接复用，RunWorkers 不再创建 client。check 也走多 endpoint
+	// 是为了单 endpoint 故障时剩余 worker 继续跑，避免 mode=check 全停。
 	firstBkt, ok := readFirstRowBucket(inputPath, cfg.EncodingTypeURL)
 	if !ok {
 		return fmt.Errorf("preflight: first input row unparseable (torn or empty file)")
 	}
-	nClients := 1
-	if mode == "delete" {
-		nClients = len(cfg.Endpoints)
-	}
+	nClients := len(cfg.Endpoints)
 	clients := make([]*S3Client, 0, nClients)
 	for i := 0; i < nClients; i++ {
 		endpoint := cfg.Endpoints[i%len(cfg.Endpoints)]
