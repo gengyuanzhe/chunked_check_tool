@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestParseRow_ThreeFields(t *testing.T) {
@@ -134,7 +133,9 @@ func TestRunWorkers_ModeCheck_ThreeStates(t *testing.T) {
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
 	progress.SetInterval(1000)
-	if err := RunWorkers(context.Background(), cfg, "check", inputPath, out, &stats, progress); err != nil {
+	clients := makeClientsForTest(t, cfg)
+
+	if err := RunWorkers(context.Background(), cfg, "check", inputPath, clients, out, &stats, progress); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()
@@ -156,45 +157,17 @@ func TestRunWorkers_ModeCheck_ThreeStates(t *testing.T) {
 }
 
 func TestRunWorkers_WorkerDiedOnBadEndpointReturnsError(t *testing.T) {
-	// 回归：若 NewS3Client 失败（如 endpoints 中混入格式错的 endpoint），
-	// worker 静默 return，scanner 在 rowCh <- row 上死锁。修复：worker 报错
-	// 到 errCh，scanner 用 select 检测并返回 error。
-	dir := t.TempDir()
-	inputPath := filepath.Join(dir, "input.txt")
-	rows := []string{
-		"testbucket\x1fk1\x1fv1",
-		"testbucket\x1fk2\x1fv1",
-	}
-	if err := os.WriteFile(inputPath, []byte(strings.Join(rows, "\n")+"\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	// 新架构下 NewS3Client 在 main 启动期预创并预检 BucketExists——bad endpoint
+	// 在 RunWorkers 调用前就 fail-fast 退出。RunWorkers 自身不再处理 worker 死亡
+	// （client 已预创好，worker 不会构造失败）。本测试改测 makeClientsForTest 在
+	// bad endpoint 上返回 error——验证启动期 fail-fast 的等价路径。
 	cfg := &Config{
-		// ftp 不是合法 S3 scheme——minio.New 直接报错
 		Endpoints: []string{"ftp://bad-endpoint"}, Scheme: "http", AK: "a", SK: "s",
-		OpConcurrency: 2, OutputDir: filepath.Join(dir, "out"), OutputDirTimestamp: false,
+		OpConcurrency: 2, OutputDir: t.TempDir(), OutputDirTimestamp: false,
 		ProgressInterval: 1000,
 	}
-	out, err := NewOutput(cfg, "check")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var stats Stats
-	progress := NewProgressPrinter(&strings.Builder{})
-	progress.SetInterval(1000)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		err := RunWorkers(context.Background(), cfg, "check", inputPath, out, &stats, progress)
-		if err == nil {
-			t.Errorf("expected error from RunWorkers when all workers die on bad endpoint")
-		}
-		out.FlushAndWait()
-		out.Close()
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("RunWorkers hung — worker death not detected (scanner deadlocked on rowCh <- row)")
+	if _, err := NewS3Client(cfg, cfg.Endpoints[0]); err == nil {
+		t.Errorf("expected NewS3Client to fail on ftp:// endpoint")
 	}
 }
 
@@ -226,7 +199,9 @@ func TestRunWorkers_ProgressNotFloodedAfterInterval(t *testing.T) {
 	var progBuf strings.Builder
 	progress := NewProgressPrinter(&progBuf)
 	progress.SetInterval(5)
-	if err := RunWorkers(context.Background(), cfg, "check", inputPath, out, &stats, progress); err != nil {
+	clients := makeClientsForTest(t, cfg)
+
+	if err := RunWorkers(context.Background(), cfg, "check", inputPath, clients, out, &stats, progress); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()
@@ -262,7 +237,9 @@ func TestRunWorkers_ModeDelete_NoSuchVersionCountsAsSuccess(t *testing.T) {
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
 	progress.SetInterval(1000)
-	if err := RunWorkers(context.Background(), cfg, "delete", inputPath, out, &stats, progress); err != nil {
+	clients := makeClientsForTest(t, cfg)
+
+	if err := RunWorkers(context.Background(), cfg, "delete", inputPath, clients, out, &stats, progress); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()
@@ -304,7 +281,9 @@ func TestRunWorkers_TornLineSkippedAndLogged(t *testing.T) {
 	}
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
-	if err := RunWorkers(context.Background(), cfg, "check", inputPath, out, &stats, progress); err != nil {
+	clients := makeClientsForTest(t, cfg)
+
+	if err := RunWorkers(context.Background(), cfg, "check", inputPath, clients, out, &stats, progress); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()
@@ -360,7 +339,9 @@ func TestRunWorkers_InvalidKeysInputURLDecodesKey(t *testing.T) {
 	}
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
-	if err := RunWorkers(context.Background(), cfg, "check", inputPath, out, &stats, progress); err != nil {
+	clients := makeClientsForTest(t, cfg)
+
+	if err := RunWorkers(context.Background(), cfg, "check", inputPath, clients, out, &stats, progress); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()
@@ -410,7 +391,9 @@ func TestRunWorkers_ModeDelete_InternalErrorRecordedAsFailure(t *testing.T) {
 	}
 	var stats Stats
 	progress := NewProgressPrinter(&strings.Builder{})
-	if err := RunWorkers(context.Background(), cfg, "delete", inputPath, out, &stats, progress); err != nil {
+	clients := makeClientsForTest(t, cfg)
+
+	if err := RunWorkers(context.Background(), cfg, "delete", inputPath, clients, out, &stats, progress); err != nil {
 		t.Fatal(err)
 	}
 	out.FlushAndWait()

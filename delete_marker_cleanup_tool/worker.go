@@ -4,13 +4,12 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
+	"time"
 )
 
 // Row 是输入文件解析后的一行——bkt / key / versionID / lastModified 四段。
@@ -83,13 +82,16 @@ func (r Row) outputKey() string {
 }
 
 // RunWorkers 读输入文件逐行，N 个 worker 从 rowCh 抢任务。
-// 每个 worker 绑 endpoints[i % len(endpoints)]，按 mode 调 handleCheck/handleDelete。
-// 行解析失败（torn line）跳过并写到 mode 对应的 failed log。
+// 每个 worker 绑 clients[idx % len(clients)]（clients 在 main 启动期预创并预检过
+// BucketExists），按 mode 调 handleCheck/handleDelete。行解析失败（torn line）跳过
+// 并写到 mode 对应的 failed log。
 //
-// Worker 死亡保护：worker 在 NewS3Client 失败时往 errCh 发 error 再退出；
-// scanner 用 select 检测 errCh——若所有 worker 都死了，scanner 立即返回 error
-// 而不是死锁在 rowCh <- row。errCh 缓冲到 N 容量，worker 发送不阻塞。
-func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, out *Output, stats *Stats, progress *ProgressPrinter) error {
+// 慢速模式：worker 连续失败 failureThreshold 次（StatObject/DeleteObject 失败，
+// 不含 NoSuchVersion/NoSuchKey 幂等成功）后，每 slowModeInterval 消费 1 行 row，
+// 直到拿到一次成功重置失败计数恢复正常消费。设计目的：绑死 endpoint 的 worker 不
+// 持续打流量到死节点（撒满 failed.txt），但仍保留活过来的可能性。
+// 等待用 select + ctx.Done() 让进程退出时能立即响应，不等满 slowModeInterval。
+func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, clients []*S3Client, out *Output, stats *Stats, progress *ProgressPrinter) error {
 	f, err := os.Open(inputPath)
 	if err != nil {
 		return err
@@ -99,33 +101,43 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, out *O
 	inputBasename := filepath.Base(inputPath)
 	rowCh := make(chan Row, 1024)
 
+	threshold := cfg.FailureThreshold
+	if threshold <= 0 {
+		threshold = defaultFailureThreshold
+	}
+	slowInterval := time.Duration(cfg.SlowModeIntervalSec) * time.Second
+	if cfg.SlowModeIntervalSec <= 0 {
+		slowInterval = defaultSlowModeInterval
+	}
+
 	var wg sync.WaitGroup
-	var endpointIdx atomic.Int64
 	n := cfg.OpConcurrency
 	if n < 1 {
 		n = 1
 	}
-	errCh := make(chan error, n)
 	for i := 0; i < n; i++ {
 		wg.Add(1)
-		go func() {
+		go func(idx int) {
 			defer wg.Done()
-			idx := int(endpointIdx.Add(1)-1) % len(cfg.Endpoints)
-			endpoint := cfg.Endpoints[idx]
-			client, err := NewS3Client(cfg, endpoint)
-			if err != nil {
-				errCh <- fmt.Errorf("worker endpoint %s: %w", endpoint, err)
-				return
-			}
-			client.SetLatencyTracker(&stats.Latency)
+			// worker 按 idx % N 绑一个预创好的 client——endpoint 已在启动期预检。
+			c := clients[idx%len(clients)]
 			var local int
+			var consecFails int
 			interval := progress.Interval()
 			for row := range rowCh {
-				switch mode {
-				case "check":
-					handleCheck(ctx, client, row, out, stats)
-				case "delete":
-					handleDelete(ctx, client, row, out, stats)
+				// 慢速模式：连续失败达阈值后，每行 row 前等待 slowInterval。
+				if consecFails >= threshold {
+					select {
+					case <-time.After(slowInterval):
+					case <-ctx.Done():
+						return
+					}
+				}
+				failed := handleRow(ctx, c, mode, row, out, stats)
+				if failed {
+					consecFails++
+				} else {
+					consecFails = 0
 				}
 				local++
 				if local >= interval {
@@ -137,12 +149,11 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, out *O
 					local = 0
 				}
 			}
-		}()
+		}(i)
 	}
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	var workerErr error
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
@@ -157,33 +168,29 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, out *O
 			}
 			continue
 		}
-		select {
-		case rowCh <- row:
-		case err := <-errCh:
-			workerErr = err
-			goto scanDone
-		}
+		rowCh <- row
 	}
-scanDone:
 	close(rowCh)
 	wg.Wait()
-	// 兜底：若所有 worker 在 scanner 走完前就死了但 select 没捕到（errCh 已缓冲 N，
-	// 不可能漏，但保险起见），wg.Wait 后再非阻塞取一次。
-	if workerErr == nil {
-		select {
-		case err := <-errCh:
-			workerErr = err
-		default:
-		}
-	}
-	if workerErr != nil {
-		return workerErr
-	}
 	return scanner.Err()
 }
 
+// handleRow 分发到 handleCheck/handleDelete，返回 failed=true 表示操作失败
+// （worker 据此累加连续失败计数判断是否进慢速模式）。NoSuchVersion/NoSuchKey
+// 算幂等成功——failed=false。
+func handleRow(ctx context.Context, c *S3Client, mode string, r Row, out *Output, stats *Stats) (failed bool) {
+	switch mode {
+	case "check":
+		return handleCheck(ctx, c, r, out, stats)
+	case "delete":
+		return handleDelete(ctx, c, r, out, stats)
+	}
+	return false
+}
+
 // handleCheck HEAD 一行，三态分类写 check_results.txt；失败写 head_failed。
-func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *Stats) {
+// 返回 failed=true 表示 HEAD 失败（worker 据此累加连续失败计数）。
+func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *Stats) (failed bool) {
 	stats.IncrProcessed()
 	result := c.StatObject(ctx, r.Bkt, r.Key, r.VersionID)
 	state, ok := classifyHead(result)
@@ -191,7 +198,7 @@ func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *St
 		stats.IncrHeadFailed()
 		out.WriteHeadFailed(r.Bkt, r.outputKey(), r.VersionID, r.LastModified)
 		out.WriteHeadFailedLog(r.Bkt, r.Key, r.VersionID, result.StatusCode, errorCode(result.Err), result.RequestID, result.Err)
-		return
+		return true
 	}
 	switch state {
 	case "marker":
@@ -202,24 +209,30 @@ func handleCheck(ctx context.Context, c *S3Client, r Row, out *Output, stats *St
 		stats.IncrAbsent()
 	}
 	out.WriteCheckResult(r.Bkt, r.outputKey(), r.VersionID, r.LastModified, state)
+	return false
 }
 
 // handleDelete 删除一行。NoSuchVersion / NoSuchKey 算成功（幂等空操作）；
-// 其他失败写 delete_failed + log。
-func handleDelete(ctx context.Context, c *S3Client, r Row, out *Output, stats *Stats) {
+// 其他失败写 delete_failed + log。返回 failed=true 表示删除失败（非幂等成功）。
+func handleDelete(ctx context.Context, c *S3Client, r Row, out *Output, stats *Stats) (failed bool) {
 	stats.IncrProcessed()
 	statusCode, requestID, err := c.DeleteObject(ctx, r.Bkt, r.Key, r.VersionID)
 	if err == nil {
 		stats.IncrDeleted()
 		out.WriteDeleted(r.Bkt, r.outputKey(), r.VersionID, r.LastModified)
-		return
+		return false
 	}
 	if code := errorCode(err); code == "NoSuchVersion" || code == "NoSuchKey" {
 		stats.IncrDeleted()
 		out.WriteDeleted(r.Bkt, r.outputKey(), r.VersionID, r.LastModified)
-		return
+		return false
 	}
 	stats.IncrDeleteFailed()
 	out.WriteDeleteFailed(r.Bkt, r.outputKey(), r.VersionID, r.LastModified)
 	out.WriteDeleteFailedLog(r.Bkt, r.Key, r.VersionID, statusCode, errorCode(err), requestID, err)
+	return true
 }
+
+// defaultFailureThreshold / defaultSlowModeInterval 与 lister 工具对齐（cfg=0 时用默认）。
+const defaultFailureThreshold = 3
+const defaultSlowModeInterval = time.Minute

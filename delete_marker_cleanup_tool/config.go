@@ -24,6 +24,8 @@ type Config struct {
 	ResponseHeaderTimeout int64    `yaml:"response_header_timeout"`
 	LatencyWindowSec      int      `yaml:"latency_window_sec"`
 	EncodingTypeURL       bool     `yaml:"encoding_type_url"`
+	FailureThreshold      int      `yaml:"failure_threshold"`
+	SlowModeIntervalSec   int64    `yaml:"slow_mode_interval_sec"`
 }
 
 // LoadConfig 读 YAML 配置并应用默认值 + 校验。timestamp 后缀逻辑对齐
@@ -69,6 +71,14 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.LatencyWindowSec == 0 {
 		cfg.LatencyWindowSec = 60
 	}
+	// FailureThreshold 默认 3：连续失败 3 次后 worker 进入慢速模式。0 视为默认。
+	if cfg.FailureThreshold == 0 {
+		cfg.FailureThreshold = 3
+	}
+	// SlowModeIntervalSec 默认 60s——1 分钟一条 row，足够 S3 节点重启/恢复。
+	if cfg.SlowModeIntervalSec == 0 {
+		cfg.SlowModeIntervalSec = 60
+	}
 
 	if len(cfg.Endpoints) == 0 {
 		return nil, fmt.Errorf("config: endpoints must have at least one entry")
@@ -87,6 +97,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.LatencyWindowSec < 1 {
 		return nil, fmt.Errorf("config: latency_window_sec must be >= 1, got %d", cfg.LatencyWindowSec)
+	}
+	if cfg.FailureThreshold < 1 {
+		return nil, fmt.Errorf("config: failure_threshold must be >= 1, got %d", cfg.FailureThreshold)
+	}
+	if cfg.SlowModeIntervalSec < 1 {
+		return nil, fmt.Errorf("config: slow_mode_interval_sec must be >= 1, got %d", cfg.SlowModeIntervalSec)
 	}
 
 	if cfg.OutputDirTimestamp {

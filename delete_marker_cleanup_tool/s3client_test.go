@@ -162,3 +162,19 @@ func TestBucketExists(t *testing.T) {
 		t.Errorf("exists=false want true")
 	}
 }
+
+// makeClientsForTest 为 worker_test.go 准备一个 []*S3Client——每 endpoint 一个，
+// 对齐 main.go 启动期预创语义（mode delete 用 N 个，mode check 用 1 个）。
+// 这里统一创 len(Endpoints) 个，测试想模拟 mode check 用 1 个时取 clients[:1]。
+func makeClientsForTest(t *testing.T, cfg *Config) []*S3Client {
+	t.Helper()
+	clients := make([]*S3Client, 0, len(cfg.Endpoints))
+	for _, ep := range cfg.Endpoints {
+		c, err := NewS3Client(cfg, ep)
+		if err != nil {
+			t.Fatalf("NewS3Client(%s): %v", ep, err)
+		}
+		clients = append(clients, c)
+	}
+	return clients
+}

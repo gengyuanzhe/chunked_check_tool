@@ -56,23 +56,35 @@ func run(cfgPath, mode, inputPath string) error {
 
 	start := time.Now()
 
-	// 预检：解析输入首行取 bkt，用 endpoints[0] 跑一次 BucketExists。
-	// 传输错误硬退出；exists==false 只 warning + 继续（多桶输入保护）。
+	// 预检：解析输入首行取 bkt，对每个 endpoint 跑 BucketExists——fail-fast：
+	// 任一 endpoint 不可达直接退出，不让 worker 半启动后才暴露死 endpoint。
+	// exists==false 不退出（多桶输入保护），只 warning + 继续——只关心 endpoint 可达性。
+	// mode check 用 1 个 client（endpoints[0]）；mode delete 用 len(Endpoints) 个（每 endpoint 一个），
+	// worker 按 idx % N 绑——预创好直接复用，RunWorkers 不再创建 client。
 	firstBkt, ok := readFirstRowBucket(inputPath, cfg.EncodingTypeURL)
 	if !ok {
 		return fmt.Errorf("preflight: first input row unparseable (torn or empty file)")
 	}
-	preflightClient, err := NewS3Client(cfg, cfg.Endpoints[0])
-	if err != nil {
-		return err
+	nClients := 1
+	if mode == "delete" {
+		nClients = len(cfg.Endpoints)
 	}
-	exists, err := preflightClient.BucketExists(context.Background(), firstBkt)
-	if err != nil {
-		fmt.Fprintf(mwErr, "bucket exists probe failed: %v\n", err)
-		return err
-	}
-	if !exists {
-		fmt.Fprintf(mwErr, "warning: bucket %s not found on endpoints[0] (continuing)\n", firstBkt)
+	clients := make([]*S3Client, 0, nClients)
+	for i := 0; i < nClients; i++ {
+		endpoint := cfg.Endpoints[i%len(cfg.Endpoints)]
+		c, err := NewS3Client(cfg, endpoint)
+		if err != nil {
+			return fmt.Errorf("create client for endpoint %s: %w", endpoint, err)
+		}
+		exists, err := c.BucketExists(context.Background(), firstBkt)
+		if err != nil {
+			fmt.Fprintf(mwErr, "bucket exists probe failed for endpoint %s: %v\n", endpoint, err)
+			return err
+		}
+		if !exists {
+			fmt.Fprintf(mwErr, "warning: bucket %s not found on endpoint %s (continuing)\n", firstBkt, endpoint)
+		}
+		clients = append(clients, c)
 	}
 
 	out, err := NewOutput(cfg, mode)
@@ -84,8 +96,11 @@ func run(cfgPath, mode, inputPath string) error {
 	progress := NewProgressPrinter(mwOut)
 	progress.SetInterval(cfg.ProgressInterval)
 	stats.Latency.SetWindow(time.Duration(cfg.LatencyWindowSec) * time.Second)
+	for _, c := range clients {
+		c.SetLatencyTracker(&stats.Latency)
+	}
 
-	runErr := RunWorkers(context.Background(), cfg, mode, inputPath, out, &stats, progress)
+	runErr := RunWorkers(context.Background(), cfg, mode, inputPath, clients, out, &stats, progress)
 
 	stats.SetTotalDuration(time.Since(start))
 	out.FlushAndWait()
@@ -137,4 +152,6 @@ func printConfigSnapshot(w io.Writer, cfg *Config, mode, inputPath string) {
 	fmt.Fprintf(w, "dial_timeout=%d\n", cfg.DialTimeout)
 	fmt.Fprintf(w, "response_header_timeout=%d\n", cfg.ResponseHeaderTimeout)
 	fmt.Fprintf(w, "encoding_type_url=%v\n", cfg.EncodingTypeURL)
+	fmt.Fprintf(w, "failure_threshold=%d\n", cfg.FailureThreshold)
+	fmt.Fprintf(w, "slow_mode_interval_sec=%d\n", cfg.SlowModeIntervalSec)
 }
