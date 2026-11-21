@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 // --- parseMultipartOffsetETag ---
@@ -68,152 +68,78 @@ func TestParseMultipartOffsetETag(t *testing.T) {
 	}
 }
 
-// --- isListRequest ---
+// --- withMpOffsetListHeader ---
 
-func TestIsListRequest(t *testing.T) {
-	cases := []struct {
-		name   string
-		method string
-		path   string
-		query  string
-		want   bool
-	}{
-		// V2 lists minio-go emits via Core.ListObjectsV2.
-		{"v2 full", "GET", "/bkt", "delimiter=%2F&encoding-type=url&fetch-owner=true&list-type=2&max-keys=1000&prefix=dir%2F", true},
-		{"v2 continuation", "GET", "/bkt", "continuation-token=abc%3D%3D&list-type=2", true},
-		{"v2 start-after", "GET", "/bkt", "list-type=2&start-after=key1", true},
-		// V1 lists minio-go emits via Core.ListObjects.
-		{"v1 full", "GET", "/bkt", "delimiter=%2F&encoding-type=url&marker=dir%2Fk&max-keys=1000&prefix=dir%2F", true},
-		{"v1 minimal", "GET", "/bkt", "delimiter=&encoding-type=url&prefix=", true},
-		{"v1 marker only page", "GET", "/bkt", "encoding-type=url&marker=abc", true},
-		// Non-list requests the tool issues.
-		{"bucket location probe", "GET", "/bkt", "location=", false},
-		{"object get", "GET", "/bkt/key1", "", false},
-		{"object get versionId", "GET", "/bkt/key1", "versionId=v1", false},
-		{"object get partNumber", "GET", "/bkt/key1", "partNumber=1&uploadId=u1", false},
-		{"head object", "HEAD", "/bkt/key1", "", false},
-		{"put object", "PUT", "/bkt/key1", "", false},
-		{"multipart init", "POST", "/bkt/key1", "uploads", false},
-		{"complete multipart", "POST", "/bkt/key1", "uploadId=u1", false},
-		{"abort multipart", "DELETE", "/bkt/key1", "uploadId=u1", false},
-		// Unknown bucket-level GETs default to no injection.
-		{"no query bucket root", "GET", "/bkt", "", false},
-		{"bucket policy", "GET", "/bkt", "policy", false},
-		// Virtual-host style: bucket in host, path is / (list) or /key.
-		{"vhost v2 list", "GET", "/", "list-type=2", true},
-		{"vhost object get", "GET", "/key1", "", false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			req, err := http.NewRequest(c.method, "http://10.0.0.1:9000"+c.path+"?"+c.query, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := isListRequest(req); got != c.want {
-				t.Errorf("isListRequest(%s %s?%s) = %v, want %v", c.method, c.path, c.query, got, c.want)
-			}
-		})
-	}
-}
-
-// TestMpOffsetTransportNotMutatingOriginal verifies RoundTrip clones before
-// setting the header: minio-go reuses one request object across internal
-// retries, so the wrapper must not mutate it.
-func TestMpOffsetTransportNotMutatingOriginal(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-	}))
-	defer srv.Close()
-	tr := &mpOffsetTransport{base: http.DefaultTransport}
-	req, _ := http.NewRequest("GET", srv.URL+"/bkt?list-type=2&prefix=", nil)
-	resp, err := tr.RoundTrip(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if _, ok := req.Header[http.CanonicalHeaderKey(mpOffsetListHeader)]; ok {
-		t.Error("original request header map was mutated by RoundTrip")
-	}
-}
-
-// TestMpOffsetTransportMinioList is the pin on minio-go v7.3.0's actual
-// request shapes: a Core.ListObjectsV2 and Core.ListObjects call through a
-// wrapped client MUST carry the header, while the ?location= region probe and
-// a StatObject MUST NOT. If minio-go is ever upgraded and changes its LIST
-// query shape so isListRequest stops matching, this test fails.
-func TestMpOffsetTransportMinioList(t *testing.T) {
-	const listXMLV2 = `<?xml version="1.0" encoding="UTF-8"?>
+// listXMLV2Empty is a one-page, empty V2 LIST response shared by the
+// mp-offset header tests.
+const listXMLV2Empty = `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
 <Name>bkt</Name><Prefix></Prefix><KeyCount>0</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>
 </ListBucketResult>`
-	var mu sync.Mutex
-	var listWithHdr, listWithoutHdr, probeWithHdr int
-	statWithHdr := 0
 
+// TestMpOffsetHeaderListOnly is the per-call replacement for the old
+// transport-shape pinning: listPageOnce passes withMpOffsetListHeader on
+// LIST calls only, so a LIST through the real aws client must carry
+// internal-list-mp-offset: true (in multipart_check_mode=offset + is_check)
+// while a HeadObject through the same S3Client must not — "LIST only" is
+// now structural (the option exists only at the list call sites), and this
+// test pins the end-to-end wire behavior.
+func TestMpOffsetHeaderListOnly(t *testing.T) {
+	var mu sync.Mutex
+	var listWithHdr, listWithoutHdr, headWithHdr int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hasHdr := r.Header.Get(mpOffsetListHeader) == "true"
 		mu.Lock()
 		defer mu.Unlock()
-		switch {
-		case r.URL.RawQuery == "location=":
+		if r.Method == http.MethodHead {
 			if hasHdr {
-				probeWithHdr++
-			}
-			w.Header().Set("Content-Type", "application/xml")
-			w.Write([]byte(`<LocationConstraint>us-east-1</LocationConstraint>`))
-		case r.Method == http.MethodHead:
-			if hasHdr {
-				statWithHdr++
+				headWithHdr++
 			}
 			w.Header().Set("ETag", `"0123456789abcdef0123456789abcdef"`)
-			w.Header().Set("Last-Modified", "Mon, 02 Jan 2006 15:04:05 GMT")
 			w.Header().Set("Content-Length", "1")
 			w.WriteHeader(200)
-		default:
-			if hasHdr {
-				listWithHdr++
-			} else {
-				listWithoutHdr++
-			}
-			w.Header().Set("Content-Type", "application/xml")
-			w.Write([]byte(listXMLV2))
+			return
 		}
+		if hasHdr {
+			listWithHdr++
+		} else {
+			listWithoutHdr++
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		w.Write([]byte(listXMLV2Empty))
 	}))
 	defer srv.Close()
 
 	host := strings.TrimPrefix(srv.URL, "http://")
-	client, err := minio.New(host, &minio.Options{
-		Creds:     credentials.NewStaticV4("ak", "sk", ""),
-		Transport: &mpOffsetTransport{base: &http.Transport{}},
-	})
+	client, err := NewAWSClient(host, "ak", "sk", false, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	core := &minio.Core{Client: client}
-
-	if _, err := core.ListObjectsV2("bkt", "", "", "", "/", 1000); err != nil {
-		t.Fatalf("ListObjectsV2: %v", err)
+	// mode=offset + is_check → LISTs carry the header.
+	c := NewS3Client(client, "bkt", NewStats(), nil, -1,
+		&Config{ListAPIVersion: 2, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset})
+	if _, _, _, err := c.ListPage(context.Background(), "", "", "", false, 1000); err != nil {
+		t.Fatalf("ListPage: %v", err)
 	}
-	if _, err := core.ListObjects("bkt", "", "", "/", 1000); err != nil {
-		t.Fatalf("ListObjects: %v", err)
+	if _, _, err := c.HeadObject(context.Background(), "k1"); err != nil {
+		t.Fatalf("HeadObject: %v", err)
 	}
-	if _, err := client.StatObject(context.Background(), "bkt", "k1", minio.StatObjectOptions{}); err != nil {
-		t.Fatalf("StatObject: %v", err)
+	// The same bucket through a client without mode=offset: no header.
+	c2 := NewS3Client(client, "bkt", NewStats(), nil, -1, &Config{ListAPIVersion: 2})
+	if _, _, _, err := c2.ListPage(context.Background(), "", "", "", false, 1000); err != nil {
+		t.Fatalf("ListPage (no mp-offset): %v", err)
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if listWithHdr != 2 {
-		t.Errorf("list requests carrying header = %d, want 2 (V1+V2)", listWithHdr)
+	if listWithHdr != 1 {
+		t.Errorf("LIST requests carrying header = %d, want 1", listWithHdr)
 	}
-	if listWithoutHdr != 0 {
-		t.Errorf("list requests without header = %d, want 0", listWithoutHdr)
+	if listWithoutHdr != 1 {
+		t.Errorf("LIST requests without header = %d, want 1", listWithoutHdr)
 	}
-	if probeWithHdr != 0 {
-		t.Errorf("location probe carried header %d times, want 0", probeWithHdr)
-	}
-	if statWithHdr != 0 {
-		t.Errorf("StatObject carried header, want none")
+	if headWithHdr != 0 {
+		t.Errorf("HeadObject carried header %d times, want 0", headWithHdr)
 	}
 }
 
@@ -296,24 +222,12 @@ func TestParseMultipartOffsetETagSizeValidation(t *testing.T) {
 	}
 }
 
-// TestMinioListLargeOffsetETag verifies the minio-go SDK itself can parse a
-// LIST response whose ETag carries 10000 part offsets (~145 KB). This is
-// the real concern for multipart_check_mode=offset: parseMultipartOffsetETag
-// is ours, but the XML decoding is minio's. A stack overflow, truncation, or
-// silent ETag drop in minio-go's xmlDecoder would break the offset pipeline
-// before our code ever runs.
-//
-// The test stands up an httptest server that returns a V2 ListBucketResult
-// with one Contents entry whose ETag is <md5>-10000-0|5368709120|...|...,
-// then issues a real Core.ListObjectsV2 through a minio client and asserts:
-//   - no error
-//   - exactly one object returned
-//   - the ETag survived the round-trip byte-for-byte (length + first/last
-//     offsets intact)
-//
-// Pinned to minio-go v7.3.0's V2 LIST query shape; a minio upgrade must
-// re-verify the XML decoder still handles ETags this large.
-func TestMinioListLargeOffsetETag(t *testing.T) {
+// TestAWSListLargeOffsetETag — the aws SDK must round-trip a ~110 KB
+// offset-carrying ETag (XML-escaped quotes, one Contents entry) without
+// truncation, and our parser must still handle the result. This pins the
+// end-to-end ETag path: server XML → SDK decode → trimETagQuotes →
+// parseMultipartOffsetETag.
+func TestAWSListLargeOffsetETag(t *testing.T) {
 	const md5 = "0123456789abcdef0123456789abcdef"
 	const partCount = 10000
 	const partSize = int64(5 * 1024 * 1024 * 1024)
@@ -333,34 +247,30 @@ func TestMinioListLargeOffsetETag(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
-		// minio-go v7.3.0 Core.ListObjectsV2 emits list-type=2; the server
+		// The aws SDK emits list-type=2 for ListObjectsV2; the server
 		// responds identically to any list-type=2 request.
 		w.Write([]byte(listXML))
 	}))
 	defer srv.Close()
 
 	host := strings.TrimPrefix(srv.URL, "http://")
-	client, err := minio.New(host, &minio.Options{
-		Creds:     credentials.NewStaticV4("ak", "sk", ""),
-		Secure:    false,
-		Region:    "us-east-1",
-		Transport: &http.Transport{},
-	})
+	client, err := NewAWSClient(host, "ak", "sk", false, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	core := &minio.Core{Client: client}
 
-	result, err := core.ListObjectsV2("bkt", "", "", "", "", 1000)
+	result, err := client.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
+		Bucket: aws.String("bkt"),
+	})
 	if err != nil {
 		t.Fatalf("ListObjectsV2 with %d-byte ETag failed: %v", len(etag), err)
 	}
 	if len(result.Contents) != 1 {
 		t.Fatalf("got %d contents, want 1", len(result.Contents))
 	}
-	got := trimETagQuotes(result.Contents[0].ETag)
+	got := trimETagQuotes(aws.ToString(result.Contents[0].ETag))
 	if len(got) != len(etag) {
-		t.Errorf("ETag length after round-trip = %d, want %d (truncated by minio?)", len(got), len(etag))
+		t.Errorf("ETag length after round-trip = %d, want %d (truncated by the SDK?)", len(got), len(etag))
 	}
 	if got != etag {
 		first, last := 64, 64
@@ -374,7 +284,7 @@ func TestMinioListLargeOffsetETag(t *testing.T) {
 		t.Errorf("ETag tail: got=%q want=%q", got[len(got)-last:], etag[len(etag)-last:])
 	}
 	// Verify our parser still handles the round-tripped ETag — the full
-	// pipeline (minio decode → trimETagQuotes → our parser) must produce offsets.
+	// pipeline (SDK decode → trimETagQuotes → our parser) must produce offsets.
 	offs, ok := parseMultipartOffsetETag(got, int64(partCount)*partSize)
 	if !ok {
 		t.Fatalf("parseMultipartOffsetETag rejected the round-tripped ETag")
@@ -382,5 +292,5 @@ func TestMinioListLargeOffsetETag(t *testing.T) {
 	if len(offs) != partCount {
 		t.Errorf("parsed offset count = %d, want %d", len(offs), partCount)
 	}
-	t.Logf("minio-go decoded %d-byte ETag, round-trip OK, parsed %d offsets", len(got), len(offs))
+	t.Logf("aws SDK decoded %d-byte ETag, round-trip OK, parsed %d offsets", len(got), len(offs))
 }

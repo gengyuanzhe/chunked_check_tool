@@ -5,7 +5,8 @@ import (
 	"errors"
 	"regexp"
 
-	"github.com/minio/minio-go/v7"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
+	"github.com/aws/smithy-go"
 )
 
 // chunkSigRe matches the streaming chunked-upload signature header that S3
@@ -37,37 +38,38 @@ var chunkSigRe = regexp.MustCompile(`[0-9a-fA-F]+;chunk-signature=[0-9a-fA-F]{64
 // Unanchored: the trailer lands mid-slice in tail/boundary probes.
 var trailerRe = regexp.MustCompile(`x-amz-checksum-(sha256|crc32|crc32c|sha1|crc64):`)
 
-// extractHTTPStatusCode pulls the HTTP status code off err if it wraps a
-// minio.ErrorResponse. Returns 0 when err carries no HTTP status (e.g.
-// context.DeadlineExceeded, net.OpError) — the caller writes "N/A" in that
-// case.
+// extractHTTPStatusCode pulls the HTTP status code off err if it wraps an
+// *awshttp.ResponseError (every S3 protocol error from the aws SDK does).
+// Returns 0 when err carries no HTTP response (e.g. context.DeadlineExceeded,
+// net.OpError) — the caller writes "N/A" in that case.
 func extractHTTPStatusCode(err error) int {
-	var er minio.ErrorResponse
-	if errors.As(err, &er) {
-		return er.StatusCode
+	var re *awshttp.ResponseError
+	if errors.As(err, &re) {
+		return re.Response.StatusCode
 	}
 	return 0
 }
 
-// extractS3Code pulls the S3 error Code string (e.g. "InvalidRange",
-// "NoSuchKey") off err. Returns "" when err is not a minio.ErrorResponse.
+// extractS3Code pulls the S3 error Code string (e.g. "NoSuchKey",
+// "InvalidRange") off err if it wraps a smithy.APIError. Returns "" for
+// non-S3 errors (e.g. context timeout, net.OpError).
 // Distinct from the HTTP status code — the S3 Code carries semantic info
 // that HTTP status doesn't (e.g. 404 could be NoSuchKey or NoSuchBucket).
 func extractS3Code(err error) string {
-	var er minio.ErrorResponse
-	if errors.As(err, &er) {
-		return er.Code
+	var ae smithy.APIError
+	if errors.As(err, &ae) {
+		return ae.ErrorCode()
 	}
 	return ""
 }
 
-// extractRequestID pulls the x-amz-request-id value off err if it wraps a
-// minio.ErrorResponse. Returns "" for non-S3 errors (e.g. context timeout,
+// extractRequestID pulls the x-amz-request-id value off err if it wraps an
+// *awshttp.ResponseError. Returns "" for non-S3 errors (e.g. context timeout,
 // net.OpError) — caller writes "N/A" in that case.
 func extractRequestID(err error) string {
-	var er minio.ErrorResponse
-	if errors.As(err, &er) {
-		return er.RequestID
+	var re *awshttp.ResponseError
+	if errors.As(err, &re) {
+		return re.Response.Header.Get("x-amz-request-id")
 	}
 	return ""
 }

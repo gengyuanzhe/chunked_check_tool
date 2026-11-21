@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/minio/minio-go/v7"
 )
 
 // corruptBody matches chunkSigRe (64-hex signature + CRLF), like the
@@ -283,7 +281,7 @@ func TestBackupCheckerMismatchLogsHeadETag(t *testing.T) {
 }
 
 func TestBackupCheckerHeadErrorFails(t *testing.T) {
-	f := &FakeS3{HeadErr: minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}}
+	f := &FakeS3{HeadErr: fakeS3Err(404, "NoSuchKey", "", "")}
 	c, dir, flush := newBackupTestEnv(t, f)
 
 	c.Handle(BackupTask{Key: "gone", RawLine: "mybucket|gone"})

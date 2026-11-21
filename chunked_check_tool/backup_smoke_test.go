@@ -13,8 +13,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 )
 
 // TestBackupRelayRealS3 drives the full -backup-file relay against a real
@@ -35,17 +37,16 @@ func TestBackupRelayRealS3(t *testing.T) {
 	srcBkt := envOr("S3_BUCKET", "verify-src")
 	dstBkt := envOr("S3_BACKUP_BUCKET", "verify-dst")
 
-	client, err := minio.New(endpoint, &minio.Options{
-		Creds: credentials.NewStaticV4(ak, sk, ""),
-	})
+	client, err := NewAWSClient(endpoint, ak, sk, false, 0, 0)
 	if err != nil {
-		t.Fatalf("minio client: %v", err)
+		t.Fatalf("aws client: %v", err)
 	}
 	ctx := context.Background()
 	for _, b := range []string{srcBkt, dstBkt} {
-		if err := client.MakeBucket(ctx, b, minio.MakeBucketOptions{}); err != nil {
-			var er minio.ErrorResponse
-			if !errors.As(err, &er) || er.Code != "BucketAlreadyOwnedByYou" {
+		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(b)})
+		if err != nil {
+			var ae smithy.APIError
+			if !errors.As(err, &ae) || ae.ErrorCode() != "BucketAlreadyOwnedByYou" {
 				t.Fatalf("make bucket %s: %v", b, err)
 			}
 		}
@@ -71,27 +72,51 @@ func TestBackupRelayRealS3(t *testing.T) {
 
 	putRegular := func(key string, content []byte) {
 		t.Helper()
-		_, err := client.PutObject(ctx, srcBkt, key, bytes.NewReader(content), int64(len(content)), minio.PutObjectOptions{})
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:        aws.String(srcBkt),
+			Key:           aws.String(key),
+			Body:          bytes.NewReader(content),
+			ContentLength: aws.Int64(int64(len(content))),
+		})
 		if err != nil {
 			t.Fatalf("put %s: %v", key, err)
 		}
 	}
 	putMultipart := func(key string, parts ...[]byte) {
 		t.Helper()
-		core := minio.Core{Client: client}
-		uploadID, err := core.NewMultipartUpload(ctx, srcBkt, key, minio.PutObjectOptions{})
+		uploadID, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+			Bucket: aws.String(srcBkt),
+			Key:    aws.String(key),
+		})
 		if err != nil {
 			t.Fatalf("initiate %s: %v", key, err)
 		}
-		var completed []minio.CompletePart
+		var completed []types.CompletedPart
 		for i, p := range parts {
-			op, err := core.PutObjectPart(ctx, srcBkt, key, uploadID, i+1, bytes.NewReader(p), int64(len(p)), minio.PutObjectPartOptions{})
+			op, err := client.UploadPart(ctx, &s3.UploadPartInput{
+				Bucket:        aws.String(srcBkt),
+				Key:           aws.String(key),
+				UploadId:      uploadID.UploadId,
+				PartNumber:    aws.Int32(int32(i + 1)),
+				Body:          bytes.NewReader(p),
+				ContentLength: aws.Int64(int64(len(p))),
+			})
 			if err != nil {
 				t.Fatalf("part %d of %s: %v", i+1, key, err)
 			}
-			completed = append(completed, minio.CompletePart{PartNumber: op.PartNumber, ETag: op.ETag})
+			// Trim to mirror the tool's own CompleteMultipart path (it
+			// re-wraps UploadPart's trimmed etag).
+			completed = append(completed, types.CompletedPart{
+				PartNumber: aws.Int32(int32(i + 1)),
+				ETag:       aws.String(trimETagQuotes(aws.ToString(op.ETag))),
+			})
 		}
-		if _, err := core.CompleteMultipartUpload(ctx, srcBkt, key, uploadID, completed, minio.PutObjectOptions{}); err != nil {
+		if _, err := client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+			Bucket:          aws.String(srcBkt),
+			Key:             aws.String(key),
+			UploadId:        uploadID.UploadId,
+			MultipartUpload: &types.CompletedMultipartUpload{Parts: completed},
+		}); err != nil {
 			t.Fatalf("complete %s: %v", key, err)
 		}
 	}
@@ -102,13 +127,20 @@ func TestBackupRelayRealS3(t *testing.T) {
 	putMultipart("mp-clean", mpPart1Clean, mpPart2)
 
 	// Source ETags for the post-run comparison.
+	headETag := func(bucket, key string) string {
+		t.Helper()
+		out, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		if err != nil {
+			t.Fatalf("stat %s/%s: %v", bucket, key, err)
+		}
+		return trimETagQuotes(aws.ToString(out.ETag))
+	}
 	srcETags := map[string]string{}
 	for _, k := range []string{"reg-corrupt", "reg-clean", "mp-corrupt", "mp-clean"} {
-		info, err := client.StatObject(ctx, srcBkt, k, minio.StatObjectOptions{})
-		if err != nil {
-			t.Fatalf("stat src %s: %v", k, err)
-		}
-		srcETags[k] = info.ETag
+		srcETags[k] = headETag(srcBkt, k)
 	}
 
 	// Backup list: 4 relays, 1 type mismatch, 1 malformed. Backup does not
@@ -120,7 +152,7 @@ func TestBackupRelayRealS3(t *testing.T) {
 		"%s|mp-corrupt|2|0|%d\n"+
 		"%s|mp-clean|2|0|%d\n"+
 		"%s|mp-clean\n"+ // regular line for a multipart object → mismatch
-		"%s|bad|1|100\n", // malformed → list_failed
+		"%s|bad|1|100\n", // malformed → parse_failed
 		srcBkt, srcBkt, srcBkt, partSize, srcBkt, partSize, srcBkt, srcBkt)
 	if err := os.WriteFile(backupPath, []byte(list), 0644); err != nil {
 		t.Fatal(err)
@@ -147,7 +179,7 @@ func TestBackupRelayRealS3(t *testing.T) {
 	// Local result files (order-insensitive: check workers finish
 	// concurrently). dumpResults prints everything when anything is off.
 	dumpResults := func() {
-		for _, name := range []string{"backup_ok.txt", "backup_failed.txt", "backup_failed.log", "mismatch.txt", "list_failed.txt"} {
+		for _, name := range []string{"backup_ok.txt", "backup_failed.txt", "backup_failed.log", "mismatch.txt", "parse_failed.txt"} {
 			if data, err := os.ReadFile(filepath.Join(dir, name)); err == nil && len(data) > 0 {
 				t.Logf("--- %s ---\n%s", name, data)
 			}
@@ -175,7 +207,9 @@ func TestBackupRelayRealS3(t *testing.T) {
 		fmt.Sprintf("%s|mp-corrupt|2|0|%d", srcBkt, partSize),
 		fmt.Sprintf("%s|mp-clean|2|0|%d", srcBkt, partSize))
 	assertLines("mismatch.txt", srcBkt+"|mp-clean")
-	assertLines("list_failed.txt", srcBkt+"|bad|1|100")
+	// Malformed input lines route to parse_failed (invariant 4a), not
+	// list_failed (S3 LIST failures).
+	assertLines("parse_failed.txt", srcBkt+"|bad|1|100")
 	if data, err := os.ReadFile(filepath.Join(dir, "backup_failed.txt")); err == nil && len(data) > 0 {
 		dumpResults()
 		t.Errorf("backup_failed.txt not empty: %s", data)
@@ -187,44 +221,47 @@ func TestBackupRelayRealS3(t *testing.T) {
 	}
 
 	// Destination objects: ETag equal to source and bytes identical.
+	getObject := func(bucket, key string) []byte {
+		t.Helper()
+		out, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		if err != nil {
+			t.Fatalf("get %s/%s: %v", bucket, key, err)
+		}
+		defer out.Body.Close()
+		b, err := io.ReadAll(out.Body)
+		if err != nil {
+			t.Fatalf("read %s/%s: %v", bucket, key, err)
+		}
+		return b
+	}
 	for _, k := range []string{"reg-corrupt", "reg-clean", "mp-corrupt", "mp-clean"} {
-		info, err := client.StatObject(ctx, dstBkt, k, minio.StatObjectOptions{})
-		if err != nil {
-			t.Fatalf("stat dst %s: %v", k, err)
+		if got := headETag(dstBkt, k); got != srcETags[k] {
+			t.Errorf("dst etag %s = %q, src %q", k, got, srcETags[k])
 		}
-		if info.ETag != srcETags[k] {
-			t.Errorf("dst etag %s = %q, src %q", k, info.ETag, srcETags[k])
-		}
-		got, err := client.GetObject(ctx, dstBkt, k, minio.GetObjectOptions{})
-		if err != nil {
-			t.Fatalf("get dst %s: %v", k, err)
-		}
-		dst, err := io.ReadAll(got)
-		got.Close()
-		if err != nil {
-			t.Fatalf("read dst %s: %v", k, err)
-		}
-		src, err := client.GetObject(ctx, srcBkt, k, minio.GetObjectOptions{})
-		if err != nil {
-			t.Fatalf("get src %s: %v", k, err)
-		}
-		want, err := io.ReadAll(src)
-		src.Close()
-		if err != nil {
-			t.Fatalf("read src %s: %v", k, err)
-		}
-		if !bytes.Equal(dst, want) {
+		if dst, want := getObject(dstBkt, k), getObject(srcBkt, k); !bytes.Equal(dst, want) {
 			t.Errorf("relayed %s differs from source (%d vs %d bytes)", k, len(dst), len(want))
 		}
 	}
 
 	// The list archive landed under .backup_lists/.
 	archives := 0
-	for obj := range client.ListObjects(ctx, dstBkt, minio.ListObjectsOptions{Prefix: ".backup_lists/", Recursive: true}) {
-		if obj.Err != nil {
-			t.Fatalf("list archives: %v", obj.Err)
+	input := &s3.ListObjectsV2Input{
+		Bucket: aws.String(dstBkt),
+		Prefix: aws.String(".backup_lists/"),
+	}
+	for {
+		out, err := client.ListObjectsV2(ctx, input)
+		if err != nil {
+			t.Fatalf("list archives: %v", err)
 		}
-		archives++
+		archives += len(out.Contents)
+		if !aws.ToBool(out.IsTruncated) {
+			break
+		}
+		input.ContinuationToken = out.NextContinuationToken
 	}
 	if archives < 1 {
 		t.Errorf("no .backup_lists/ archive found in destination bucket")

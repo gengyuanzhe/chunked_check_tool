@@ -2,86 +2,101 @@ package main
 
 import (
 	"context"
-	"io"
-	"net/http"
 	"testing"
 
-	"github.com/minio/minio-go/v7"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
-// fakeCore is a test double for the minioListAPI interface. It records
-// which method was called and with what arguments, and returns canned
+// fakeCore is a test double for the awsS3API interface. It records which
+// list method was called and with what arguments, and returns canned
 // results.
 type fakeCore struct {
 	v2Calls int
 	v1Calls int
 
-	lastV2Bucket string
-	lastV2Marker string
-	lastV1Bucket string
-	lastV1Marker string
+	lastV2Bucket     string
+	lastV2Marker     string
+	lastV2FetchOwner bool
+	lastV1Bucket     string
+	lastV1Marker     string
 
-	v2Result minio.ListBucketV2Result
-	v1Result minio.ListBucketResult
+	v2Result *s3.ListObjectsV2Output
+	v1Result *s3.ListObjectsOutput
 	err      error
 }
 
-func (f *fakeCore) ListObjectsV2(bucketName, prefix, startAfter, continuationToken, delimiter string, maxKeys int) (minio.ListBucketV2Result, error) {
+func (f *fakeCore) ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
 	f.v2Calls++
-	f.lastV2Bucket = bucketName
-	// The caller distinguishes "first page" (startAfter set, continuationToken
-	// empty) from "subsequent page" (continuationToken set, startAfter
-	// empty). For test assertions we record whichever is non-empty as the
-	// "marker" the implementation passed.
+	f.lastV2Bucket = aws.ToString(params.Bucket)
+	f.lastV2FetchOwner = aws.ToBool(params.FetchOwner)
+	// The caller distinguishes "first page" (StartAfter set, ContinuationToken
+	// nil) from "subsequent page" (ContinuationToken set, StartAfter nil).
+	// For test assertions we record whichever is non-empty as the "marker"
+	// the implementation passed.
 	switch {
-	case startAfter != "":
-		f.lastV2Marker = startAfter
-	case continuationToken != "":
-		f.lastV2Marker = continuationToken
+	case aws.ToString(params.StartAfter) != "":
+		f.lastV2Marker = aws.ToString(params.StartAfter)
+	case aws.ToString(params.ContinuationToken) != "":
+		f.lastV2Marker = aws.ToString(params.ContinuationToken)
 	default:
 		f.lastV2Marker = ""
 	}
 	return f.v2Result, f.err
 }
 
-func (f *fakeCore) ListObjects(bucket, prefix, marker, delimiter string, maxKeys int) (minio.ListBucketResult, error) {
+func (f *fakeCore) ListObjects(ctx context.Context, params *s3.ListObjectsInput, optFns ...func(*s3.Options)) (*s3.ListObjectsOutput, error) {
 	f.v1Calls++
-	f.lastV1Bucket = bucket
-	f.lastV1Marker = marker
+	f.lastV1Bucket = aws.ToString(params.Bucket)
+	f.lastV1Marker = aws.ToString(params.Marker)
 	return f.v1Result, f.err
 }
 
-// The multipart/get half of minioCoreAPI is unused by the list tests; stubs
-// keep fakeCore satisfying the interface.
-func (f *fakeCore) GetObject(ctx context.Context, bucketName, objectName string, opts minio.GetObjectOptions) (io.ReadCloser, minio.ObjectInfo, http.Header, error) {
-	return nil, minio.ObjectInfo{}, nil, nil
+// The non-list half of awsS3API is unused by the list tests; stubs keep
+// fakeCore satisfying the interface.
+func (f *fakeCore) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+	return nil, f.err
 }
-func (f *fakeCore) NewMultipartUpload(ctx context.Context, bucket, object string, opts minio.PutObjectOptions) (string, error) {
-	return "", nil
+func (f *fakeCore) HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+	return nil, f.err
 }
-func (f *fakeCore) PutObjectPart(ctx context.Context, bucket, object, uploadID string, partID int, data io.Reader, size int64, opts minio.PutObjectPartOptions) (minio.ObjectPart, error) {
-	return minio.ObjectPart{}, nil
+func (f *fakeCore) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
+	return nil, f.err
 }
-func (f *fakeCore) CompleteMultipartUpload(ctx context.Context, bucket, object, uploadID string, parts []minio.CompletePart, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
-	return minio.UploadInfo{}, nil
+func (f *fakeCore) CreateMultipartUpload(ctx context.Context, params *s3.CreateMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	return nil, f.err
 }
-func (f *fakeCore) AbortMultipartUpload(ctx context.Context, bucket, object, uploadID string) error {
-	return nil
+func (f *fakeCore) UploadPart(ctx context.Context, params *s3.UploadPartInput, optFns ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
+	return nil, f.err
+}
+func (f *fakeCore) CompleteMultipartUpload(ctx context.Context, params *s3.CompleteMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	return nil, f.err
+}
+func (f *fakeCore) AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	return nil, f.err
 }
 
+var (
+	v1Obj = func(key string) types.Object {
+		return types.Object{Key: aws.String(key), ETag: aws.String(`"0123456789abcdef0123456789abcdef"`)}
+	}
+	v2Obj = v1Obj
+)
+
 // TestListPageV1_UsesMarkerAndNextMarker verifies that with
-// ListAPIVersion=1, S3Client.ListPage calls Core.ListObjects (not V2),
-// passes the startAfter/marker correctly, and returns NextMarker as the
+// ListAPIVersion=1, S3Client.ListPage calls ListObjects (not V2), passes
+// the startAfter/marker correctly, and returns NextMarker as the
 // next cursor when the response is truncated.
 func TestListPageV1_UsesMarkerAndNextMarker(t *testing.T) {
 	core := &fakeCore{
-		v1Result: minio.ListBucketResult{
-			Contents:    []minio.ObjectInfo{{Key: "a", ETag: `"0123456789abcdef0123456789abcdef"`}},
-			IsTruncated: true,
-			NextMarker:  "next-marker-from-s3",
+		v1Result: &s3.ListObjectsOutput{
+			Contents:    []types.Object{v1Obj("a")},
+			IsTruncated: aws.Bool(true),
+			NextMarker:  aws.String("next-marker-from-s3"),
 		},
 	}
-	c := &S3Client{core: core, bucket: "bk", stats: NewStats(), cfg: &Config{ListAPIVersion: 1}}
+	c := &S3Client{api: core, bucket: "bk", stats: NewStats(), cfg: &Config{ListAPIVersion: 1}}
 
 	// First call: startAfter="seed-key", continuationToken="" → marker should
 	// be "seed-key".
@@ -122,17 +137,17 @@ func TestListPageV1_UsesMarkerAndNextMarker(t *testing.T) {
 // implementation falls back to the last Contents key as the next marker.
 func TestListPageV1_LastKeyFallback(t *testing.T) {
 	core := &fakeCore{
-		v1Result: minio.ListBucketResult{
-			Contents: []minio.ObjectInfo{
-				{Key: "k1", ETag: `"0123456789abcdef0123456789abcdef"`},
-				{Key: "k2", ETag: `"0123456789abcdef0123456789abcdef"`},
-				{Key: "lastkey", ETag: `"0123456789abcdef0123456789abcdef"`},
+		v1Result: &s3.ListObjectsOutput{
+			Contents: []types.Object{
+				v1Obj("k1"),
+				v1Obj("k2"),
+				v1Obj("lastkey"),
 			},
-			IsTruncated: true,
-			// NextMarker intentionally empty — no delimiter was used.
+			IsTruncated: aws.Bool(true),
+			// NextMarker intentionally nil — no delimiter was used.
 		},
 	}
-	c := &S3Client{core: core, bucket: "bk", stats: NewStats(), cfg: &Config{ListAPIVersion: 1}}
+	c := &S3Client{api: core, bucket: "bk", stats: NewStats(), cfg: &Config{ListAPIVersion: 1}}
 
 	_, _, next, err := c.ListPage(context.Background(), "pfx/", "", "", false, 1000)
 	if err != nil {
@@ -147,12 +162,12 @@ func TestListPageV1_LastKeyFallback(t *testing.T) {
 // yields next="" so the caller stops paginating.
 func TestListPageV1_NotTruncated(t *testing.T) {
 	core := &fakeCore{
-		v1Result: minio.ListBucketResult{
-			Contents:    []minio.ObjectInfo{{Key: "only", ETag: `"0123456789abcdef0123456789abcdef"`}},
-			IsTruncated: false,
+		v1Result: &s3.ListObjectsOutput{
+			Contents:    []types.Object{v1Obj("only")},
+			IsTruncated: aws.Bool(false),
 		},
 	}
-	c := &S3Client{core: core, bucket: "bk", stats: NewStats(), cfg: &Config{ListAPIVersion: 1}}
+	c := &S3Client{api: core, bucket: "bk", stats: NewStats(), cfg: &Config{ListAPIVersion: 1}}
 
 	_, _, next, err := c.ListPage(context.Background(), "pfx/", "", "", true, 1000)
 	if err != nil {
@@ -164,17 +179,17 @@ func TestListPageV1_NotTruncated(t *testing.T) {
 }
 
 // TestListPageV2_Regression verifies the default (V2) path still calls
-// Core.ListObjectsV2 and uses NextContinuationToken as the cursor.
+// ListObjectsV2 and uses NextContinuationToken as the cursor.
 func TestListPageV2_Regression(t *testing.T) {
 	core := &fakeCore{
-		v2Result: minio.ListBucketV2Result{
-			Contents:              []minio.ObjectInfo{{Key: "a", ETag: `"0123456789abcdef0123456789abcdef"`}},
-			IsTruncated:           true,
-			NextContinuationToken: "tok-v2",
+		v2Result: &s3.ListObjectsV2Output{
+			Contents:              []types.Object{v2Obj("a")},
+			IsTruncated:           aws.Bool(true),
+			NextContinuationToken: aws.String("tok-v2"),
 		},
 	}
 	// ListAPIVersion=0 should fall through to the V2 branch (default).
-	c := &S3Client{core: core, bucket: "bk", stats: NewStats(), cfg: &Config{ListAPIVersion: 0}}
+	c := &S3Client{api: core, bucket: "bk", stats: NewStats(), cfg: &Config{ListAPIVersion: 0}}
 
 	_, _, next, err := c.ListPage(context.Background(), "pfx/", "", "prev-tok", true, 1000)
 	if err != nil {
@@ -188,5 +203,21 @@ func TestListPageV2_Regression(t *testing.T) {
 	}
 	if next != "tok-v2" {
 		t.Errorf("next=%q want %q", next, "tok-v2")
+	}
+}
+
+// TestListPageV2_SetsFetchOwner pins the V2 request shape that keeps
+// per-owner output partitioning working: minio-go always sent fetch-owner
+// on the wire; the aws SDK does NOT default it, so ListPage must set it
+// explicitly or every OwnerID comes back empty and all results collapse
+// into _unknown/.
+func TestListPageV2_SetsFetchOwner(t *testing.T) {
+	core := &fakeCore{v2Result: &s3.ListObjectsV2Output{}}
+	c := &S3Client{api: core, bucket: "bk", stats: NewStats(), cfg: &Config{ListAPIVersion: 2}}
+	if _, _, _, err := c.ListPage(context.Background(), "p", "", "", false, 100); err != nil {
+		t.Fatal(err)
+	}
+	if !core.lastV2FetchOwner {
+		t.Error("V2 request must set FetchOwner=true (owner-driven output partitioning depends on it)")
 	}
 }

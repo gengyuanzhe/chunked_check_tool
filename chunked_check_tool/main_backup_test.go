@@ -112,7 +112,7 @@ func (f *fakeBackupS3Server) handle(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(404)
 			return
 		}
-		content := decodeAwsChunkedBytes(reqBody)
+		content := decodePutBody(r, reqBody)
 		partNum, _ := strconv.Atoi(q.Get("partNumber"))
 		parts[partNum] = content
 		w.Header().Set("ETag", `"`+md5Hex(content)+`"`)
@@ -168,7 +168,7 @@ func (f *fakeBackupS3Server) handle(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == "PUT":
 		// Regular PUT: the list-file archive or a regular-object relay.
-		content := decodeAwsChunkedBytes(reqBody)
+		content := decodePutBody(r, reqBody)
 		key := strings.TrimPrefix(path, "/dstbucket/")
 		f.relayed[key] = content
 		f.relayETag[key] = md5Hex(content)
@@ -214,6 +214,19 @@ func parseRange(rng string, size int) (start, end int, err error) {
 // decodeAwsChunkedBytes is decodeAwsChunked for []byte.
 func decodeAwsChunkedBytes(b []byte) []byte {
 	return []byte(decodeAwsChunked(b))
+}
+
+// decodePutBody decodes a PUT body by its Content-Encoding: an aws-chunked
+// framed body (the SDK's non-seekable streaming form under TLS-trailer
+// signing, or minio-go's signed chunks) needs the framing stripped; a raw
+// body (seekable source signed with a full payload hash, or
+// UNSIGNED-PAYLOAD relays) must pass through untouched. Decoding a raw body
+// with decodeAwsChunked yields "" — every relayed byte would vanish.
+func decodePutBody(r *http.Request, body []byte) []byte {
+	if r.Header.Get("Content-Encoding") == "aws-chunked" {
+		return decodeAwsChunkedBytes(body)
+	}
+	return body
 }
 
 var _ = bytes.MinRead // keep bytes import if unused elsewhere

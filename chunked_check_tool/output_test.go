@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/minio/minio-go/v7"
 )
 
 // ownerSub returns the path to a per-owner file: <dir>/<ownerID>/<name>.
@@ -244,12 +242,7 @@ func TestOutputListFailedLogStructured(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: false}
 	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
-	er := minio.ErrorResponse{
-		Code:       "InternalError",
-		Message:    "we crashed",
-		StatusCode: 500,
-		RequestID:  "REQ-LF-1",
-	}
+	er := fakeS3Err(500, "InternalError", "we crashed", "REQ-LF-1")
 	o.WriteListFailed("prefix/x", "")
 	o.WriteListFailedLog("prefix/x", extractHTTPStatusCode(er), extractS3Code(er), extractRequestID(er), er)
 	if err := o.Close(); err != nil {

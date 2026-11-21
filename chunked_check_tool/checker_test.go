@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/minio/minio-go/v7"
 )
 
 func TestIsNormalETag(t *testing.T) {
@@ -142,12 +140,7 @@ func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 	cfg := &Config{OutputDir: dir, IsCheck: true}
 	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	s := NewStats()
-	worker := &FakeS3{Err: minio.ErrorResponse{
-		Code:       "InvalidRange",
-		Message:    "The requested range is not satisfiable",
-		StatusCode: 416,
-		RequestID:  "REQ-1234-ABCD",
-	}}
+	worker := &FakeS3{Err: fakeS3Err(416, "InvalidRange", "The requested range is not satisfiable", "REQ-1234-ABCD")}
 	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "path/obj", Size: 1, IsMultipart: false, Offsets: nil})
 	if err := out.Close(); err != nil {
@@ -790,7 +783,7 @@ func TestCheckerHeadFirstHeadFailureRoutesToMpCheckFailed(t *testing.T) {
 	out, _ := NewOutput(cfg, "mybucket", FileInputCheckFile) // file input → mp_check_failed enabled
 	s := NewStats()
 
-	worker := &FakeS3{HeadErr: minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}}
+	worker := &FakeS3{HeadErr: fakeS3Err(404, "NoSuchKey", "", "")}
 	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", IsMultipart: true, Offsets: []int64{0, 5242880}, HeadFirst: true})
 
@@ -828,7 +821,7 @@ func TestCheckerHeadFirstHeadFailureRegularRoutesToCheckFailed(t *testing.T) {
 	out, _ := NewOutput(cfg, "mybucket", FileInputCheckFile)
 	s := NewStats()
 
-	worker := &FakeS3{HeadErr: minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}}
+	worker := &FakeS3{HeadErr: fakeS3Err(404, "NoSuchKey", "", "")}
 	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", HeadFirst: true})
 

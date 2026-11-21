@@ -16,7 +16,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/minio/minio-go/v7"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 func TestFakeS3ListPage(t *testing.T) {
@@ -103,20 +105,20 @@ func TestIsNodeFaultErr(t *testing.T) {
 		{"no such host", errors.New("no such host"), true},
 		{"conn reset", errors.New("read tcp 10.0.0.1:1->10.0.0.2:9000: connection reset by peer"), true},
 		{"EOF", errors.New("unexpected EOF"), true},
-		{"5xx InternalError", minio.ErrorResponse{Code: "InternalError", StatusCode: 500}, true},
-		{"5xx SlowDown", minio.ErrorResponse{Code: "SlowDown", StatusCode: 503}, true},
-		{"4xx NoSuchKey", minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}, false},
-		{"4xx AccessDenied", minio.ErrorResponse{Code: "AccessDenied", StatusCode: 403}, false},
+		{"5xx InternalError", fakeS3Err(500, "InternalError", "", ""), true},
+		{"5xx SlowDown", fakeS3Err(503, "SlowDown", "", ""), true},
+		{"4xx NoSuchKey", fakeS3Err(404, "NoSuchKey", "", ""), false},
+		{"4xx AccessDenied", fakeS3Err(403, "AccessDenied", "", ""), false},
 		// A 4xx whose server-written Message contains transport-flavored
-		// words must stay a business error: the ErrorResponse type check
+		// words must stay a business error: the ResponseError type check
 		// runs BEFORE the substring heuristics.
-		{"4xx message says timeout", minio.ErrorResponse{Code: "BadRequest", Message: "request body read timeout", StatusCode: 400}, false},
-		{"4xx message says EOF", minio.ErrorResponse{Code: "NoSuchKey", Message: "unexpected EOF while reading", StatusCode: 404}, false},
-		{"4xx message says transport", minio.ErrorResponse{Code: "BadRequest", Message: "transport layer rejected the request", StatusCode: 400}, false},
+		{"4xx message says timeout", fakeS3Err(400, "BadRequest", "request body read timeout", ""), false},
+		{"4xx message says EOF", fakeS3Err(404, "NoSuchKey", "unexpected EOF while reading", ""), false},
+		{"4xx message says transport", fakeS3Err(400, "BadRequest", "transport layer rejected the request", ""), false},
 		// 501/505 are capability/protocol gaps every node shares — never
 		// isolate on them.
-		{"501 NotImplemented", minio.ErrorResponse{Code: "NotImplemented", StatusCode: 501}, false},
-		{"505 VersionNotSupported", minio.ErrorResponse{Code: "HttpVersionNotSupported", StatusCode: 505}, false},
+		{"501 NotImplemented", fakeS3Err(501, "NotImplemented", "", ""), false},
+		{"505 VersionNotSupported", fakeS3Err(505, "HttpVersionNotSupported", "", ""), false},
 		{"random business error", errors.New("random business error"), false},
 	}
 	for _, c := range cases {
@@ -143,20 +145,20 @@ func TestTrimETagQuotes(t *testing.T) {
 }
 
 // TestListPagePopulatesOwnerID verifies S3Client.ListPage extracts Owner.ID
-// from the minio.ObjectInfo returned by the LIST response into ObjectInfo.
+// from the LIST response's types.Object into ObjectInfo.
 // OwnerID drives per-owner output partitioning, so a missing or wrong OwnerID
 // would route writes to the wrong subfolder.
 func TestListPagePopulatesOwnerID(t *testing.T) {
 	core := &fakeCore{
-		v2Result: minio.ListBucketV2Result{
-			Contents: []minio.ObjectInfo{
-				{Key: "a", ETag: `"0123456789abcdef0123456789abcdef"`, Owner: minio.Owner{ID: "owner-1234"}},
-				{Key: "b", ETag: `"abc-2"`, Owner: minio.Owner{ID: "owner-5678"}},
-				{Key: "c", ETag: `"def-3"`}, // no owner → empty OwnerID
+		v2Result: &s3.ListObjectsV2Output{
+			Contents: []types.Object{
+				{Key: aws.String("a"), ETag: aws.String(`"0123456789abcdef0123456789abcdef"`), Owner: &types.Owner{ID: aws.String("owner-1234")}},
+				{Key: aws.String("b"), ETag: aws.String(`"abc-2"`), Owner: &types.Owner{ID: aws.String("owner-5678")}},
+				{Key: aws.String("c"), ETag: aws.String(`"def-3"`)}, // no owner → empty OwnerID
 			},
 		},
 	}
-	c := &S3Client{core: core, bucket: "bk", stats: NewStats(), cfg: &Config{ListAPIVersion: 2}}
+	c := &S3Client{api: core, bucket: "bk", stats: NewStats(), cfg: &Config{ListAPIVersion: 2}}
 	objs, _, _, err := c.ListPage(context.Background(), "p", "", "", false, 100)
 	if err != nil {
 		t.Fatal(err)
@@ -174,11 +176,11 @@ func TestListPagePopulatesOwnerID(t *testing.T) {
 
 // --- Node-fault failover (threshold isolation) ---
 
-// failoverSrv is a one-page S3 LIST stub: answers the ?location= probe and
-// serves one object per LIST. failList makes every (or the first N) LIST
-// calls fail with HTTP 507 — a 5xx code that minio-go does NOT internally
-// retry (its retryable set is 408/429/499/500/502/503/504/520), so each
-// ListPage surfaces exactly one fault to S3Client's failover logic.
+// failoverSrv is a one-page S3 LIST stub: serves one object per LIST.
+// failList makes every (or the first N) LIST calls fail with HTTP 507 —
+// a 5xx code the aws SDK's standard retryer does NOT internally retry
+// (its retryable status set is 500/502/503/504), so each ListPage surfaces
+// exactly one fault to S3Client's failover logic.
 type failoverSrv struct {
 	srv       *httptest.Server
 	failFirst int64 // atomic: >0 → fail this many LIST calls, then serve
@@ -189,11 +191,6 @@ type failoverSrv struct {
 func newFailoverSrv(t *testing.T, failAll bool) *failoverSrv {
 	f := &failoverSrv{failAll: failAll}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.RawQuery == "location=" {
-			w.Header().Set("Content-Type", "application/xml")
-			w.Write([]byte(`<LocationConstraint>us-east-1</LocationConstraint>`))
-			return
-		}
 		if f.failAll || atomic.AddInt64(&f.failFirst, -1) >= 0 {
 			atomic.AddInt64(&f.listCalls, 1)
 			w.Header().Set("Content-Type", "application/xml")
@@ -228,7 +225,7 @@ func TestS3ClientFailoverIsolateAfterThreshold(t *testing.T) {
 
 	// Two workers, both initially bound to node A.
 	mk := func() *S3Client {
-		client, err := NewMinioClient(nodeA.host(), "ak", "sk", false, false, 0, 0)
+		client, err := NewAWSClient(nodeA.host(), "ak", "sk", false, 0, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -269,7 +266,7 @@ func TestS3ClientTransientFaultRetriesOnOtherNode(t *testing.T) {
 	atomic.StoreInt64(&nodeA.failFirst, 1) // first LIST on A fails, then A is healthy
 	nodeB := newFailoverSrv(t, false)
 	pool := NewNodePool(&Config{Endpoints: []string{nodeA.host(), nodeB.host()}, Scheme: "http", NodeIsolateThreshold: 3})
-	client, err := NewMinioClient(nodeA.host(), "ak", "sk", false, false, 0, 0)
+	client, err := NewAWSClient(nodeA.host(), "ak", "sk", false, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +296,7 @@ func TestS3ClientTransientFaultSingleNodeSameNode(t *testing.T) {
 	nodeA := newFailoverSrv(t, false)
 	atomic.StoreInt64(&nodeA.failFirst, 1) // first LIST fails, then healthy
 	pool := NewNodePool(&Config{Endpoints: []string{nodeA.host()}, Scheme: "http", NodeIsolateThreshold: 3})
-	client, err := NewMinioClient(nodeA.host(), "ak", "sk", false, false, 0, 0)
+	client, err := NewAWSClient(nodeA.host(), "ak", "sk", false, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,26 +316,16 @@ func TestS3ClientTransientFaultSingleNodeSameNode(t *testing.T) {
 // --- HeadObject / CopyObject / PutObject (backup-mode S3 ops) ---
 
 // newOpsTestClient builds an S3Client bound to an httptest server that
-// speaks just enough S3 for HeadObject/CopyObject/PutObject. The server
-// host is 127.0.0.1:<port>, so BucketLookupAuto resolves to path style and
-// the handler sees /<bucket>/<key>. The ?location= probe that minio-go
-// issues before the first API call is answered with us-east-1 so it does
-// not leak into the user handler.
+// speaks just enough S3 for HeadObject/GetObject/PutObject. The aws client
+// pins UsePathStyle, so the handler sees /<bucket>/<key> on the wire.
 func newOpsTestClient(t *testing.T, h http.HandlerFunc) *S3Client {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.RawQuery == "location=" {
-			w.Header().Set("Content-Type", "application/xml")
-			w.Write([]byte(`<LocationConstraint>us-east-1</LocationConstraint>`))
-			return
-		}
-		h(w, r)
-	}))
+	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	host := strings.TrimPrefix(srv.URL, "http://")
-	client, err := NewMinioClient(host, "ak", "sk", false, false, 0, 0)
+	client, err := NewAWSClient(host, "ak", "sk", false, 0, 0)
 	if err != nil {
-		t.Fatalf("NewMinioClient: %v", err)
+		t.Fatalf("NewAWSClient: %v", err)
 	}
 	return NewS3Client(client, "srcbucket", NewStats(), nil, -1, &Config{})
 }
@@ -506,9 +493,11 @@ func TestS3ClientDownloadRangeContentLengthMismatch(t *testing.T) {
 
 func TestS3ClientPutObjectLocal(t *testing.T) {
 	var gotPath string
+	var gotContentEncoding string
 	var gotBody bytes.Buffer
 	c := newOpsTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
+		gotContentEncoding = r.Header.Get("Content-Encoding")
 		io.Copy(&gotBody, r.Body)
 		w.Header().Set("ETag", `"d41d8cd98f00b204e9800998ecf8427e"`)
 		w.WriteHeader(200)
@@ -525,8 +514,17 @@ func TestS3ClientPutObjectLocal(t *testing.T) {
 	if gotPath != "/dstbucket/.backup_lists/list.txt" {
 		t.Errorf("path = %q, want /dstbucket/.backup_lists/list.txt", gotPath)
 	}
-	if decodeAwsChunked(gotBody.Bytes()) != content {
-		t.Errorf("body = %q, want %q", decodeAwsChunked(gotBody.Bytes()), content)
+	// A seekable file body is signed with a full payload hash and arrives
+	// raw; only non-seekable streams go out aws-chunked framed. The stub
+	// keeps the conditional so it stays correct under either wire form.
+	var body string
+	if gotContentEncoding == "aws-chunked" {
+		body = decodeAwsChunked(gotBody.Bytes())
+	} else {
+		body = gotBody.String()
+	}
+	if body != content {
+		t.Errorf("body = %q, want %q", body, content)
 	}
 	if etag != "d41d8cd98f00b204e9800998ecf8427e" {
 		t.Errorf("etag = %q, want server-returned etag quotes stripped", etag)
@@ -554,18 +552,15 @@ func TestS3ClientPutObjectLocalNodeFaultReopen(t *testing.T) {
 	var putCalls int
 	var bodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.RawQuery == "location=" {
-			w.Write([]byte(`<LocationConstraint>us-east-1</LocationConstraint>`))
-			return
-		}
 		if r.Method != http.MethodPut {
 			w.WriteHeader(404)
 			return
 		}
 		b, _ := io.ReadAll(r.Body)
-		// Decode by Content-Encoding: a signed PUT over plain HTTP arrives
-		// aws-chunked framed (streaming SigV4); the conditional keeps the
-		// stub correct even if the request arrives unsigned/raw.
+		// Decode by Content-Encoding: a non-seekable stream PUT over plain
+		// HTTP arrives aws-chunked framed (the SDK's only streaming wire
+		// form); a seekable file PUT arrives raw. The conditional keeps the
+		// stub correct under either.
 		var content string
 		if r.Header.Get("Content-Encoding") == "aws-chunked" {
 			content = decodeAwsChunked(b)
@@ -578,8 +573,9 @@ func TestS3ClientPutObjectLocalNodeFaultReopen(t *testing.T) {
 		bodies = append(bodies, content)
 		mu.Unlock()
 		if n == 1 {
-			// 507: a 5xx outside minio-go's internally-retried set, so the
-			// fault surfaces to S3Client's failover leg exactly once.
+			// 507: a 5xx outside the aws SDK's internally-retried status set
+			// (500/502/503/504), so the fault surfaces to S3Client's
+			// failover leg exactly once.
 			w.WriteHeader(507)
 			w.Write([]byte(`<Error><Code>InsufficientStorage</Code><Message>node is bad</Message></Error>`))
 			return
@@ -591,7 +587,7 @@ func TestS3ClientPutObjectLocalNodeFaultReopen(t *testing.T) {
 	host := strings.TrimPrefix(srv.URL, "http://")
 
 	pool := NewNodePool(&Config{Endpoints: []string{host}, Scheme: "http", NodeIsolateThreshold: 3})
-	client, err := NewMinioClient(host, "ak", "sk", false, false, 0, 0)
+	client, err := NewAWSClient(host, "ak", "sk", false, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -752,6 +748,66 @@ func TestS3ClientMultipartFlow(t *testing.T) {
 
 	if err := c.AbortMultipart(context.Background(), "dstbucket", "k", "uid-2"); err != nil {
 		t.Fatalf("abort: %v", err)
+	}
+}
+
+// TestListPageShortBucketName — minio-go rejected bucket names shorter than
+// 3 chars client-side (the S3 3-63 rule) before any request left the process,
+// so buckets the self-developed S3 happily serves were unreachable. The
+// aws-sdk-go-v2 path-style client does no such validation: a 2-char bucket
+// must reach the wire as a plain path segment.
+func TestListPageShortBucketName(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>ab</Name><Prefix></Prefix><KeyCount>1</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>
+<Contents><Key>k1</Key><LastModified>2026-09-13T00:00:00.000Z</LastModified><ETag>"0123456789abcdef0123456789abcdef"</ETag><Size>1</Size><StorageClass>STANDARD</StorageClass></Contents>
+</ListBucketResult>`)
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+	client, err := NewAWSClient(host, "ak", "sk", false, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewS3Client(client, "ab", NewStats(), nil, -1, &Config{ListAPIVersion: 2})
+	objs, _, _, err := c.ListPage(context.Background(), "", "", "", false, 1000)
+	if err != nil {
+		t.Fatalf("short bucket name must reach the wire instead of being rejected client-side: %v", err)
+	}
+	if gotPath != "/ab" {
+		t.Errorf("request path = %q, want /ab", gotPath)
+	}
+	if len(objs) != 1 || objs[0].Key != "k1" {
+		t.Errorf("objs = %v, want one object k1", objs)
+	}
+}
+
+// TestHeadObjectShortBucketName — the same client-side rejection applied to
+// every minio-go call; HEAD is the backup mode's type gate, so it gets its
+// own pin.
+func TestHeadObjectShortBucketName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"0123456789abcdef0123456789abcdef"`)
+		w.Header().Set("Content-Length", "1")
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+	client, err := NewAWSClient(host, "ak", "sk", false, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewS3Client(client, "ab", NewStats(), nil, -1, &Config{})
+	etag, size, err := c.HeadObject(context.Background(), "k1")
+	if err != nil {
+		t.Fatalf("HEAD with 2-char bucket must reach the wire: %v", err)
+	}
+	if etag != "0123456789abcdef0123456789abcdef" || size != 1 {
+		t.Errorf("HEAD result = %q/%d, want etag quotes stripped and size 1", etag, size)
 	}
 }
 

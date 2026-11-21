@@ -10,10 +10,40 @@ import (
 	"crypto/md5"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
+
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
+	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
+
+// fakeS3Err builds an error shaped like the ones the aws SDK returns for a
+// failed S3 call: a smithy.OperationError wrapping an *awshttp.ResponseError
+// (carrying the HTTP response) wrapping the API error. Production code
+// inspects it via errors.As on *awshttp.ResponseError (status, request id)
+// and smithy.APIError (S3 error code) — both unwrap paths work on this
+// builder, so tests exercise the real extraction logic.
+func fakeS3Err(status int, code, msg, reqID string) error {
+	h := http.Header{}
+	h.Set("x-amz-request-id", reqID) // Set canonicalizes the key; a raw lowercase map key would be invisible to Header.Get
+	return &smithy.OperationError{
+		ServiceID:     "S3",
+		OperationName: "HeadObject",
+		Err: &awshttp.ResponseError{
+			ResponseError: &smithyhttp.ResponseError{
+				Response: &smithyhttp.Response{Response: &http.Response{
+					StatusCode: status,
+					Header:     h,
+				}},
+				Err: &smithy.GenericAPIError{Code: code, Message: msg},
+			},
+			RequestID: reqID,
+		},
+	}
+}
 
 // FakeS3 is an in-memory S3API for testing.
 type FakeS3 struct {

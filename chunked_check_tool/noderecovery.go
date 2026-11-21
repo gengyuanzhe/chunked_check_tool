@@ -12,6 +12,9 @@ package main
 import (
 	"context"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 // nodeRecoverSuccesses is how many consecutive healthy probe rounds an
@@ -27,14 +30,14 @@ const nodeRecoverSuccesses = 2
 // transport faults and 5xx (!isNodeFaultErr) do not — recovery requires the
 // faults that caused the isolation to have stopped.
 func probeNode(cfg *Config, bucket, endpoint string) bool {
-	client, err := NewMinioClient(endpoint, cfg.AK, cfg.SK, cfg.Scheme == "https", false,
+	client, err := NewAWSClient(endpoint, cfg.AK, cfg.SK, cfg.Scheme == "https",
 		time.Duration(cfg.DialTimeout)*time.Second, time.Duration(cfg.ResponseHeaderTimeout)*time.Second)
 	if err != nil {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err = client.BucketExists(ctx, bucket)
+	_, err = client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
 	return !isNodeFaultErr(err)
 }
 

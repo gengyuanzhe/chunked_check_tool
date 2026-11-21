@@ -8,78 +8,45 @@
 //	<32hex-md5>-<partcnt>-<off0>|<off1>|...
 //
 // The header never participates in SigV2/SigV4 signature calculation (only
-// x-amz-* headers must be signed), so it is injected at the transport layer
-// after signing — no custom request building needed.
+// host, x-amz-*, and content-type headers are signed), so adding it at
+// middleware Build time — before the signer runs — has the same semantics
+// as the old transport-after-sign injection: the server that checks
+// signatures never sees it included in them.
 package main
 
 import (
-	"net/http"
+	"context"
 	"strconv"
 	"strings"
+
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 // mpOffsetListHeader is the internal repair-scenario header. Not part of any
 // public API contract; never expose in external docs.
 const mpOffsetListHeader = "internal-list-mp-offset"
 
-// mpOffsetTransport wraps the base transport and adds mpOffsetListHeader to
-// LIST requests only. Everything else passes through untouched.
-type mpOffsetTransport struct {
-	base http.RoundTripper
-}
-
-func (t *mpOffsetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if isListRequest(req) {
-		// Clone before mutating: minio-go reuses one request object across
-		// its internal retry loop, so the caller's header map must stay
-		// untouched.
-		r := req.Clone(req.Context())
-		r.Header.Set(mpOffsetListHeader, "true")
-		return t.base.RoundTrip(r)
-	}
-	return t.base.RoundTrip(req)
-}
-
-// isListRequest reports whether req is a bucket LIST the tool would issue
-// through minio-go v7.3.0's Core API. The shapes are pinned by
-// TestMpOffsetTransportMinioList; a minio-go upgrade must re-verify them.
-//
-//   - Method must be GET.
-//   - Path is the bucket root (at most one non-empty segment), so object
-//     GETs (path-style /<bucket>/<key>) are excluded. Virtual-host style
-//     (path "/" or "/<key>") is covered by the query checks below.
-//   - ListObjectsV2: query carries list-type=2.
-//   - ListObjects V1: query is non-empty and every key is one of
-//     prefix/delimiter/encoding-type/marker/max-keys — exactly the set
-//     minio-go emits. This excludes bucket subresource probes (?location,
-//     ?policy) and object-level params (versionId, partNumber, uploadId).
-//
-// A bare GET /<bucket> with no query at all (V1 list with all defaults) is
-// deliberately NOT matched: minio-go always sends prefix/delimiter/
-// encoding-type, so such a request never originates from this tool, and
-// conservative non-injection is the safer default.
-func isListRequest(req *http.Request) bool {
-	if req.Method != http.MethodGet {
-		return false
-	}
-	if strings.Count(strings.Trim(req.URL.Path, "/"), "/") > 1 {
-		return false
-	}
-	q := req.URL.Query()
-	if q.Get("list-type") == "2" {
-		return true
-	}
-	if len(q) == 0 {
-		return false
-	}
-	for k := range q {
-		switch k {
-		case "prefix", "delimiter", "encoding-type", "marker", "max-keys":
-		default:
-			return false
-		}
-	}
-	return true
+// withMpOffsetListHeader is a per-call s3.Options mutator that adds
+// internal-list-mp-offset: true to exactly the one request it is passed to.
+// s3client passes it on ListObjects / ListObjectsV2 calls only (see
+// listPageOnce), so "LIST requests only, never HEAD/GET/PUT" is structural —
+// no request-shape sniffing and no transport wrapping, which is what the
+// old minio-go transport needed (its Core API had no per-call header hook,
+// and the shape pinning broke on every SDK upgrade).
+func withMpOffsetListHeader(o *s3.Options) {
+	o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
+		return stack.Build.Add(middleware.BuildMiddlewareFunc(
+			"mpOffsetListHeader",
+			func(ctx context.Context, in middleware.BuildInput, next middleware.BuildHandler) (middleware.BuildOutput, middleware.Metadata, error) {
+				if req, ok := in.Request.(*smithyhttp.Request); ok {
+					req.Header.Set(mpOffsetListHeader, "true")
+				}
+				return next.HandleBuild(ctx, in)
+			},
+		), middleware.After)
+	})
 }
 
 // parseMultipartOffsetETag parses the offset-carrying multipart ETag
