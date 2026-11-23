@@ -10,12 +10,12 @@ import (
 )
 
 // TestRunIntegration_FakeS3 documents the intended integration surface.
-// A real run needs a live minio/S3 because run() builds minio clients via
-// newWorker -> NewMinioClient, which cannot be injected with a FakeS3
+// A real run needs a live S3 because run() builds s3 clients via
+// newWorker -> NewAWSClient, which cannot be injected with a FakeS3
 // without refactoring the worker factory. The test is therefore skipped
 // in CI; run it manually against a real endpoint (see TestRunEndToEnd_smoke).
 func TestRunIntegration_FakeS3(t *testing.T) {
-	t.Skip("integration test requires real minio; see manual test plan")
+	t.Skip("integration test requires real S3; see manual test plan")
 }
 
 // TestRunEndToEnd_smoke drives the full run() against a real endpoint
@@ -181,8 +181,8 @@ func envOr(key, def string) string {
 // (main.go: close→wait→summary→return). It uses a list file containing a
 // single malformed line (bucket mismatch), which parseListFileLine rejects
 // before any S3 GET is issued, so no real endpoint is contacted. The
-// endpoint 127.0.0.1:1 is a placeholder — minio client construction is lazy
-// (no dial), and check workers receive no tasks because objCh is closed
+// endpoint 127.0.0.1:1 is a placeholder — s3 client construction makes no
+// network calls, and check workers receive no tasks because objCh is closed
 // immediately after the list-file source rejects the only line.
 func TestRunListFileDispatch(t *testing.T) {
 	dir := t.TempDir()

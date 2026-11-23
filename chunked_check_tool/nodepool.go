@@ -142,7 +142,7 @@ func (p *NodePool) URL(idx int) string {
 }
 
 // Endpoint returns the raw host:port of node idx. Used by worker factory
-// to bind a minio client to a specific node without touching private fields.
+// to bind an s3 client to a specific node without touching private fields.
 func (p *NodePool) Endpoint(idx int) string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

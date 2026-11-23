@@ -42,9 +42,10 @@ func TestParseListFileLine(t *testing.T) {
 			wantErr: "empty key",
 		},
 		{
-			// Whitespace-only keys are rejected by minio-go's own
-			// CheckValidObjectName, so reject them at parse time with a
-			// resolvable line number instead of a per-call failure entry.
+			// Whitespace-only keys are rejected at parse time with a
+			// resolvable line number instead of a per-call failure entry
+			// (minio-go client-side rejection used to catch them; the aws SDK
+			// does not client-validate, so this is our own input hygiene).
 			name:    "whitespace-only key",
 			line:    "mybucket| |1|0",
 			wantErr: "empty key",

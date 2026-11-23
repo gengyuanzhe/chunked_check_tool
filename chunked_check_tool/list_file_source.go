@@ -37,9 +37,11 @@ func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyT
 	if bkt != expectedBucket {
 		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: fmt.Sprintf("bucket mismatch: got %q want %q", bkt, expectedBucket)}
 	}
-	// TrimSpace matches minio-go's CheckValidObjectName: whitespace-only keys
-	// would fail per-call anyway — reject them here with a resolvable line
-	// number (parse_failed) instead of per-object failure entries.
+	// TrimSpace rejects whitespace-only keys at parse time: minio-go's
+	// CheckValidObjectName used to fail them per call; the aws SDK has no
+	// such client check, so this is now our own input hygiene — reject
+	// here with a resolvable line number (parse_failed) instead of
+	// per-object failure entries.
 	if strings.TrimSpace(key) == "" {
 		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: "empty key"}
 	}
