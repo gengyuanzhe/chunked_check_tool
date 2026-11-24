@@ -9,10 +9,12 @@ import (
 
 // parseListFileLine parses one line of the -list-file input.
 //
-// Format: bkt|key|partcnt|offset0|offset1|...
+// Format: bkt\x1fkey\x1fpartcnt\x1foffset0\x1foffset1\x1f... (key
+// URL-escaped at the write boundary; plain keys without special characters
+// are their own escape form, so handwritten lines keep working).
 //
 // Semantic rules (per spec §3.2):
-//   - bkt must equal expectedBucket
+//   - bkt must equal expectedBucket (CLI-provided, never escaped)
 //   - partcnt >= 1 and integer
 //   - exactly partcnt offsets follow
 //   - all offsets >= 0, strictly increasing
@@ -29,9 +31,9 @@ func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyT
 	if strings.TrimSpace(line) == "" {
 		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: "empty line"}
 	}
-	parts := strings.Split(line, "|")
+	parts := strings.Split(line, rowSep)
 	if len(parts) < 3 {
-		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: "too few fields (want bkt|key|partcnt|offsets...)"}
+		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: "too few fields (want bkt\\x1fkey\\x1fpartcnt\\x1foffsets...)"}
 	}
 	bkt, key, partcntStr := parts[0], parts[1], parts[2]
 	if bkt != expectedBucket {
@@ -44,6 +46,10 @@ func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyT
 	// per-object failure entries.
 	if strings.TrimSpace(key) == "" {
 		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: "empty key"}
+	}
+	key, err := unescapeKey(key, line, lineNum)
+	if err != nil {
+		return VerifyTask{}, err
 	}
 	partcnt, err := strconv.Atoi(partcntStr)
 	if err != nil {

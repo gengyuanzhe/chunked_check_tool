@@ -21,24 +21,24 @@ func TestParseListFileLine(t *testing.T) {
 	}{
 		{
 			name:     "single part",
-			line:     "mybucket|k1|1|0",
+			line:     "mybucket\x1fk1\x1f1\x1f0",
 			wantKey:  "k1",
 			wantOffs: []int64{0},
 		},
 		{
 			name:     "three parts increasing",
-			line:     "mybucket|path/obj|3|0|5242880|10485760",
+			line:     "mybucket\x1fpath/obj\x1f3\x1f0\x1f5242880\x1f10485760",
 			wantKey:  "path/obj",
 			wantOffs: []int64{0, 5242880, 10485760},
 		},
 		{
 			name:    "bucket mismatch",
-			line:    "other|k|1|0",
+			line:    "other\x1fk\x1f1\x1f0",
 			wantErr: "bucket mismatch",
 		},
 		{
 			name:    "empty key",
-			line:    "mybucket||1|0",
+			line:    "mybucket\x1f\x1f1\x1f0",
 			wantErr: "empty key",
 		},
 		{
@@ -47,52 +47,52 @@ func TestParseListFileLine(t *testing.T) {
 			// (minio-go client-side rejection used to catch them; the aws SDK
 			// does not client-validate, so this is our own input hygiene).
 			name:    "whitespace-only key",
-			line:    "mybucket| |1|0",
+			line:    "mybucket\x1f \x1f1\x1f0",
 			wantErr: "empty key",
 		},
 		{
 			name:    "too few fields",
-			line:    "mybucket|k",
+			line:    "mybucket\x1fk",
 			wantErr: "too few fields",
 		},
 		{
 			name:    "partcnt not integer",
-			line:    "mybucket|k|x|0",
+			line:    "mybucket\x1fk\x1fx\x1f0",
 			wantErr: "partcnt not an integer",
 		},
 		{
 			name:    "partcnt zero",
-			line:    "mybucket|k|0",
+			line:    "mybucket\x1fk\x1f0",
 			wantErr: "partcnt must be >= 1",
 		},
 		{
 			name:    "offset count mismatch",
-			line:    "mybucket|k|3|0|5242880",
+			line:    "mybucket\x1fk\x1f3\x1f0\x1f5242880",
 			wantErr: "offset count != partcnt",
 		},
 		{
 			name:    "offset0 not zero",
-			line:    "mybucket|k|1|100",
+			line:    "mybucket\x1fk\x1f1\x1f100",
 			wantErr: "offset0 must be 0",
 		},
 		{
 			name:    "offset not integer",
-			line:    "mybucket|k|2|0|abc",
+			line:    "mybucket\x1fk\x1f2\x1f0\x1fabc",
 			wantErr: "offset not an integer",
 		},
 		{
 			name:    "offsets not strictly increasing",
-			line:    "mybucket|k|3|0|5242880|5242880",
+			line:    "mybucket\x1fk\x1f3\x1f0\x1f5242880\x1f5242880",
 			wantErr: "offsets must be strictly increasing",
 		},
 		{
 			name:    "offsets decreasing",
-			line:    "mybucket|k|3|0|5242880|100",
+			line:    "mybucket\x1fk\x1f3\x1f0\x1f5242880\x1f100",
 			wantErr: "offsets must be strictly increasing",
 		},
 		{
 			name:    "negative offset",
-			line:    "mybucket|k|2|0|-5",
+			line:    "mybucket\x1fk\x1f2\x1f0\x1f-5",
 			wantErr: "offset negative",
 		},
 		{
@@ -125,7 +125,7 @@ func TestParseListFileLine(t *testing.T) {
 }
 
 func TestParseListFileLineSuccessFields(t *testing.T) {
-	task, err := parseListFileLine("mybucket|path/obj|3|0|5242880|10485760", "mybucket", 42)
+	task, err := parseListFileLine("mybucket\x1fpath%2Fobj\x1f3\x1f0\x1f5242880\x1f10485760", "mybucket", 42)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,10 +161,10 @@ func TestListFileSourceRunEndToEnd(t *testing.T) {
 	stats := NewStats()
 
 	// File: 2 valid lines + 1 malformed (offset0 != 0) + 1 valid.
-	content := "mybucket|k1|1|0\n" +
-		"mybucket|k2|3|0|5242880|10485760\n" +
-		"mybucket|bad|1|100\n" +
-		"mybucket|k3|2|0|9999\n"
+	content := "mybucket\x1fk1\x1f1\x1f0\n" +
+		"mybucket\x1fk2\x1f3\x1f0\x1f5242880\x1f10485760\n" +
+		"mybucket\x1fbad\x1f1\x1f100\n" +
+		"mybucket\x1fk3\x1f2\x1f0\x1f9999\n"
 	filePath := filepath.Join(dir, "list.txt")
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		t.Fatal(err)
@@ -215,8 +215,8 @@ func TestListFileSourceRunEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read parse_failed.txt: %v", err)
 	}
-	if !strings.Contains(string(failedContent), "mybucket|bad|1|100") {
-		t.Errorf("parse_failed.txt = %q, want substring %q", string(failedContent), "mybucket|bad|1|100")
+	if !strings.Contains(string(failedContent), "mybucket\x1fbad\x1f1\x1f100") {
+		t.Errorf("parse_failed.txt = %q, want substring %q", string(failedContent), "mybucket\x1fbad\x1f1\x1f100")
 	}
 }
 
@@ -225,13 +225,13 @@ func TestListFileSourceRunEndToEnd(t *testing.T) {
 // list_failed for resumable debugging. A future refactor that drops these
 // fields would otherwise break silently.
 func TestParseListFileLineErrorFields(t *testing.T) {
-	_, err := parseListFileLine("mybucket|bad|1|100", "mybucket", 42)
+	_, err := parseListFileLine("mybucket\x1fbad\x1f1\x1f100", "mybucket", 42)
 	var mle *MalformedLineError
 	if !errors.As(err, &mle) {
 		t.Fatalf("expected *MalformedLineError, got %T: %v", err, err)
 	}
-	if mle.Line != "mybucket|bad|1|100" {
-		t.Errorf("Line = %q, want %q", mle.Line, "mybucket|bad|1|100")
+	if mle.Line != "mybucket\x1fbad\x1f1\x1f100" {
+		t.Errorf("Line = %q, want %q", mle.Line, "mybucket\x1fbad\x1f1\x1f100")
 	}
 	if mle.LineNum != 42 {
 		t.Errorf("LineNum = %d, want 42", mle.LineNum)

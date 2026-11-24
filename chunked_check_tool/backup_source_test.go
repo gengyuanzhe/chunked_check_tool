@@ -23,38 +23,38 @@ func TestParseBackupFileLine(t *testing.T) {
 	}{
 		{
 			name:    "regular two fields",
-			line:    "mybucket|k1",
+			line:    "mybucket\x1fk1",
 			wantKey: "k1",
 			wantMP:  false,
 		},
 		{
 			name:    "regular key with path",
-			line:    "mybucket|dir/sub/obj.bin",
+			line:    "mybucket\x1fdir/sub/obj.bin",
 			wantKey: "dir/sub/obj.bin",
 			wantMP:  false,
 		},
 		{
 			name:     "multipart single part",
-			line:     "mybucket|k1|1|0",
+			line:     "mybucket\x1fk1\x1f1\x1f0",
 			wantKey:  "k1",
 			wantMP:   true,
 			wantOffs: []int64{0},
 		},
 		{
 			name:     "multipart three parts increasing",
-			line:     "mybucket|path/obj|3|0|5242880|10485760",
+			line:     "mybucket\x1fpath/obj\x1f3\x1f0\x1f5242880\x1f10485760",
 			wantKey:  "path/obj",
 			wantMP:   true,
 			wantOffs: []int64{0, 5242880, 10485760},
 		},
 		{
 			name:    "regular bucket mismatch",
-			line:    "other|k",
+			line:    "other\x1fk",
 			wantErr: "bucket mismatch",
 		},
 		{
 			name:    "multipart bucket mismatch",
-			line:    "other|k|1|0",
+			line:    "other\x1fk\x1f1\x1f0",
 			wantErr: "bucket mismatch",
 		},
 		{
@@ -69,7 +69,7 @@ func TestParseBackupFileLine(t *testing.T) {
 		},
 		{
 			name:    "regular empty key",
-			line:    "mybucket|",
+			line:    "mybucket\x1f",
 			wantErr: "empty key",
 		},
 		// multipart validation errors are delegated to parseListFileLine —
@@ -79,32 +79,32 @@ func TestParseBackupFileLine(t *testing.T) {
 			// multipart line with an empty key previously leaked through to
 			// per-object HEAD/GET failures.
 			name:    "multipart empty key",
-			line:    "mybucket||1|0",
+			line:    "mybucket\x1f\x1f1\x1f0",
 			wantErr: "empty key",
 		},
 		{
 			name:    "partcnt not integer",
-			line:    "mybucket|k|x|0",
+			line:    "mybucket\x1fk\x1fx\x1f0",
 			wantErr: "partcnt not an integer",
 		},
 		{
 			name:    "partcnt zero",
-			line:    "mybucket|k|0",
+			line:    "mybucket\x1fk\x1f0",
 			wantErr: "partcnt must be >= 1",
 		},
 		{
 			name:    "offset count mismatch",
-			line:    "mybucket|k|3|0|5242880",
+			line:    "mybucket\x1fk\x1f3\x1f0\x1f5242880",
 			wantErr: "offset count != partcnt",
 		},
 		{
 			name:    "offset0 not zero",
-			line:    "mybucket|k|1|100",
+			line:    "mybucket\x1fk\x1f1\x1f100",
 			wantErr: "offset0 must be 0",
 		},
 		{
 			name:    "offsets not strictly increasing",
-			line:    "mybucket|k|2|0|0",
+			line:    "mybucket\x1fk\x1f2\x1f0\x1f0",
 			wantErr: "offsets must be strictly increasing",
 		},
 	}
@@ -157,11 +157,11 @@ func TestBackupSourceRunEndToEnd(t *testing.T) {
 	stats := NewStats()
 
 	// Mixed file: 2 regular + 2 multipart valid, 1 malformed each kind.
-	content := "mybucket|reg1\n" +
-		"mybucket|mp1|1|0\n" +
-		"mybucket|dir/reg2.bin\n" +
-		"mybucket|mp2|3|0|5242880|10485760\n" +
-		"mybucket|bad|1|100\n" +
+	content := "mybucket\x1freg1\n" +
+		"mybucket\x1fmp1\x1f1\x1f0\n" +
+		"mybucket\x1fdir%2Freg2.bin\n" +
+		"mybucket\x1fmp2\x1f3\x1f0\x1f5242880\x1f10485760\n" +
+		"mybucket\x1fbad\x1f1\x1f100\n" +
 		"otherbucket|reg3\n"
 	filePath := filepath.Join(dir, "backup.txt")
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
@@ -198,7 +198,7 @@ func TestBackupSourceRunEndToEnd(t *testing.T) {
 		t.Errorf("task3 = %+v, want mp2 multipart 3 offsets", got[3])
 	}
 	// RawLine preserved verbatim for mismatch output.
-	if got[3].RawLine != "mybucket|mp2|3|0|5242880|10485760" {
+	if got[3].RawLine != "mybucket\x1fmp2\x1f3\x1f0\x1f5242880\x1f10485760" {
 		t.Errorf("RawLine = %q, want original line", got[3].RawLine)
 	}
 	// Malformed lines → parse_failed + IncrParseFailed (2 of them).
@@ -217,7 +217,7 @@ func TestBackupSourceRunEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(failedContent), "mybucket|bad|1|100") {
+	if !strings.Contains(string(failedContent), "mybucket\x1fbad\x1f1\x1f100") {
 		t.Errorf("parse_failed.txt missing malformed multipart line: %q", failedContent)
 	}
 	if !strings.Contains(string(failedContent), "otherbucket|reg3") {
@@ -236,7 +236,7 @@ func TestBackupSourceRunCancel(t *testing.T) {
 	}
 	stats := NewStats()
 
-	content := "mybucket|reg1\nmybucket|reg2\n"
+	content := "mybucket\x1freg1\nmybucket\x1freg2\n"
 	filePath := filepath.Join(dir, "backup.txt")
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		t.Fatal(err)

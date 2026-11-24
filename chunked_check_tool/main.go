@@ -30,10 +30,10 @@ func main() {
 	bucket := flag.String("bkt", "", "bucket name")
 	prefix := flag.String("prefix", "", "list prefix")
 	startAfter := flag.String("nextmarker", "", "start-after key (Mode 1 root pagination only)")
-	listFile := flag.String("list-file", "", "list file path: lines of bkt|key|partcnt|offset0|offset1|... (legacy multipart-only re-check; bypasses S3 listing; requires is_check=true)")
-	checkFile := flag.String("check-file", "", "check file path: mixed lines of bkt|key (regular) or bkt|key|partcnt|offset0|... (multipart); re-checks the failure files of a prior run (check_failed.txt / mp_check_failed.txt / mismatch.txt); requires is_check=true")
-	backupFile := flag.String("backup-file", "", "backup list file path: mixed lines of bkt|key (regular) or bkt|key|partcnt|offset0|... (multipart); heads each object, validates the type against the HEAD ETag, and relays it into backup_bucket without probing")
-	resumeList := flag.String("resume-list", "", "resume file path: lines of prefix|token (or prefix) from a prior run's list_failed.txt; re-enumerates from each failed page's cursor. Mode 2 only; mutually exclusive with the other file flags")
+	listFile := flag.String("list-file", "", "list file path: lines of bkt<US>key<US>partcnt<US>offset0<US>offset1<US>... (US=\x1f field separator, key URL-escaped; legacy multipart-only re-check; bypasses S3 listing; requires is_check=true)")
+	checkFile := flag.String("check-file", "", "check file path: mixed lines of bkt<US>key (regular) or bkt<US>key<US>partcnt<US>offset0<US>... (multipart; US=\x1f, key URL-escaped); re-checks the failure files of a prior run (check_failed.txt / mp_check_failed.txt / mismatch.txt); requires is_check=true")
+	backupFile := flag.String("backup-file", "", "backup list file path: mixed lines of bkt<US>key (regular) or bkt<US>key<US>partcnt<US>offset0<US>... (multipart; US=\x1f, key URL-escaped); heads each object, validates the type against the HEAD ETag, and relays it into backup_bucket without probing")
+	resumeList := flag.String("resume-list", "", "resume file path: lines of prefix<US>token (or prefix; US=\x1f, fields URL-escaped) from a prior run's list_failed.txt; re-enumerates from each failed page's cursor. Mode 2 only; mutually exclusive with the other file flags")
 	resumeJournal := flag.String("resume-journal", "", "resume file path: journal.txt from a prior Mode 2 run killed by kill -9; replays the scan frontier (done prefixes skipped, in-flight prefixes continued from their cursor). Mode 2 only; mutually exclusive with the other file flags; -prefix must be empty (the journal defines the scope)")
 	flag.Parse()
 
@@ -528,7 +528,7 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 			seeded = seedFromJournal(states, lister)
 		}
 	} else if resumeList != "" {
-		// Mode 2 + -resume-list: read list_failed.txt lines of "prefix|token"
+		// Mode 2 + -resume-list: read list_failed.txt lines of "prefix<US>token"
 		// (or "prefix" when the first page failed), seed each (prefix, token)
 		// into the BFS queue. Lister.processPrefix resumes listing from the
 		// token, so previously successful pages are not re-listed.

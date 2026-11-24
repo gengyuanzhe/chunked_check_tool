@@ -62,9 +62,13 @@ func TestParseResumeListLine(t *testing.T) {
 		prefix string
 		token  string
 	}{
+		// handwritten plain prefixes (QueryEscape is identity) keep working
 		{"data/2026/", "data/2026/", ""},
-		{"data/2027/|abc123", "data/2027/", "abc123"},
-		{"data/2028/|", "data/2028/", ""},
+		{"data/2027/\x1fabc123", "data/2027/", "abc123"},
+		{"data/2028/\x1f", "data/2028/", ""},
+		// tool-written lines: server fields escaped at the write boundary
+		{"data%2F2027%2F\x1ftok%7Cen", "data/2027/", "tok|en"},
+		{"dir%0Asub\x1f", "dir\nsub", ""},
 	}
 	for _, c := range cases {
 		e, err := parseResumeListLine(c.line)
@@ -100,6 +104,52 @@ func TestParseResumeListLineEmpty(t *testing.T) {
 	}
 }
 
+// TestParseResumeListLineDecodeFailure — a stray %XX escape in a field (a
+// manually mangled file, not tool output) fails loudly at the input
+// boundary instead of silently mis-decoding.
+func TestParseResumeListLineDecodeFailure(t *testing.T) {
+	for _, line := range []string{"bad%zz\x1ftok", "good%2Fp\x1fbad%qq"} {
+		if _, err := parseResumeListLine(line); err == nil {
+			t.Errorf("parseResumeListLine(%q) should error on invalid escape", line)
+		}
+	}
+}
+
+// TestResumeListRoundTrip — WriteListFailed output parses back into the
+// exact (prefix, token) pair, including pipe/newline/\x1f-bearing values
+// that the old '|' format could not carry.
+func TestResumeListRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: false}
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+
+	cases := []struct{ prefix, token string }{
+		{"data/2026/", ""},
+		{"", ""},
+		{"weird|prefix/", "tok\n1"},
+		{"pfx\x1funit/", "tok%2Fpipe"},
+	}
+	for _, c := range cases {
+		o.WriteListFailed(c.prefix, c.token)
+	}
+	if err := o.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stats := NewStats()
+	entries, err := readResumeList(filepath.Join(dir, "list_failed.txt"), o, stats)
+	if err != nil {
+		t.Fatalf("readResumeList: %v", err)
+	}
+	if len(entries) != len(cases) {
+		t.Fatalf("got %d entries, want %d", len(entries), len(cases))
+	}
+	for i, c := range cases {
+		if entries[i].prefix != c.prefix || entries[i].token != c.token {
+			t.Errorf("entries[%d] = {%q, %q}, want {%q, %q}", i, entries[i].prefix, entries[i].token, c.prefix, c.token)
+		}
+	}
+}
+
 // TestReadResumeListEndToEnd — write a list_failed.txt file, then
 // readResumeList parses all lines and returns entries.
 //
@@ -116,7 +166,7 @@ func TestReadResumeListEndToEnd(t *testing.T) {
 
 	// Write the resume-list file manually (simulating a prior run's output).
 	resumePath := filepath.Join(dir, "list_failed.txt")
-	content := "data/2026/\ndata/2027/|tokenABC\ndata/2028/|tokenDEF\n"
+	content := "data/2026/\ndata/2027/\x1ftokenABC\ndata/2028/\x1ftokenDEF\n"
 	if err := os.WriteFile(resumePath, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}

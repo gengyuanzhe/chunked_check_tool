@@ -271,11 +271,11 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 	}
 
 	backupPath := filepath.Join(dir, "list.txt")
-	content := "srcbucket|reg1\n" +
-		fmt.Sprintf("srcbucket|mp1|2|0|%d\n", len(corruptBody)) +
-		"srcbucket|mpclean|1|0\n" +
-		"srcbucket|mm1\n" +
-		"srcbucket|bad|1|100\n"
+	content := "srcbucket\x1freg1\n" +
+		fmt.Sprintf("srcbucket\x1fmp1\x1f2\x1f0\x1f%d\n", len(corruptBody)) +
+		"srcbucket\x1fmpclean\x1f1\x1f0\n" +
+		"srcbucket\x1fmm1\n" +
+		"srcbucket\x1fbad\x1f1\x1f100\n"
 	if err := os.WriteFile(backupPath, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -303,9 +303,9 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 	// timestamp suffix (default-on output_dir_timestamp), which runBackup
 	// created.
 	assertFileContentUnordered(t, cfg.OutputDir, "backup_ok.txt",
-		"srcbucket|reg1\n"+fmt.Sprintf("srcbucket|mp1|2|0|%d\n", len(corruptBody))+"srcbucket|mpclean|1|0\n")
-	assertFileContent(t, cfg.OutputDir, "mismatch.txt", "srcbucket|mm1\n")
-	assertFileContent(t, cfg.OutputDir, "parse_failed.txt", "srcbucket|bad|1|100\n")
+		"srcbucket\x1freg1\n"+fmt.Sprintf("srcbucket\x1fmp1\x1f2\x1f0\x1f%d\n", len(corruptBody))+"srcbucket\x1fmpclean\x1f1\x1f0\n")
+	assertFileContent(t, cfg.OutputDir, "mismatch.txt", "srcbucket\x1fmm1\n")
+	assertFileContent(t, cfg.OutputDir, "parse_failed.txt", "srcbucket\x1fbad\x1f1\x1f100\n")
 
 	// Remote side: the list archive landed under .backup_lists/ with a
 	// timestamp suffix.
@@ -356,7 +356,7 @@ func TestRunBackupFileETagMismatchEndToEnd(t *testing.T) {
 		ListAPIVersion:   2,
 	}
 	backupPath := filepath.Join(dir, "list.txt")
-	content := fmt.Sprintf("srcbucket|mpbad|2|0|%d\n", len(corruptBody))
+	content := fmt.Sprintf("srcbucket\x1fmpbad\x1f2\x1f0\x1f%d\n", len(corruptBody))
 	if err := os.WriteFile(backupPath, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +366,7 @@ func TestRunBackupFileETagMismatchEndToEnd(t *testing.T) {
 		t.Fatalf("run returned err: %v", err)
 	}
 
-	assertFileContent(t, dir, "backup_failed.txt", fmt.Sprintf("srcbucket|mpbad|2|0|%d\n", len(corruptBody)))
+	assertFileContent(t, dir, "backup_failed.txt", fmt.Sprintf("srcbucket\x1fmpbad\x1f2\x1f0\x1f%d\n", len(corruptBody)))
 	logData, err := os.ReadFile(filepath.Join(dir, "backup_failed.log"))
 	if err != nil {
 		t.Fatal(err)
@@ -399,7 +399,7 @@ func TestRunBackupListUploadFailure(t *testing.T) {
 		BackupBucket:     "dstbucket",
 	}
 	backupPath := filepath.Join(dir, "list.txt")
-	if err := os.WriteFile(backupPath, []byte("srcbucket|k1\n"), 0644); err != nil {
+	if err := os.WriteFile(backupPath, []byte("srcbucket\x1fk1\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
@@ -433,7 +433,7 @@ func TestRunBackupProgressLine(t *testing.T) {
 		ListAPIVersion:   2,
 	}
 	backupPath := filepath.Join(dir, "list.txt")
-	if err := os.WriteFile(backupPath, []byte("srcbucket|reg1\nsrcbucket|reg2\n"), 0644); err != nil {
+	if err := os.WriteFile(backupPath, []byte("srcbucket\x1freg1\nsrcbucket\x1freg2\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer

@@ -137,12 +137,12 @@ func TestRunCheckFileEndToEnd(t *testing.T) {
 		ListAPIVersion:        2,
 	}
 	checkPath := filepath.Join(dir, "check.txt")
-	content := "srcbucket|regcorrupt\n" +
-		"srcbucket|mpcorrupt|1|0\n" +
-		"srcbucket|mpclean|1|0\n" +
-		"srcbucket|driftreg|1|0\n" +
-		"srcbucket|driftmp\n" +
-		"srcbucket|bad|1|100\n"
+	content := "srcbucket\x1fregcorrupt\n" +
+		"srcbucket\x1fmpcorrupt\x1f1\x1f0\n" +
+		"srcbucket\x1fmpclean\x1f1\x1f0\n" +
+		"srcbucket\x1fdriftreg\x1f1\x1f0\n" +
+		"srcbucket\x1fdriftmp\n" +
+		"srcbucket\x1fbad\x1f1\x1f100\n"
 	if err := os.WriteFile(checkPath, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestRunCheckFileEndToEnd(t *testing.T) {
 	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "srcbucket|mpclean\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "ok_objects.txt"), "srcbucket|driftreg\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "mp.txt"), "srcbucket|driftmp\n")
-	assertFileContent(t, dir, "parse_failed.txt", "srcbucket|bad|1|100\n")
+	assertFileContent(t, dir, "parse_failed.txt", "srcbucket\x1fbad\x1f1\x1f100\n")
 
 	out := buf.String()
 	for _, want := range []string{
@@ -271,9 +271,9 @@ func TestRunListFileMultipartResultsEndToEnd(t *testing.T) {
 		ListAPIVersion:        2,
 	}
 	listPath := filepath.Join(dir, "list.txt")
-	content := "srcbucket|mp1|1|0\n" +
-		"srcbucket|mpclean|1|0\n" +
-		"srcbucket|bad|1|100\n"
+	content := "srcbucket\x1fmp1\x1f1\x1f0\n" +
+		"srcbucket\x1fmpclean\x1f1\x1f0\n" +
+		"srcbucket\x1fbad\x1f1\x1f100\n"
 	if err := os.WriteFile(listPath, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +286,7 @@ func TestRunListFileMultipartResultsEndToEnd(t *testing.T) {
 	// shape-compatible with -backup-file input.
 	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "srcbucket\x1fmp1\x1f1\x1f0\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "srcbucket|mpclean\n")
-	assertFileContent(t, dir, "parse_failed.txt", "srcbucket|bad|1|100\n")
+	assertFileContent(t, dir, "parse_failed.txt", "srcbucket\x1fbad\x1f1\x1f100\n")
 
 	out := buf.String()
 	if !strings.Contains(out, "corrupt_mp: 1") || !strings.Contains(out, "ok_mp: 1") {
@@ -316,8 +316,8 @@ func TestRunListFileProgressLine(t *testing.T) {
 		ListAPIVersion:   2,
 	}
 	listPath := filepath.Join(dir, "list.txt")
-	content := "srcbucket|mp1|1|0\n" +
-		"srcbucket|mpclean|1|0\n"
+	content := "srcbucket\x1fmp1\x1f1\x1f0\n" +
+		"srcbucket\x1fmpclean\x1f1\x1f0\n"
 	if err := os.WriteFile(listPath, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}

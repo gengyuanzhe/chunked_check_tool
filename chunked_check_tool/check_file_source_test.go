@@ -26,30 +26,30 @@ func TestParseCheckFileLine(t *testing.T) {
 	}{
 		{
 			name:    "regular line",
-			line:    "mybucket|k1",
+			line:    "mybucket\x1fk1",
 			wantKey: "k1",
 			wantMp:  false,
 		},
 		{
 			name:     "multipart line",
-			line:     "mybucket|mp1|2|0|5242880",
+			line:     "mybucket\x1fmp1\x1f2\x1f0\x1f5242880",
 			wantKey:  "mp1",
 			wantMp:   true,
 			wantOffs: []int64{0, 5242880},
 		},
 		{
 			name:    "bucket mismatch regular",
-			line:    "other|k1",
+			line:    "other\x1fk1",
 			wantErr: "bucket mismatch",
 		},
 		{
 			name:    "bucket mismatch multipart",
-			line:    "other|k|1|0",
+			line:    "other\x1fk\x1f1\x1f0",
 			wantErr: "bucket mismatch",
 		},
 		{
 			name:    "empty key regular",
-			line:    "mybucket|",
+			line:    "mybucket\x1f",
 			wantErr: "empty key",
 		},
 		{
@@ -60,12 +60,12 @@ func TestParseCheckFileLine(t *testing.T) {
 		{
 			// Delegated multipart validation.
 			name:    "offset0 not zero",
-			line:    "mybucket|k|1|100",
+			line:    "mybucket\x1fk\x1f1\x1f100",
 			wantErr: "offset0 must be 0",
 		},
 		{
 			name:    "offset count mismatch",
-			line:    "mybucket|k|3|0|5",
+			line:    "mybucket\x1fk\x1f3\x1f0\x1f5",
 			wantErr: "offset count != partcnt",
 		},
 		{
@@ -131,10 +131,10 @@ func TestCheckFileSourceRunEndToEnd(t *testing.T) {
 	}
 	stats := NewStats()
 
-	content := "mybucket|reg1\n" +
-		"mybucket|mp1|2|0|5242880\n" +
-		"mybucket|bad|1|100\n" +
-		"mybucket|reg2\n"
+	content := "mybucket\x1freg1\n" +
+		"mybucket\x1fmp1\x1f2\x1f0\x1f5242880\n" +
+		"mybucket\x1fbad\x1f1\x1f100\n" +
+		"mybucket\x1freg2\n"
 	filePath := filepath.Join(dir, "check.txt")
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		t.Fatal(err)
@@ -178,15 +178,15 @@ func TestCheckFileSourceRunEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "mybucket|bad|1|100") {
-		t.Errorf("parse_failed.txt = %q, want substring %q", string(data), "mybucket|bad|1|100")
+	if !strings.Contains(string(data), "mybucket\x1fbad\x1f1\x1f100") {
+		t.Errorf("parse_failed.txt = %q, want substring %q", string(data), "mybucket\x1fbad\x1f1\x1f100")
 	}
 }
 
 // TestCheckFileSourceLegacyListFileCompat — a legacy -list-file
 // (multipart-only) is a valid -check-file subset: every line parses.
 func TestCheckFileSourceLegacyListFileCompat(t *testing.T) {
-	line := "mybucket|mp1|3|0|5242880|10485760"
+	line := "mybucket\x1fmp1\x1f3\x1f0\x1f5242880\x1f10485760"
 	task, err := parseCheckFileLine(line, "mybucket", 1)
 	if err != nil {
 		t.Fatalf("legacy list-file line must parse as check-file input: %v", err)
