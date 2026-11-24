@@ -37,7 +37,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 - 普通对象（ETag 为 32 位小写 MD5 hex）→ 小对象（`Size <= whole_object_probe_threshold`）单次 Range GET 全读；大对象 head@0 + tail@Size-128 两次。body 同时匹配 `chunkSigRe`（段首 chunk-signature）OR `trailerRe`（段尾/对象尾 x-amz-checksum marker）→ 任一命中即视为损坏。
 - 多段对象（任何非 `^[0-9a-f]{32}$` 的 ETag）→ 按 `multipart_check_mode` 处理：
   - `0`（关闭）→ 直接入 `mp.txt`，不做 Range GET。
-  - `1`（offset 检查）→ LIST 带 `internal-list-mp-offset: true` header，服务端把多段 ETag 改写为 `<md5>-<partcnt>-<off0>|<off1>|...`（物理字节偏移）；按 head@0 + (N-1) 边界探测 + tail@Size-128 探测，边界 256B 窗口同时覆盖上一段尾 trailer 与下一段首 chunk-signature；ETag 解析不出 offsets（格式不符或 offset > Size）的对象回落 `list_parse_failed.txt`（根目录，行格式 `bucket|key`）。`parseMultipartOffsetETag` 始终校验每个 offset ≤ Size（Size=0 是合法空对象：唯一合法 ETag 是 `<md5>-1-0`）。
+  - `1`（offset 检查）→ LIST 带 `internal-list-mp-offset: true` header，服务端把多段 ETag 改写为 `<md5>-<partcnt>-<off0>|<off1>|...`（物理字节偏移）；按 head@0 + (N-1) 边界探测 + tail@Size-128 探测，边界 256B 窗口同时覆盖上一段尾 trailer 与下一段首 chunk-signature；ETag 解析不出 offsets（格式不符或 offset > Size）的对象回落 `list_parse_failed.txt`（根目录，行格式 `bucket\x1fkey`）。`parseMultipartOffsetETag` 始终校验每个 offset ≤ Size（Size=0 是合法空对象：唯一合法 ETag 是 `<md5>-1-0`）。
   - `2`（固定分段，旧模式待废弃）→ 按 `multipart_segment_size` 合成 `[0, seg, 2*seg, ...]` 边界，探测矩阵同 mode=1。
 - 列举失败、校验失败分别落不同文件。
 - 支持几十亿对象规模，内存有界，背压自调节。探测矩阵与双 regex 细则见 §4.17。
@@ -49,7 +49,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 ## 2. 技术栈
 
 - Go 1.27（`go.mod` module `chunked_check_tool`）
-- `github.com/aws/aws-sdk-go-v2`（`aws`、`aws/transport/http`、`aws/signer/v4`）+ `service/s3` + `credentials` + `smithy-go`：**AWS SDK v2，path-style 寻址**（迁移自 minio-go——minio-go 在客户端按 S3 3-63 命名规则拒绝短桶名，自研 S3 接受它们；aws client 无此校验）。用 `s3.ListObjectsV2`/`s3.ListObjects` 拿 Contents + CommonPrefixes，用 `s3.GetObject` + `Range: "bytes=a-b"` 做 Range GET。client 用 `s3.New` + 全显式 options 构造（**不用 LoadDefaultConfig**——环境变量和 ~/.aws/config 不得泄漏进数据完整性工具的凭证/重试行为）。中转 PUT 走 `withUnsignedPayload`（见不变量 22）
+- `github.com/aws/aws-sdk-go-v2`（`aws`、`aws/transport/http`、`aws/signer/v4`）+ `service/s3` + `credentials` + `smithy-go`：**AWS SDK v2，path-style 寻址**（迁移自 minio-go——minio-go 在客户端按 S3 3-63 命名规则拒绝短桶名，自研 S3 接受它们；aws client 无此校验）。用 `s3.ListObjectsV2`/`s3.ListObjects` 拿 Contents + CommonPrefixes，用 `s3.GetObject` + `Range: "bytes=a-b"` 做 Range GET。client 用 `s3.New` + 全显式 options 构造（**不用 LoadDefaultConfig**——环境变量和 ~/.aws/config 不得泄漏进数据完整性工具的凭证/重试行为）。中转 PUT 走 `withUnsignedPayload`（见不变量 22）。LIST 请求按 `encoding_type_url` 配置带 `EncodingType=url`，wire 上 server 字段（key/prefix/marker）URL 编码，出口由 `wireDecoder` 统一 `QueryUnescape` 解码（见不变量 23）
 - `gopkg.in/yaml.v3`（配置）
 - TLS：`scheme=https` 时 `InsecureSkipVerify=true`（用户明确要求忽略证书）
 
@@ -57,25 +57,26 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 | 文件 | 职责 |
 |---|---|
-| `main.go` | flag 解析、`installSignalHandler`（两段式 SIGINT/SIGTERM，见不变量 20）、`run`/`runBackup` 编排（双 ctx：listCtx/hardCtx）、Mode 1 根列举分页、`drainQueuedPrefixes`（中断时把未启动 prefix 写 list_failed）、worker 启停、stats 写盘 |
-| `config.go` | `Config` 结构体 + `LoadConfig`（YAML，带默认值） |
+| `main.go` | flag 解析、`installSignalHandler`（两段式 SIGINT/SIGTERM，见不变量 20）、`run`/`runBackup` 编排（双 ctx：listCtx/hardCtx）、Mode 1 根列举分页（用 `cfg.MaxKeys`，调用 `checkShortResponse`）、`drainQueuedPrefixes`（中断时把未启动 prefix 写 list_failed）、worker 启停、stats 写盘；`run()` 注入 `debugLogger`（cfg.DebugLog=true 时 Debug-level slog 路由 stdout→run.log）和 `listLogger`（`list_failed.log` 的 Warn-level slog）到 S3Client，调 `stats.SetListLatencyWindow(cfg.LatencyWindowSec)` |
+| `config.go` | `Config` 结构体 + `LoadConfig`（YAML，带默认值）；校验 `max_keys` 必填 1..1000、`latency_window_sec` 默认 60 拒负值 |
 | `nodepool.go` | `NodePool`：轮询 `Assign`/`AssignOther`、`RecordFault`（累积故障计数，达 `node_isolate_threshold` 才 `MarkFailed` 隔离）、`Unmark`/`FailedNodes`（恢复探测用）、`URL`/`Endpoint`（隔离全局共享、进程内单向——除非开了恢复探测） |
 | `noderecovery.go` | 后台节点恢复：`startNodeRecovery`（`node_recover_probe_interval`>0 时每轮对隔离节点做 HEAD bucket 探测，连续 2 次健康 → `Unmark` 重返轮询池并清零故障计数；探测健康标准 = `!isNodeFaultErr`，即 2xx/404/403 都算活、5xx/传输错误不算）、`recoveryRound`/`probeNode`（可单测的轮次逻辑） |
-| `s3client.go` | `S3API` 接口、`S3Client`（`awsS3API` 接口包装 `*s3.Client`，按 `cfg.ListAPIVersion` 分派 V1/V2）、`PutObjectLocal`（归档流式上传，>16MiB 自动分段 multipart）/`PutObjectStream`（中转流式上传，`withUnsignedPayload`）的双流式设计（**任何路径不整文件缓冲**）、节点故障 failover。`NewAWSClient` 在 `http.Transport` 上绑 `DialContext`（`dial_timeout`，默认 10s 兜底黑洞 IP）和 `ResponseHeaderTimeout`（`response_header_timeout`，默认 0 不兜底）；所有 s3 client 构造（worker client、`rebuildOn`、`noderecovery.probeNode`）共用同一对超时。测试替身在各自 _test.go：`FakeS3`（fakes3_test.go，S3API 级）、`fakeCore`（s3client_v1_test.go，awsS3API 级 V1/V2 分派）、`scriptedS3`（lister_test.go）、`countingS3`（walker_test.go）、`drainFake`（drain_test.go，ctx 感知） |
-| `lister.go` | `Lister`（无 `s3` 字段；`Run`/`processPrefix` 接 `s3` 与双 ctx 参数）、无界队列 BFS、`inflight` atomic 计数、`recordListFailure`（graceful=下一页游标 / hard=当前页游标，见不变量 20） |
-| `walker.go` | `runRecursiveWalk`：Mode 3 信号量递归列举，`sync.WaitGroup` 终止，不用 queue/inflight；中断时未启动 walk 记录裸 prefix |
-| `resume_list.go` | `-resume-list` 模式：`parseResumeListLine` 解析 `prefix\|token` 行（SplitN，契约是 prefix 不含 `\|`）、`readResumeList` 逐行解析+违约分流（whitespace-only 行→parse_failed，prefix 含 `\|`→invalid_keys，正常→entries）。**空行 `""` 是合法条目**（根 prefix 第一页失败，prefix=="", token==""），不丢——否则用户没配 `-prefix` 时第一页 LIST 失败的 run 无法 resume |
-| `checker.go` | `Checker`（ctx=hardCtx）、`isNormalETag`（严格 32 位小写 hex）、`chunkSigRe`/`trailerRe`、`runProbes`/`buildProbesStatic`（探测矩阵） |
+| `s3client.go` | `S3API` 接口、`S3Client`（`awsS3API` 接口包装 `*s3.Client`，按 `cfg.ListAPIVersion` 分派 V1/V2）、`PutObjectLocal`（归档流式上传，>16MiB 自动分段 multipart）/`PutObjectStream`（中转流式上传，`withUnsignedPayload`）的双流式设计（**任何路径不整文件缓冲**）、节点故障 failover。`NewAWSClient` 在 `http.Transport` 上绑 `DialContext`（`dial_timeout`，默认 10s 兜底黑洞 IP）和 `ResponseHeaderTimeout`（`response_header_timeout`，默认 0 不兜底）；所有 s3 client 构造（worker client、`rebuildOn`、`noderecovery.probeNode`）共用同一对超时。**wire 层**：`wireDecoder`（`encoding_type_url` 开时 `QueryUnescape` 出口解码，失败 warn 一次到 `listLogger`，保留原值 best-effort）、`encodingTypeURL()`/`SetLoggers()`（debug=list-page req/resp/err，list=warn 信号，两者 nil 安全）。V1 NextMarker 与 Contents key 回退两个 next 源都出口解码；V2 NextContinuationToken 不透明 base64 **不**解码（字面 `+` 必须原样往返）。`listPageOnce` 三个 Debug 点：req（marker/token/delim/maxKeys）、err（req_id + 完整 err）、resp（next/truncated/nContents/nCP）。测试替身在各自 _test.go：`FakeS3`（fakes3_test.go，S3API 级）、`fakeCore`（s3client_v1_test.go，awsS3API 级 V1/V2 分派）、`scriptedS3`（lister_test.go）、`countingS3`（walker_test.go）、`drainFake`（drain_test.go，ctx 感知） |
+| `lister.go` | `Lister`（无 `s3` 字段；`Run`/`processPrefix` 接 `s3` 与双 ctx 参数）、无界队列 BFS、`inflight` atomic 计数、`recordListFailure`（graceful=下一页游标 / hard=当前页游标，见不变量 20）；`checkShortResponse` 包级函数（IsTruncated 且 entries<max_keys 告警，见不变量 24） |
+| `walker.go` | `runRecursiveWalk`：Mode 3 信号量递归列举，`sync.WaitGroup` 终止，不用 queue/inflight；中断时未启动 walk 记录裸 prefix；调 `checkShortResponse` |
+| `resume_list.go` | `-resume-list` 模式：`parseResumeListLine` 解析 `\x1f` 分隔行（`splitEscaped2` 在第一个 `\x1f` 切分，每段 `QueryUnescape`）、`readResumeList` 逐行解析+违约分流（whitespace-only 行/无效 %XX → parse_failed；正常 → entries）。**空行 `""` 是合法条目**（根 prefix 第一页失败，prefix=="", token==""），不丢——否则用户没配 `-prefix` 时第一页 LIST 失败的 run 无法 resume |
+| `checker.go` | `Checker`（ctx=hardCtx）、`isNormalETag`（严格 32 位小写 hex）、`chunkSigRe`/`trailerRe`、`runProbes`/`buildProbesStatic`（探测矩阵）；`extractHTTPStatusCode`/`extractS3Code`/`extractRequestID` 三个错误字段提取器（`errors.As` 到 `*awshttp.ResponseError`，nil 安全） |
 | `backup.go` | `BackupChecker`：HEAD → 判型门 → 中转 → ETag 终验（**不探测**，见不变量 19）；relayRegular/relayMultipart 流式中转 |
 | `file_source.go` | 泛型 `fileSource[T]`：三个文件输入模式（-check-file/-list-file/-backup-file）共用的逐行读取骨架（读行→parse→parse_failed 记录→push），`MalformedLineError` |
 | `check_file_source.go` | `parseCheckFileLine`：mixed 格式 → VerifyTask（委托 `parseMixedLine`，HeadFirst=true） |
 | `list_file_source.go` | `parseListFileLine`：旧 -list-file 多段-only 格式 → VerifyTask |
-| `backup_source.go` | `parseMixedLine`：mixed 格式（`bkt\|key` / `bkt\|key\|partcnt\|off...`）→ BackupTask（-check-file 与 -backup-file 共用的解析器） |
-| `mpoffset.go` | offset-etag 检查的两个原语：`withMpOffsetListHeader`（per-call `s3.Options` mutator，经 Build middleware 给**单次** LIST 请求注入 `internal-list-mp-offset: true`；只被 `listPageOnce` 在 LIST 调用点传入——"仅 LIST"是结构保证，无请求形态嗅探。Build 在签名前运行，非 x-amz 名不参与 SigV4 签名，与旧 transport 签名后注入语义等价）、`parseMultipartOffsetETag(etag, size)`（`<md5>-<partcnt>-<off0>\|...` 解析，规则对齐 parseListFileLine；始终校验每个 offset ≤ Size，Size=0 是合法空对象） |
-| `output.go` | channel + writer goroutine（per-owner 分目录 fan-out + 根目录全局），`FileInputMode` 门控（FileInputListFile/FileInputCheckFile 强制 mp 输出开启；FileInputCheckFile 开 mp.txt 漂移回落；mode=offset 开 list_parse_failed.txt/log），`bufio.Writer` 64KB，append 模式（OwnerID 为空 → `_unknown/`） |
+| `backup_source.go` | `parseMixedLine`：mixed 格式（`bkt\x1fkey` / `bkt\x1fkey\x1fpartcnt\x1foff...`）→ BackupTask（-check-file 与 -backup-file 共用的解析器）；`unescapeKey` helper 在 `\x1f` 处分割并对键字段 `QueryUnescape` |
+| `mpoffset.go` | offset-etag 检查的两个原语：`withMpOffsetListHeader`（per-call `s3.Options` mutator，经 Build middleware 给**单次** LIST 请求注入 `internal-list-mp-offset: true`；只被 `listPageOnce` 在 LIST 调用点传入——"仅 LIST"是结构保证，无请求形态嗅探。Build 在签名前运行，非 x-amz 名不参与 SigV4 签名，与旧 transport 签名后注入语义等价）、`parseMultipartOffsetETag(etag, size)`（服务端 ETag 格式 `<md5>-<partcnt>-<off0>|<off1>|...`，**ETag 内部分隔符仍是 `|`**——这是服务端 wire 格式不能改；解析按 `strings.Split(parts[2], "|")`，规则对齐 parseListFileLine；始终校验每个 offset ≤ Size，Size=0 是合法空对象） |
+| `output.go` | channel + writer goroutine（per-owner 分目录 fan-out + 根目录全局），`FileInputMode` 门控（FileInputListFile/FileInputCheckFile 强制 mp 输出开启；FileInputCheckFile 开 mp.txt 漂移回落；mode=offset 开 list_parse_failed.txt/log），`bufio.Writer` 64KB，append 模式（OwnerID 为空 → `_unknown/`）。**行分隔与转义**：`const rowSep = "\x1f"`（ASCII Unit Separator，S3 key 可含 `|` 故弃用 pipe），server 字段（key/prefix/token/owner）写入时 `url.QueryEscape`，bucket 来自 CLI 不转义，数字字段（partcnt/offsets）不转义。`ListLogger()` 访问器返回 `list_failed.log` 的 slog 给 s3client wire 层用。`WriteShortResponseWarning` 写到 listLogger（非 debug_log 门控——生产信号不能被吞） |
 | `queue.go` | 无界队列（slice + mutex + cond），ctx-aware 阻塞 Pop，`Drain`（中断排空：返回并清空残余项） |
-| `stats.go` | atomic.Int64 计数器 + `StatsSnapshot` + `PrintSummary`（按 `RunMode` 分模式输出指标集；写入 stdout，被 `mwOut` tee 进 run.log） |
-| `progress.go` | `ProgressPrinter`（按 `RunMode` 输出进度行字段集）+ `localCounter`（每 worker 本地 int，无 per-obj atomic） |
+| `stats.go` | atomic.Int64 计数器 + `StatsSnapshot` + `PrintSummary`（按 `RunMode` 分模式输出指标集；写入 stdout，被 `mwOut` tee 进 run.log）；`listLatency *LatencyTracker`（窗口化 LIST 延迟，由 `AddListCall` 双写全局+窗口，`SetListLatencyWindow(cfg.LatencyWindowSec)` 配置窗口长度），快照字段 `ListLatencyAvgMs`/`ListLatencyMaxMs`（仅 progress 行使用，summary 仍用全局 `ListAvgLatencyMs`） |
+| `progress.go` | `ProgressPrinter`（按 `RunMode` 输出进度行字段集）+ `localCounter`（每 worker 本地 int，无 per-obj atomic）。默认分支打印 `latency_avg_ms`/`latency_max_ms`（窗口化，反映当前批次健康，全局 `list_avg_ms` 会被早期 spike 稀释） |
+| `latency.go` | `LatencyTracker`：滑动窗口延迟计量，每窗口重置，`Record(d)`/`Snapshot()`/`SetWindow(d)`，零值可用（1 分钟默认窗口首用锁定），用于 progress 行的当前批次 avg/max |
 
 ## 4. 关键不变量（改动前必须守住）
 
@@ -87,15 +88,14 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 3. **ETag 来源**：list 响应（统一），**不从 Range GET response header 取**。OwnerID 同样来自 list 响应（V2 请求必须显式 `FetchOwner=true`——minio-go 默认带上，aws SDK **不**默认；漏设则所有 OwnerID 为空、全部结果塌进 `_unknown/`。`TestListPageV2_SetsFetchOwner` 是回归钉）。ETag 落地在 `ListPage`/`HeadObject` 出口统一 `trimETagQuotes`（S3 wire 上 ETag 带引号，aws SDK 不剥）。
 
-4. **结果文件按 OwnerID 分目录，处理文件全局**：`corrupted_objects`/`mp`/`corrupted_mp`/`ok_mp`/`ok_objects` 这五类结果文件按 `<ownerID>/<filename>` 路由（OwnerID 为空 → `_unknown/`）；`list_failed`/`parse_failed`/`invalid_keys`/`check_failed`/`mp_check_failed`/`list_parse_failed`/`stats` 留根目录全局。理由：结果文件数量大且天然按 owner 分桶有意义；处理文件全局方便运维统一排查；stats 全局一份避免 owner 分桶后还要汇总。ownerDirName 折叠空/`.`/`..`/含路径分隔符的 OwnerID 到 `_unknown`，防止路径穿越。
+4. **结果文件按 OwnerID 分目录，处理文件全局**：`corrupted_objects`/`mp`/`corrupted_mp`/`ok_mp`/`ok_objects` 这五类结果文件按 `<ownerID>/<filename>` 路由（OwnerID 为空 → `_unknown/`）；`list_failed`/`parse_failed`/`check_failed`/`mp_check_failed`/`list_parse_failed`/`stats` 留根目录全局。理由：结果文件数量大且天然按 owner 分桶有意义；处理文件全局方便运维统一排查；stats 全局一份避免 owner 分桶后还要汇总。ownerDirName 折叠空/`.`/`..`/含路径分隔符的 OwnerID 到 `_unknown`，防止路径穿越。
 
-4a. **失败分类四文件**（list_failed / parse_failed / invalid_keys / list_parse_failed 职责分离）：
-  - `list_failed.txt` — S3 LIST 调用失败（节点故障/5xx/超时）。行格式 `prefix|token`：token 是失败页的 continuationToken（V1=上一页最后 key，V2=服务端不透明 token），第一页失败时为单字段 `prefix`。**可自动补跑**：`-resume-list <list_failed.txt>` 读这些行，把 `(prefix, token)` seed 进 BFS 队列，`processPrefix` 从 token 续页。
-  - `parse_failed.txt` — `-list-file`/`-backup-file`/`-resume-list` 输入解析失败（坏行/bkt 不匹配/空行）。写入整行原始内容。**不可自动补跑**，需人工修输入文件。
-  - `invalid_keys.txt` — S3 key/prefix 含 `|`（违反字段分隔契约）。lister 在 LIST 拿到对象后检查 key，违规则跳过该对象（不进 objCh）落此文件；WriteListFailed 检查 prefix，违规则不写 list_failed 改写此文件。**不可自动补跑**，需人工修数据。
-  - `list_parse_failed.txt` — **仅 mode=offset + S3 LIST**：multipart ETag 解析失败（服务端未实现 header / ETag 格式不符 / offset > Size）。根目录全局，行格式 `bucket|key`（对齐 `check_failed.txt`，可直喂 `-check-file` 补跑：retry 会 HEAD 对象重新取 ETag/Size）。配套 `list_parse_failed.log`（根目录 slog，字段 `bucket/key/owner/size/etag_len/etag`，完整 ETag 无截断）。**与 mp.txt 的区别**：mp.txt 是 mode=0 主动关闭 / check-file 类型漂移 / mode=segment+Size==0 的未校验 multipart；list_parse_failed 是 mode=offset 下 ETag 本应解析但失败的对象。
-  - **契约**：整个工具的行格式都基于 `|` 分隔（`bkt|key|partcnt|off...` / `prefix|token` / `bkt|key`），契约是 key/prefix **不含** `|`。违约的 key/prefix 在源头拒绝（落 invalid_keys.txt），不静默错切。`parse_failed.txt` 和 `invalid_keys.txt` 都写原始字节（不套任何格式），因为它们本身就是"无法被工具格式化的字节"。
-  - **stats 新增**：`ParseFailed`（输入解析失败计数）、`InvalidKeys`（key 含 `|` 计数）、`ListParseFailed`（mode=offset ETag 解析失败计数）。summary 中 ModeListCheck 打 `invalid_keys` + `list_parse_failed`，ModeListFile/ModeCheckFile/ModeBackup 打 `parse_failed` + `invalid_keys`，ModeListOnly 打 `invalid_keys`。
+4a. **失败分类三文件**（list_failed / parse_failed / list_parse_failed 职责分离）：
+  - `list_failed.txt` — S3 LIST 调用失败（节点故障/5xx/超时）。行格式 `prefix\x1ftoken`：token 是失败页的 continuationToken（V1=上一页最后 key，V2=服务端不透明 token），第一页失败时为单字段 `prefix`。**可自动补跑**：`-resume-list <list_failed.txt>` 读这些行，把 `(prefix, token)` seed 进 BFS 队列，`processPrefix` 从 token 续页。
+  - `parse_failed.txt` — `-list-file`/`-backup-file`/`-resume-list` 输入解析失败（坏行/bkt 不匹配/whitespace-only 行/无效 `%XX` 转义）。写入整行原始内容。**不可自动补跑**，需人工修输入文件。
+  - `list_parse_failed.txt` — **仅 mode=offset + S3 LIST**：multipart ETag 解析失败（服务端未实现 header / ETag 格式不符 / offset > Size）。根目录全局，行格式 `bucket\x1fkey`（对齐 `check_failed.txt`，可直喂 `-check-file` 补跑：retry 会 HEAD 对象重新取 ETag/Size）。配套 `list_parse_failed.log`（根目录 slog，字段 `bucket/key/owner/size/etag_len/etag`，完整 ETag 无截断）。**与 mp.txt 的区别**：mp.txt 是 mode=0 主动关闭 / check-file 类型漂移 / mode=segment+Size==0 的未校验 multipart；list_parse_failed 是 mode=offset 下 ETag 本应解析但失败的对象。
+  - **契约**：整个工具的行格式都基于 `\x1f`（ASCII Unit Separator）分隔（`bkt\x1fkey\x1fpartcnt\x1foff...` / `prefix\x1ftoken` / `bkt\x1fkey`），server 字段（key/prefix/token/owner）写入时 `url.QueryEscape`、读取时 `QueryUnescape`，含 `\x1f`、`%`、`+`、`/` 的 key 都能逐字节往返。bucket 字段来自 CLI 不转义，数字字段（partcnt/offsets）不转义。**为什么弃用 pipe `|`**：S3 key 可合法包含 `|`，旧 pipe 分隔会把含 `|` 的 key 静默错切。旧的 `invalid_keys.txt` 机制（拦截含 `|` 的 key）已整体移除——`\x1f`+转义让任何 key 都能往返，拦截成死代码。
+  - **stats 字段**：`ParseFailed`（输入解析失败计数）、`ListParseFailed`（mode=offset ETag 解析失败计数）。summary 中 ModeListCheck 打 `list_parse_failed`，ModeListFile/ModeCheckFile/ModeBackup 打 `parse_failed`。**无 `InvalidKeys`**——机制已移除，含 `|` 的 key 走正常路径。
 
 5. **checker goroutine 绝不退出**：任何错误写 `check_failed`（普通对象）/ `mp_check_failed`（多段分段）后继续。若 checker 退出，`objCh` 无人消费，list worker 永久阻塞。
 
@@ -115,9 +115,9 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 13. **V1/V2 分页协议对 caller 透明**：`S3Client.listPageOnce` 按 `cfg.ListAPIVersion` 分派 `s3.ListObjects`（V1，marker 游标）或 `s3.ListObjectsV2`（V2，continuation token）。两条路径都归一化进 `listResult{contents, commonPrefixes, next}`，`next` 作为下一次 `ListPage` 的 `continuationToken` 参数回传。V1 无 delimiter 且 `IsTruncated=true` 但 `NextMarker` 为空时，回退到最后一个 Contents key 作 marker；有 delimiter 时 S3 返回 `NextMarker`。caller（lister/walker/main 根分页）只需把 `next` 喂回 `continuationToken`，不感知 V1/V2 差异。`S3Client.api` 是 `awsS3API` 接口（非 `*s3.Client`）以支持测试注入。aws SDK 所有 API 带首参 ctx——`ListPage` 现在真正响应 ctx 取消（minio-go Core API 无 ctx 的历史限制已消除，优雅中断能即时掐断在途 LIST）。
 
-14. **多段分段检查的失败分流**（mode=1/2 与 -check-file/-list-file 共用路径）：分段 RangeGet 报错走 `mp_check_failed` 路径（`WriteMpCheckFailed` + `IncrMpCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）。**corrupted_mp.txt 行格式按模式**：mode=1 与文件输入模式写 `bkt|key|partcnt|off0|off1|...`（offsets 是真实 part 边界，文件可直喂 -backup-file/-check-file，**不套 result_line_format**）；mode=2 写 result_line_format 渲染行——固定分段的 [0,seg,2*seg,...] 是合成边界，**绝不能**当 part 边界写出（否则备份中转按错误边界分段，ETag 必 mismatch）。**mp_check_failed.txt 行格式对齐 corrupted_mp.txt**：mode=1 与文件输入模式写 `bkt|key|partcnt|off0|...`（`WriteMpCheckFailed(key, offsets)` 接收 task.Offsets），同样可直喂 -backup-file/-check-file 补跑。**check_failed.txt 行格式 `bkt|key`**（`WriteCheckFailed(key)` 内部拼 `o.bucket + "|" + key`），对齐 -check-file/-backup-file 普通对象 2 字段输入，可直喂补跑（不需要 ETag/Size：check-file 会 HEAD 重取，backup 中转也会 HEAD）。**owner 不写入** check_failed/mp_check_failed（文件输入模式不读 owner，输出走全局 root 不按 owner 分桶）。
+14. **多段分段检查的失败分流**（mode=1/2 与 -check-file/-list-file 共用路径）：分段 RangeGet 报错走 `mp_check_failed` 路径（`WriteMpCheckFailed` + `IncrMpCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）。**corrupted_mp.txt 行格式按模式**：mode=1 与文件输入模式写 `bkt\x1fkey\x1fpartcnt\x1foff0\x1foff1\x1f...`（offsets 是真实 part 边界，文件可直喂 -backup-file/-check-file，**不套 result_line_format**）；mode=2 写 result_line_format 渲染行——固定分段的 [0,seg,2*seg,...] 是合成边界，**绝不能**当 part 边界写出（否则备份中转按错误边界分段，ETag 必 mismatch）。**mp_check_failed.txt 行格式对齐 corrupted_mp.txt**：mode=1 与文件输入模式写 `bkt\x1fkey\x1fpartcnt\x1foff0\x1f...`（`WriteMpCheckFailed(key, offsets)` 接收 task.Offsets），同样可直喂 -backup-file/-check-file 补跑。**check_failed.txt 行格式 `bkt\x1fkey`**（`WriteCheckFailed(key)` 内部拼 `o.bucket + rowSep + url.QueryEscape(key)`，rowSep=`\x1f`），对齐 -check-file/-backup-file 普通对象 2 字段输入，可直喂补跑（不需要 ETag/Size：check-file 会 HEAD 重取，backup 中转也会 HEAD）。**owner 不写入** check_failed/mp_check_failed（文件输入模式不读 owner，输出走全局 root 不按 owner 分桶）。
 
-15. **统计字段命名**（display name / Go 字段）：`list_obj` (`ListedObjects`) / `list_mp` (`ListedMp`) / `list_all` (`ListedAll=list_obj+list_mp`) / `ok_obj` (`OkObjects`) / `corrupt_obj` (`CorruptedObjects`) / `ok_mp` (`OkMp`) / `corrupt_mp` (`CorruptedMp`) / `list_failed` (`ListFailed`) / `list_parse_failed` (`ListParseFailed`，mode=offset ETag 解析失败计数) / `check_failed` (`CheckFailed`) / `mp_check_failed` (`MpCheckFailed`) / `read` (`ReadLines`，文件输入模式的累计已读输入行数，每读一行 +1 含坏行；**不统计总行数**——预扫描整个输入文件不值得)。**关键语义**：`ok_mp` 只在 `multipart_check_mode!=0` 且通过分段检查时 +1；mode=0 时多段对象只计 `list_mp`，**不**计 `ok_mp`——未校验不能谎称干净（mode=1 的 list_parse_failed 回落对象同理只计 `list_mp`）。`is_check=false`（list-only）时 `ok_obj`/`corrupt_obj`/`ok_mp`/`corrupt_mp`/`check_failed`/`mp_check_failed`/`list_parse_failed` 全部为 0，summary 不输出这些字段。
+15. **统计字段命名**（display name / Go 字段）：`list_obj` (`ListedObjects`) / `list_mp` (`ListedMp`) / `list_all` (`ListedAll=list_obj+list_mp`) / `ok_obj` (`OkObjects`) / `corrupt_obj` (`CorruptedObjects`) / `ok_mp` (`OkMp`) / `corrupt_mp` (`CorruptedMp`) / `list_failed` (`ListFailed`) / `list_parse_failed` (`ListParseFailed`，mode=offset ETag 解析失败计数) / `check_failed` (`CheckFailed`) / `mp_check_failed` (`MpCheckFailed`) / `read` (`ReadLines`，文件输入模式的累计已读输入行数，每读一行 +1 含坏行；**不统计总行数**——预扫描整个输入文件不值得)。**关键语义**：`ok_mp` 只在 `multipart_check_mode!=0` 且通过分段检查时 +1；mode=0 时多段对象只计 `list_mp`，**不**计 `ok_mp`——未校验不能谎称干净（mode=1 的 list_parse_failed 回落对象同理只计 `list_mp`）。`is_check=false`（list-only）时 `ok_obj`/`corrupt_obj`/`ok_mp`/`corrupt_mp`/`check_failed`/`mp_check_failed`/`list_parse_failed` 全部为 0，summary 不输出这些字段。**无 `invalid_keys` 字段**——`invalid_keys.txt`/`InvalidKeys` 已整体移除（`\x1f`+转义让任何 key 都能往返，拦截成死代码）。**窗口化延迟**：`stats.listLatency *LatencyTracker`（latency.go）按 `latency_window_sec`（默认 60s）维护滑动窗口，每窗口重置；`AddListCall` 双写全局计数（`ListCalls`/`ListAvgLatencyMs`）与窗口（`ListLatencyAvgMs`/`ListLatencyMaxMs`）。summary 用全局 `list_avg_ms`，progress 默认分支用窗口 `latency_avg_ms`/`latency_max_ms`——长跑全局平均会被早期 spike 稀释、掩盖当前批次健康，窗口化暴露当前批次。
 
 16. **进度行与 summary 按 `RunMode` 输出指标集**：`ModeListCheck`/`ModeListOnly` 用 list/check 全量字段；`ModeListFile`（-list-file，旧）打 `read=X` + `ok_mp/corrupt_mp/mp_check_failed`；`ModeCheckFile`（-check-file）打 `read=X` + `ok_obj/corrupt_obj/ok_mp/corrupt_mp/check_failed/mp_check_failed`（该模式重查普通+多段两种对象）；`ModeBackup`（-backup-file）打 `read=X` + `backup_ok/backup_failed/backup_mismatch`。文件输入模式**不**输出 `list_all`/`list_calls`/`list_obj` 等 list 指标——无 S3 LIST，全是 0 噪声。`q=` 队列快照同理按模式裁剪（文件模式无 BFS 队列，backup 用 `BackupChannelSnapshot`）。
 
@@ -128,7 +128,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 19. **backup 模式不探测损坏**（`-backup-file`）：`BackupChecker.Handle` = HEAD → 判型门（mismatch）→ 中转 → ETag 终验。**不调用 runProbes**——输入列表是检查阶段的产物（corrupted_objects/corrupted_mp 跨轮并集），是否损坏已判定，备份只保字节。历史上 backup 曾在多段行上先探测"确认损坏才中转、干净跳过（backup_skipped_clean）"，该路径已整体删除：它会静默跳过检查阶段已标记的对象（backup 侧探测矩阵不如检查侧完整时即漏备份）。`backup_skipped_clean` 文件/channel/stats/progress 字段全链路不存在。mismatch 判型门保留（HEAD 顺手可得、零成本；拦"检查后对象被改写"——stale offsets 中转必然 ETag 终验失败），mismatch.txt 行可直喂 `-check-file` 重查。HEAD 保留是必须的：中转需要 Size，ETag 终验需要源 ETag。`BackupChecker` 的 ctx 是 hard ctx：第二次信号中止 in-flight 中转（多段 AbortMultipart 清理），失败任务落 backup_failed（本模式自己的补跑输入）。
 
 20. **两段式信号与失败文件即断点**（断点续传的总体设计）：
-  - **架构原则**：不做 per-object done-set（十亿级对象的逐对象记账是写放大灾难；probe 幂等；LIST 天然带 continuation token；append-only 文件 + 每轮新时间戳目录构成检查点。例外：Mode 2 的**页级** journal——1 行/1000 对象，见不变量 21）。**每个失败文件有且仅有一个补跑入口**：`list_failed.txt` → `-resume-list`（仅 Mode 2；Mode 1 根/子前缀游标语义在行内不可区分、Mode 3 递归无游标——这两类列举失败重试 = 原命令重跑，union 吸收重复）；`check_failed.txt`/`mp_check_failed.txt`/`list_parse_failed.txt`/`mismatch.txt` → `-check-file`（循环喂回至收敛；list_parse_failed.txt 行格式 `bucket|key` 对齐 check_failed.txt，retry HEAD 重新取 ETag/Size）；`backup_failed.txt` → `-backup-file` 自喂；`parse_failed.txt`/`invalid_keys.txt` → 人工；`mp.txt` → 人工补 offsets。跨轮逻辑结果 = 各 run 目录并集（`sort -u` 去重），收敛判据 = 最新一轮失败文件为空。
+  - **架构原则**：不做 per-object done-set（十亿级对象的逐对象记账是写放大灾难；probe 幂等；LIST 天然带 continuation token；append-only 文件 + 每轮新时间戳目录构成检查点。例外：Mode 2 的**页级** journal——1 行/1000 对象，见不变量 21）。**每个失败文件有且仅有一个补跑入口**：`list_failed.txt` → `-resume-list`（仅 Mode 2；Mode 1 根/子前缀游标语义在行内不可区分、Mode 3 递归无游标——这两类列举失败重试 = 原命令重跑，union 吸收重复）；`check_failed.txt`/`mp_check_failed.txt`/`list_parse_failed.txt`/`mismatch.txt` → `-check-file`（循环喂回至收敛；list_parse_failed.txt 行格式 `bucket\x1fkey` 对齐 check_failed.txt，retry HEAD 重新取 ETag/Size）；`backup_failed.txt` → `-backup-file` 自喂；`parse_failed.txt` → 人工；`mp.txt` → 人工补 offsets。跨轮逻辑结果 = 各 run 目录并集（`sort -u` 去重），收敛判据 = 最新一轮失败文件为空。
   - **第一次 SIGINT/SIGTERM**（`installSignalHandler` cancel listCtx）：停止 S3 LIST 与输入文件读取；in-flight 页的 ListPage 返回 ctx 错误 → 现有失败路径写 `list_failed(prefix, 本页游标)`——记录的是**未完成页**的 cursor，已成功的页不重列；队列里未弹出的 prefix 由 `drainQueuedPrefixes`（在 `listWg.Wait` 后、`close(objCh)` 前）写入 list_failed（裸 prefix = 从头列；`-resume-list` 种子 `prefix\x00token` 原样往返其游标，`Queue.Drain()` 取残余）；objCh 中已入队任务继续被 check worker 消费至完成。**不变量：run 目录是完备检查点**——每个 prefix 要么列完且每个对象都有终态，要么带可续游标。run 返回 `errInterrupted`（非零退出，数据无损失）。
   - **第二次信号**（cancel hardCtx）：in-flight 探测/中转中止（`Checker`/`BackupChecker`/relay 全走 hard ctx），objCh/ch 中剩余任务快速失败落 `check_failed`/`mp_check_failed`/`backup_failed`（即各自的补跑输入）——**硬停也不静默丢对象**。多段中转 Abort 清理。
   - **硬停 mid-page 的游标语义**：lister/walker/Mode-1 根循环的 objCh 发送 select 在 hardCtx.Done 分支记录**当前页**的 continuationToken（不是下一页）——resume 重列本页即可找回未发送的对象；已发送对象在 check worker 侧因 ctx 取消落 check_failed，同样可补跑。
@@ -136,14 +136,30 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 21. **Mode 2 journal：kill -9 断点续跑**（`journal.go`，spec `docs/superpowers/specs/2026-11-05-resume-journal-design.md`）：
   - **启用条件**：`list_type=2 ∧ 文件输入=无`——全新扫描、`-resume-list` 恢复轮、`-resume-journal` 恢复轮都记账（`-resume-list` 轮同样长跑、同样会被 kill）。`journal.txt` 落输出目录根，append-only；恢复后写新时间戳目录的新 journal。
-  - **三行格式**：`discovered|<prefix>` / `cursor|<prefix>|<token>` / `done|<prefix>`。解析规则：discovered/done 的 prefix = 整行余量（容 `|`）；cursor 在余量取**最后一个** `|` 切分（发射侧保证 token 不含 `|`/`\n`，含则跳过该游标行，见下"checkpoint 时机"）；重放取每 prefix 最后一条事件；末尾无换行的残行丢弃（kill 撕裂批次，安全方向）；其他坏行报错（机器写的文件，中间坏 = 真损坏）。
-  - **"完成"的语义**（正确性核心）：prefix 的某页"完成" = 该页**全部**对象的结果行已推入输出 channel——不是"列举过"、不是"发射过"。页的待终态计数在 `ListPage` 成功时按 `len(objs)` **整页一次性登记**（硬停打断半页时计数永不归零 → 水位冻在该页前 → 恢复重列整页）；`Terminal` 由 checker `Handle` 的 **defer** 上报（体 = 结果行已推 channel）；lister 短路对象（key 含 `|`）与 list-only 分类即终态。
+  - **三行格式**（`\x1f` 分隔，server 字段 `QueryEscape` 转义——单版本策略，旧 `|` 格式不可读）：`discovered\x1f<prefix>` / `cursor\x1f<prefix>\x1f<token>` / `done\x1f<prefix>`。解析规则：discovered/done 的 prefix = `QueryUnescape` 余量；cursor 在余量按 `\x1f` 切分两个字段各 `QueryUnescape`（含 `|`/`\n` 的 token 也能往返——这是 M1 修复，旧的"含 `|`/`\n` 跳过该游标"逻辑已删，转义让任何 token 都能逐字节往返）；重放取每 prefix 最后一条事件；末尾无换行的残行丢弃（kill 撕裂批次，安全方向）；其他坏行报错（机器写的文件，中间坏 = 真损坏）。
+  - **"完成"的语义**（正确性核心）：prefix 的某页"完成" = 该页**全部**对象的结果行已推入输出 channel——不是"列举过"、不是"发射过"。页的待终态计数在 `ListPage` 成功时按 `len(objs)` **整页一次性登记**（硬停打断半页时计数永不归零 → 水位冻在该页前 → 恢复重列整页）；`Terminal` 由 checker `Handle` 的 **defer** 上报（体 = 结果行已推 channel）；lister 短路对象（已移除——`\x1f`+转义让任何 key 都能往返）与 list-only 分类即终态。
   - **顺序不变量**（违反任意一条 = 覆盖漏洞）：① `AddDiscovered` 必须先于该页任何对象发射（否则"父页已终态、子前缀未记账"可同框快照，子树蒸发）；② checkpoint 固定顺序 = **快照 tracker → `Output.FlushAndWait` → 写批次（discovered 行在 cursor/done 行前；写短了回滚到批次前偏移，防撕裂残行被下批嫁接）→ Commit**——先快照后 flush 的因果：Terminal 在行推入 channel 之后才计数，快照里的每个终态的行必在该次 flush 覆盖内；③ `journalRun.Stop()`（同步等最终 checkpoint 完成）必须在 `out.Close()` **之前**——FlushAndWait 依赖 writer goroutine 存活。
-  - **checkpoint 时机**：种子落盘靠 **seeding 完成后立即触发的同步 checkpoint**（`JournalRunner.CheckpointNow`，main 在 seeding 分支链结束后调用）——checkpoint 循环先于 seeding 启动，其启动首检时刻 tracker 必为空；种子必须靠显式触发而非等首个 tick（否则头 10 分钟内 kill = 空 journal 不可恢复）。此后每 `journalCheckpointInterval`（10min 常量、包级 var）一次，ctx 取消时终检一次；环境变量 `JOURNAL_INTERVAL_SEC`（正整数秒，非法值启动报错）是 §7.5 烟囱专用覆盖杠杆——本地 minio 秒级跑完等不到首 tick。游标行文法按余量**最后一个** `|` 切分，隐含 token 不含 `|`；V1 的 NextMarker 是真实 key、可能含 `|`（或 `\n`），此类 token **跳过游标行不写**（前缀仍是 discovered，恢复时整前缀重列——多做工作、不漏对象）。恢复入口 `-resume-journal`：done 跳过、cursor 用 `SeedWithToken` 续、仅 discovered 裸列；**与 `-prefix` 互斥**（journal 即 scope）；空 journal 报错提示用原命令重跑（CheckpointNow 之后仍空 = 路径错/手工清空）。
+  - **checkpoint 时机**：种子落盘靠 **seeding 完成后立即触发的同步 checkpoint**（`JournalRunner.CheckpointNow`，main 在 seeding 分支链结束后调用）——checkpoint 循环先于 seeding 启动，其启动首检时刻 tracker 必为空；种子必须靠显式触发而非等首个 tick（否则头 10 分钟内 kill = 空 journal 不可恢复）。此后每 `journalCheckpointInterval`（10min 常量、包级 var）一次，ctx 取消时终检一次；环境变量 `JOURNAL_INTERVAL_SEC`（正整数秒，非法值启动报错）是 §7.5 烟囱专用覆盖杠杆——本地 minio 秒级跑完等不到首 tick。游标行按 `\x1f` 切分两个 `QueryEscape` 字段，V1 的 NextMarker 是真实 key 可能含 `|`/`\n`——转义让它们也能逐字节往返（M1 修复，旧"跳过含 `|`/`\n` 的游标"逻辑已删）。恢复入口 `-resume-journal`：done 跳过、cursor 用 `SeedWithToken` 续、仅 discovered 裸列；**与 `-prefix` 互斥**（journal 即 scope）；空 journal 报错提示用原命令重跑（CheckpointNow 之后仍空 = 路径错/手工清空）。
   - **内存**：Commit 后 done 前缀从内存 map 删除、水位以下簿记丢弃（journal 文件是权威全量）——活跃内存 = 一个周期的增量 + in-flight，不随桶规模增长。
-  - **验收标准**：任何出错/竞态的后果只能是"恢复时多做工作"，不允许"有对象漏检"——单测钉死：`TestTrackerFrozenOnPartialPage`、`TestListerJournalHardAbortFreezesPosition`、`TestCheckpointOrderAndDurability`、`TestJournalResumeRoundTrip`；端到端冒烟见 §7.5（kill -9 → 三态 journal → 续跑 → 并集完备性，2026-11-05 实跑通过）。
+  - **验收标准**：任何出错/竞态的后果只能是"恢复时多做工作"，不允许"有对象漏检"——单测钉死：`TestTrackerFrozenOnPartialPage`、`TestListerJournalHardAbortFreezesPosition`、`TestCheckpointOrderAndDurability`、`TestJournalResumeRoundTrip`；端到端冒烟见 §7.5（kill -9 → 三态 journal → 续跑 → 并集完备性，2026-11-05 实跑通过）。M1 修复后增加：`TestSnapshotEmitsCursorWithPipeOrNewlineToken`（转义让含 `|`/`\n` 的 token 也能往返，旧的跳过逻辑已删）。
 
 22. **中转 PUT 的 UNSIGNED-PAYLOAD**（`PutObjectStream`/`UploadPart`，`withUnsignedPayload`）：aws SDK v2 **无法**在纯 HTTP 上签名不可 seek 的流——payload-hash middleware 需要读完回卷，aws-chunked trailer 逃逸仅在 TLS 下启用，裸跑必报 "request stream is not seekable"。因此中转 PUT 一律换 `x-amz-content-sha256: UNSIGNED-PAYLOAD`（裸 body 直发、无分帧、无缓冲）。这同时是**特性**：中转的字节保真由 ETag 终验端到端把关，不依赖传输层签名；且 wire 上永远不出现 aws-chunked 帧形态（对落盘了分帧的那台故障服务器而言，任何新上传都不可能再产生同类损坏）。**不要**移除该选项"恢复签名"——会回到不可 seek 报错。seekable 源（`PutObjectLocal` 的文件、测试里的 `bytes.Reader`）走默认 full-payload-hash 裸发，与 minio 时代兼容。伪服务器解码 PUT body 必须按 `Content-Encoding: aws-chunked` 条件分支（`decodePutBody`），无条件解码会把裸 body 解成空串。
+
+23. **wire 层双重边界编码**（`s3client.go` `wireDecoder` + `output.go` `rowSep`）：server 字段（key/prefix/marker）跨两个边界，每个边界都做一次 `url.QueryEscape`/`QueryUnescape`，且**仅做一次**：
+  - **边界 A（wire 出口）**：`encoding_type_url=true` 时 LIST 请求带 `EncodingType=url`，wire 上 server 字段 URL 编码（保护 XML 反序列化免受 `\x1f` 等 XML 1.0 非法控制字符撕裂）。SDK 不解码，出口由 `wireDecoder.decode(raw)` 统一 `QueryUnescape`——`ListPage` 对 `Contents.Key`、`CommonPrefixes.Prefix`、V1 `NextMarker`/Contents-key-fallback 都调 `decode`；**V2 `NextContinuationToken` 不解码**——它是 opaque base64，可能含字面 `+`（probe-verified minio 语义），`QueryUnescape` 会把 `+` 变空格撕裂 token。wire decode 失败（stray `%XX`——server bug）保留原值 best-effort，`listLogger.Warn` 一次/页（非 debug_log 门控——生产信号不能被吞）。
+  - **边界 B（文件写入）**：`output.go` 的 `WriteListFailed`/`WriteCheckFailed`/`WriteMpCheckFailed`/`WriteListParseFailed`/`renderMultipartOffsets`/`writeTo` 对 server 字段（key/prefix/token/owner）`url.QueryEscape`，读取侧（`resume_list.go`/`backup_source.go`/`list_file_source.go`/`journal.go`）在 `\x1f` 分割后对每段 `QueryUnescape`。bucket 字段来自 CLI 不写文件、不转义；partcnt/offsets 是纯数字不转义。
+  - **行分隔符 `rowSep = "\x1f"`**（ASCII Unit Separator）：S3 key 可合法包含 `|`，旧 pipe 分隔会把含 `|` 的 key 静默错切。`\x1f` 是 ASCII 控制字符，不可能出现在 S3 key 里。
+  - **`invalid_keys.txt` 已整体移除**：`\x1f`+转义让任何 key 都能往返，旧"拦截含 `|` 的 key 到 invalid_keys"成死代码。`InvalidKeys` stats 字段、`invalidKeysCh`、`WriteInvalidKey`、`strings.Contains(o.Key, "|")` 短路检查全部删除。
+  - **单版本策略**：旧格式（`|` 分隔、未转义）的文件不可读——记录文件只用最新版本，不做旧格式兼容。例外：`-resume-list` 手写纯 prefix 行仍是活功能（空 token 时单字段 prefix 是合法条目）。
+  - **probe-verified minio 语义**（RELEASE.2025-09-06T17-38-46Z）：V1 `NextMarker` 出口编码、V2 `NextContinuationToken` 不透明 base64 不解码、`url.QueryUnescape` 对字面 `+` 的处理（wire 上 `+` 恒为空格，字面 `+` key 在 wire 上已转义为 `%2B`，无歧义）。
+
+24. **short-response quirk 检测**（`lister.go` `checkShortResponse`）：S3 LIST 返回 `IsTruncated=true` 但 `entries < max_keys` 是矛盾信号——服务端分页错误。`checkShortResponse(out, prefix, token, entries, truncated, maxKeys)` 在每个 LIST 页（lister / walker / Mode 1 根循环）调用：`maxKeys <= 0`（无 LoadConfig 的直接 Config）禁用检测；`!truncated` 直接返回（非末页无需检查）；`entries >= maxKeys` 直接返回（正常情况）；否则 `out.WriteShortResponseWarning(prefix, token, returned, maxKeys)` 写到 `listLogger`（非 debug_log 门控）——生产信号不能被吞。`max_keys` 是必填字段（1..1000），无该字段的旧 Config 启动报错。
+
+25. **无 common-prefix 启发式**（坑 11）：Contents 与 CommonPrefixes 由 wire XML 标签权威区分，**绝不**引入客户端 `HasSuffix(key, "/")` 启发式——`delete_marker_list_tool` 曾因此静默丢对象。任何 key（包括以 `/` 结尾的真实对象）都按 wire XML 标签路由到 objCh 作普通对象；common prefix 只来自 `CommonPrefixes.Prefix`。回归钉：`TestListerSlashSuffixKeyFlowsAsObject`（check 模式）、`TestListerSlashSuffixKeyFlowsAsObject_ListOnly`（list-only 模式）、`TestWalkerSlashSuffixKeyFlowsAsObject`（Mode 3 walker）。
+
+26. **窗口化 LIST 延迟统计**（`latency.go` `LatencyTracker`）：长跑的全局平均延迟会被早期 spike 稀释、掩盖当前批次健康。`LatencyTracker` 按滑动窗口（`latency_window_sec`，默认 60s，负值启动报错）维护 `count`/`sumNs`/`maxNs`，每窗口重置；`Record(d)` 与 `Snapshot()` 在窗口过期时先 rotate。零值可用（1 分钟默认窗口首用锁定，`SetWindow(<=0)` 保留默认）。`Stats.AddListCall` 双写全局计数（`ListCalls`/`ListAvgLatencyMs`，summary 用）与窗口（`ListLatencyAvgMs`/`ListLatencyMaxMs`，progress 默认分支用）。窗口化 `latency_avg_ms`/`latency_max_ms` 让操作员能在长跑中看到当前批次的延迟趋势，而非被早期 spike 主导。回归钉：`TestLatencyTrackerWindowedStats`、`TestLatencyTrackerRotatesOnWindowExpiry`、`TestLatencyTrackerZeroValueUsable`、`TestLatencyTrackerSetWindowMidRun`、`TestLatencyTrackerMonotonicMax`、`TestLatencyTrackerSnapshotIsIdempotent`、`TestLatencyTrackerConcurrentRecord`、`TestStatsWindowedListLatency`。
+
+27. **debug_log 每次 LIST 请求诊断**（`s3client.go` `listPageOnce`）：`cfg.debug_log=true` 时每个 LIST 调用打三行 Debug 级 slog（路由 stdout → run.log）——`list-page req`（marker/token/delim/maxKeys，调用前）、`list-page err`（req_id + 完整 err，失败时）、`list-page resp`（next/truncated/nContents/nCP，成功时）。V1 日志 `marker`（V1 cursor），V2 日志 `startAfter` + `token` 独立字段；V1 resp 的 `next` 是出口解码后的原始 key 形态，V2 resp 的 `next` 是不透明 base64 token 原样。所有 6 处 `Debug` 调用 nil 守卫（`if c.debugLogger != nil`），无 logger 时不打。`main` 在 `cfg.DebugLog=true` 时构造 `slog.New(slog.NewTextHandler(stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))` 注入到所有 worker。回归钉：`TestListPage_DebugLogEmitsReqRespLines`、`TestListPage_DebugLogEmitsErrLine`。`extractRequestID(err)`（`errors.As` 到 `*awshttp.ResponseError`）nil 安全，已在 backup/checker/walker 多处使用。
 
 ## 5. CLI 与配置
 
@@ -175,7 +191,11 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 | `backup_output_dir` | （无，必填） | `-backup-file` 模式专用输出目录；与 `output_dir` 分离以免 backup 结果与 list/check 结果混写。`NewBackupOutput` 用 `cfg.BackupOutputDir` 建 `MkdirAll` 并写所有 backup 文件；list/check 模式忽略该字段。`main` 启动时若 `-backup-file` 而 `BackupOutputDir==""` 直接 `os.Exit(2)`，同样受 `output_dir_timestamp` 控制并与 `output_dir` 共享同一时间戳成对生成 |
 | `is_check` | `true` | true=列举+校验；false=仅列举（不校验普通对象，不写对象文件，不创建 owner 目录，仅写 list_failed.*） |
 | `is_success_log` | `false` | 是否记录正常普通对象到 `<ownerID>/ok_objects.txt` |
-| `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 mp.txt 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，多段 ETag 返回 `<md5>-<partcnt>-<off0>\|<off1>\|...`，按真实 part 边界逐段检查；解析不出 offsets 回落 list_parse_failed.txt，**不再**写 mp.txt。**优先级高于 mode=2**）；`2`=固定分段检查（旧模式待废弃，必须配 `multipart_segment_size > 0`）。非法值启动报错；配置里出现已废弃的 `is_multipart_segment_check` 字段也报错并提示迁移（防旧配置被静默当作 mode=0） |
+| `max_keys` | 必填 | 每次 LIST 请求的最大键数（1..1000，必填，无默认）。决定分页粒度；服务端单页响应上限。`checkShortResponse` 用它判定短响应 quirk（IsTruncated && entries<max_keys）。无 LoadConfig 的直接 Config（maxKeys<=0）禁用短响应检测 |
+| `encoding_type_url` | `false` | true 时 LIST 请求带 `EncodingType=url`（V1/V2 都带）。wire 上 server 字段（key/prefix/marker）URL 编码，保护 XML 反序列化免受 `\x1f` 等 XML 1.0 非法控制字符撕裂。出口由 `wireDecoder` 统一 `QueryUnescape` 解码（边界 A，见不变量 23）；V2 `NextContinuationToken` 是不透明 base64 不解码。Wire decode 失败保留原值 best-effort，warn 一次/页到 `list_failed.log`。**在目标服务器上启用前必须先探测**——某些 S3 实现不支持该参数或解码行为不同（见 `memory/encoding-type-marker-semantics.md`） |
+| `debug_log` | `false` | true 时每次 LIST 请求打三行 Debug 级诊断（`list-page req`/`list-page err`/`list-page resp`）到 run.log，记录 marker/token/delim/maxKeys/req_id/next/truncated/nContents/nCP。便于追 marker 游标漂移与短响应 quirk。nil 守卫——无 logger 时不打。详见不变量 27 |
+| `latency_window_sec` | `60` | progress 行 `latency_avg_ms`/`latency_max_ms` 的滑动窗口秒数。每窗口重置，反映**当前批次**的 LIST 延迟健康（全局 `list_avg_ms` 会被早期 spike 稀释、掩盖当前批次问题）。0=用默认 60s；负值启动报错。详见不变量 26 |
+| `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 mp.txt 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，多段 ETag 返回 `<md5>-<partcnt>-<off0>|<off1>|...`——服务端 ETag 内部分隔符仍是 `|`，由服务端生成不可改，按真实 part 边界逐段检查；解析不出 offsets 回落 list_parse_failed.txt，**不再**写 mp.txt。**优先级高于 mode=2**）；`2`=固定分段检查（旧模式待废弃，必须配 `multipart_segment_size > 0`）。非法值启动报错；配置里出现已废弃的 `is_multipart_segment_check` 字段也报错并提示迁移（防旧配置被静默当作 mode=0） |
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
 | `whole_object_probe_threshold` | `1024` | 小对象全读阈值（字节）。`0<Size<=该值` 时走快路径：单次 `RangeGetAt(0, thr)` 读全对象，body 同时匹配 `chunkSigRe`（去 `^` 锚）OR `trailerRe`（`x-amz-checksum-(sha256\|crc32\|crc32c\|sha1\|crc64):`），1 请求覆盖段首+段尾两种损坏；超过该值走 head@0+tail@Size-128（普通）/head@0+(N-1)边界+tail@Size-128（多段）多探测。`0`=禁用快路径恒走多探测。负值启动报错 |
 | `is_multipart_success_log` | `false` | 是否记录干净的多段对象到 `<ownerID>/ok_mp.txt` |
@@ -206,32 +226,32 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 | 文件 | 内容 | 何时写 |
 |---|---|---|
-| `list_failed.txt` | 列举失败 `prefix\|token`（token 为失败页 continuationToken，第一页失败/未启动时为单字段 prefix；未配 `-prefix` 时根 prefix 失败写空行，合法条目） | list worker 调用失败（list-only 模式也写）；优雅中断时未启动 prefix 亦写入；可直喂 `-resume-list` 补跑（空行 = 根 prefix） |
+| `list_failed.txt` | 列举失败 `prefix\x1ftoken`（token 为失败页 continuationToken，第一页失败/未启动时为单字段 prefix；未配 `-prefix` 时根 prefix 失败写空行，合法条目） | list worker 调用失败（list-only 模式也写）；优雅中断时未启动 prefix 亦写入；可直喂 `-resume-list` 补跑（空行 = 根 prefix） |
 | `list_failed.log` | 列举失败结构化错误（slog text，req_id/prefix/http_code/s3_code/err） | 同上 |
-| `parse_failed.txt` | 输入解析失败的原始行（-check-file / -list-file / -backup-file / -resume-list 坏行、bkt 不匹配、whitespace-only 行） | `fileSource`/`readResumeList` 解析失败时写；不可自动补跑，需人工修输入 |
-| `list_parse_failed.txt` | mode=offset 下 ETag 解析失败的 multipart 对象 `bucket\|key` | **仅 mode=offset + S3 LIST**：服务端未实现 header / ETag 格式不符 / offset > Size。行格式对齐 check_failed.txt，可直喂 `-check-file` 补跑（retry HEAD 重新取 ETag/Size）。配套 `list_parse_failed.log`（slog，bucket/key/owner/size/etag_len/etag，完整 ETag 无截断） |
-| `invalid_keys.txt` | 违反 `\|` 字段分隔契约的 key/prefix（原始字节，不套格式） | lister LIST 拿到 key 含 `\|`（跳过对象不进 objCh）；`WriteListFailed` prefix 含 `\|`（不写 list_failed 改写此文件） |
-| `check_failed.txt` | 普通对象校验失败 `bkt\|key` | checker 普通对象 RangeGet/HEAD 失败；硬停时队列中未探测对象亦快速失败落此文件；可直喂 `-check-file`/`-backup-file` 普通对象输入补跑 |
+| `parse_failed.txt` | 输入解析失败的原始行（-check-file / -list-file / -backup-file / -resume-list 坏行、bkt 不匹配、whitespace-only 行、无效 `%XX` 转义） | `fileSource`/`readResumeList` 解析失败时写；不可自动补跑，需人工修输入 |
+| `list_parse_failed.txt` | mode=offset 下 ETag 解析失败的 multipart 对象 `bucket\x1fkey` | **仅 mode=offset + S3 LIST**：服务端未实现 header / ETag 格式不符 / offset > Size。行格式对齐 check_failed.txt，可直喂 `-check-file` 补跑（retry HEAD 重新取 ETag/Size）。配套 `list_parse_failed.log`（slog，bucket/key/owner/size/etag_len/etag，完整 ETag 无截断） |
+| `check_failed.txt` | 普通对象校验失败 `bkt\x1fkey` | checker 普通对象 RangeGet/HEAD 失败；硬停时队列中未探测对象亦快速失败落此文件；可直喂 `-check-file`/`-backup-file` 普通对象输入补跑 |
 | `check_failed.log` | 校验失败结构化错误（slog text，req_id/key/http_code/s3_code/err） | 同上 |
-| `mp_check_failed.txt` | 多段分段检查失败 `bkt\|key\|partcnt\|off0\|...` | `multipart_check_mode=1/2`（或文件检查模式）时分段 RangeGet/HEAD 失败；可直喂 -check-file/-backup-file 补跑 |
+| `mp_check_failed.txt` | 多段分段检查失败 `bkt\x1fkey\x1fpartcnt\x1foff0\x1f...` | `multipart_check_mode=1/2`（或文件检查模式）时分段 RangeGet/HEAD 失败；可直喂 -check-file/-backup-file 补跑 |
 | `mp_check_failed.log` | 多段分段检查失败结构化错误（slog text） | 同上 |
 | `backup_ok.txt` | 备份成功的原始输入行 | `-backup-file`：中转 + ETag 终验通过 |
 | `backup_failed.txt` | 备份失败的原始输入行（可自喂重试） | `-backup-file`：HEAD 失败（stage=head）/中转失败（stage=upload）/ETag 终验失败（stage=etag，坏副本保留）；硬停时队列中未处理对象快速失败落此文件 |
 | `backup_failed.log` | 备份失败结构化错误（stage/head→upload→etag） | 同上 |
 | `mismatch.txt` | 输入类型校验失败的原始行（对象在检查后被改写） | `-backup-file`：行声明类型与 HEAD 判型不一致；可直喂 `-check-file` 重查当前状态 |
-| `journal.txt` | Mode 2 扫描进度三行格式：`discovered\|<prefix>` / `cursor\|<prefix>\|<token>` / `done\|<prefix>`（append-only，每 10 分钟 checkpoint 批次，批内 discovered 行先于 cursor/done） | `list_type=2 ∧ 非文件输入`的运行（含 -resume-list/-resume-journal 恢复轮）；恢复 = `-resume-journal` 直喂，重放取每 prefix 最后一条；详见 §4.21 |
+| `journal.txt` | Mode 2 扫描进度三行格式：`discovered\x1f<prefix>` / `cursor\x1f<prefix>\x1f<token>` / `done\x1f<prefix>`（append-only，每 10 分钟 checkpoint 批次，批内 discovered 行先于 cursor/done；server 字段 `QueryEscape` 转义） | `list_type=2 ∧ 非文件输入`的运行（含 -resume-list/-resume-journal 恢复轮）；恢复 = `-resume-journal` 直喂，重放取每 prefix 最后一条；详见 §4.21 |
 
 `is_check=false` 时不校验普通对象，不写任何对象文件，不创建 owner 目录，仅写 `list_failed.*`。`is_check=true && multipart_check_mode=0`（非文件检查模式）时 `corrupted_mp.txt` / `ok_mp.txt` / `mp_check_failed.*` 不创建。文件输入模式的 owner 恒为空 → 结果全落 `_unknown/`。
 
 ### 结果文件行格式
 
-per-owner 结果文件每行按 `result_line_format` 配置渲染（默认 `<bucket>|<key>`），启动时在配置快照里打印实际生效值。解析在 `NewOutput` 完成（`parseLineFormat`），未知占位符 / 未闭合 `<` 报错并中止启动。处理文件（`list_failed`/`parse_failed`/`invalid_keys`/`check_failed`/`mp_check_failed` 的 .txt 与 .log）**不**套用此格式，而是按各自补跑链路需要的格式写入：
-- `list_failed.txt` = `prefix|token`（token 为空时单字段 prefix）— `-resume-list` 解析此格式
+per-owner 结果文件每行按 `result_line_format` 配置渲染（默认 `<bucket>|<key>`，渲染时 `<key>`/`<owner>` 字段 `url.QueryEscape`，`<bucket>` 来自 CLI 不转义），启动时在配置快照里打印实际生效值。解析在 `NewOutput` 完成（`parseLineFormat`），未知占位符 / 未闭合 `<` 报错并中止启动。处理文件（`list_failed`/`parse_failed`/`check_failed`/`mp_check_failed` 的 .txt 与 .log）**不**套用此格式，而是按各自补跑链路需要的格式写入（字段分隔符 `\x1f`、server 字段 `QueryEscape`）：
+- `list_failed.txt` = `prefix\x1ftoken`（token 为空时单字段 prefix）— `-resume-list` 解析此格式
 - `parse_failed.txt` = 原始输入行（整行，不切分）
-- `invalid_keys.txt` = 原始 key/prefix（整行，不切分）
-- `check_failed.txt` = `bkt|key` — 对齐 `-backup-file` 普通对象 2 字段输入
-- `mp_check_failed.txt` = `bkt|key|partcnt|off0|...` — 对齐 `-backup-file`/`-list-file` 多段输入
+- `check_failed.txt` = `bkt\x1fkey` — 对齐 `-backup-file` 普通对象 2 字段输入
+- `mp_check_failed.txt` = `bkt\x1fkey\x1fpartcnt\x1foff0\x1f...` — 对齐 `-backup-file`/`-list-file` 多段输入
+- `list_parse_failed.txt` = `bkt\x1fkey` — 对齐 check_failed.txt
 - `.log` 文件用 slog text handler，结构化字段（req_id/bucket/key/http_code/s3_code/err）
+- `journal.txt` = `discovered\x1f<prefix>` / `cursor\x1f<prefix>\x1f<token>` / `done\x1f<prefix>` — server 字段 `QueryEscape`
 
 ### 启动输出 / run.log
 
@@ -468,8 +488,9 @@ JOURNAL_INTERVAL_SEC=1 /tmp/chunked_check_tool -c cfg-kill.yaml -bkt testbucket 
 PID=$!; sleep 3; kill -9 $PID; wait $PID; echo "exit=$?"    # 期望 137
 
 KILL_DIR=<被 kill 那轮的输出目录>       # 时间戳最新的 out_*
-awk -F'|' '{print $1}' $KILL_DIR/journal.txt | sort | uniq -c
+awk -F'\x1f' '{print $1}' $KILL_DIR/journal.txt | sort | uniq -c
 #   期望三类行齐备：done（扫完前缀）+ cursor（分页中途）+ discovered（种子/未启动）
+#   （journal.txt 字段分隔符是 \x1f，不是 |——见不变量 21/23）
 
 # 从 journal 续跑（-prefix 必须为空，journal 即扫描范围）
 /tmp/chunked_check_tool -c cfg-kill.yaml -bkt testbucket -resume-journal $KILL_DIR/journal.txt
@@ -482,7 +503,7 @@ for f in $KILL_DIR/minio/ok_objects.txt $KILL_DIR/minio/corrupted_objects.txt \
   cut -d'|' -f2 /tmp/f.tmp
 done | sort -u > union.txt
 mc ls --recursive local/testbucket | awk '{print $NF}' | sort > mckeys.txt
-diff union.txt mckeys.txt      # 期望空（有 mp.txt/invalid_keys.txt 的配置把它们也并进 union）
+diff union.txt mckeys.txt      # 期望空（有 mp.txt 的配置把它也并进 union）
 ```
 
 期望（实跑值）：
@@ -510,7 +531,7 @@ diff union.txt mckeys.txt      # 期望空（有 mp.txt/invalid_keys.txt 的配�
 
 ### 8.1 journal 遗留项（2026-11-06 review 轮 deferred，M=Minor / N=Nit）
 
-- **M1：key 含换行符 `\n` 破坏 journal 行格式**：journal（及所有 pipe 分隔的输出文件）是"一行一条记录"的文本格式，key 自带换行会把一条记录拆成两行。后果是恢复时重放读到坏行**报错停机**（fail-loud，不静默漏检）。不修理由：全工具只在 lister 拦含 `|` 的 key（落 invalid_keys.txt），换行 key 哪里都没拦——只在 journal 层修是修一半，修全需要给所有输出定 key 转义规则（独立设计决定）。**修复触发条件**：客户桶出现换行 key。修法参考：lister 的 key 拦截扩展到 `\n`（同 `|` 一样短路进 invalid_keys），或输出层引入转义。
+- **M1（已解决 2026-11-24）：key 含 `\n` 或 `|` 破坏 journal 行格式**：journal（及所有 `\x1f` 分隔的输出文件）现在用 ASCII Unit Separator `\x1f` 作字段分隔，server 字段（key/prefix/token/owner）写入时 `url.QueryEscape`、读取时 `QueryUnescape`——含 `|`/`\n`/`%`/`+` 的 token 都能逐字节往返。旧的"含 `|`/`\n` 跳过该游标"逻辑已删，`TestSnapshotEmitsCursorWithPipeOrNewlineToken` 是回归钉。这是**全工具**的转义规则（不变量 23），不只是 journal 层修一半。
 - **N1：`FlushAndWait` 在 `out.Close()` 之后调用会永久阻塞**：写手 goroutine 已退出、flush 请求无人应答。现有接线不可达：不变量 ③（`journalRun.Stop()` 先于 `out.Close()`）锁死时序。**修复触发条件**：未来有人改动关停顺序或新增 FlushAndWait 调用点时，顺手加"Close 后返回而非阻塞"守卫。
 - **N2：journal.go 内存注释措辞过头**："不随桶规模增长"的精确说法是上限 = 一个 checkpoint 间隔内新发现的前缀量（发现速率 × 间隔），极端发现速率下也会不小。**修复触发条件**：下次改 journal.go 时顺带改一行注释，无需单独动。
 - **N3：测试直接改写包级 `journalCheckpointInterval` 的恢复纪律**：测试改小该变量观察 tick、靠 defer 恢复；Go 同包测试默认串行所以今天踩不到，但与 `t.Parallel()` 不兼容。**修复触发条件**：有测试要加 `t.Parallel()` 时，先把该变量改为 per-test 注入。
