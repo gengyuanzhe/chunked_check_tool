@@ -15,7 +15,7 @@ import (
 // key/versionID 已从文件编码态（url.QueryEscape）解码为原始形态（发请求用原始
 // 形态）；输出文件由 Output 层统一重新 QueryEscape（行格式契约：文件恒编码态）。
 //
-// LastModified 透传 lister 的输出，可能是 RFC3339 字符串或空串（旧 3 段输入）。
+// LastModified 透传 lister 的输出，RFC3339 字符串。
 type Row struct {
 	Bkt, Key, VersionID, LastModified string
 }
@@ -27,14 +27,6 @@ type Row struct {
 // line 路径，写 failed.txt + slog 详情）。
 //
 // 返回 ok=false 仅当字段数 != 3 且 != 4，或 URL 解码失败。
-//
-// 兼容 3 段（旧输入：bkt\x1fkey\x1fversionID）和 4 段（新输入：
-// bkt\x1fkey\x1fversionID\x1flastModified）。3 段输入的 LastModified 为空串，
-// 输出时第四列写空串，保持下游解析稳定。
-//
-// 兼容性：改动前 encoding_type_url=false 时代的旧文件是原始态，不含 '+'/%XX 的
-// 值解码恒等无损；含字面 '+' 或合法 %XX 的旧值会被误解码——旧批次文件不要混入，
-// 整批重跑。
 func ParseRow(line string) (Row, bool) {
 	parts := strings.Split(line, "\x1f")
 	if len(parts) != 3 && len(parts) != 4 {

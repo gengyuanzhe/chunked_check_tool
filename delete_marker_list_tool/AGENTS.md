@@ -138,7 +138,7 @@ flowchart TD
 
 13. **`-retry <file>` 与 `-prefix` 互斥**：`-retry` 读文件每行一个 RetryEntry，初始 BFS 入队用该列表（去重保序，按 prefix+marker 三元组去重）。mode 1 + 多 entry 报错（`Lister.Run` 在 `list_type==1 && len(entries)>1` 时报错）；mode 1 + 单 entry retry 文件不报错——从该 entry 的 marker 续扫该 prefix。`-retry` 文件不存在 = 硬退出（`resolveEntries` 调 `readRetryEntries`，文件缺失在 BFS 启动前报出）。`-retry` 模式下 `list_failed.txt` 仍会记新失败，可多次 `-retry list_failed.txt` 续传；但 `output_dir_timestamp: true`（默认）时每次运行目录不同，retry 文件需指向上一轮的 `<output_dir>_<ts>/list_failed.txt`。
 
-14. **`-retry` 是 next-marker 页级续传**：每行格式 `prefix\x1fkeyMarker\x1fversionIdMarker`（三字段均为 URL 编码态，读取时 `parseRetryLine` 解码）——失败 prefix 已扫完的最后一页的 next-marker 被写入 `list_failed.txt`，retry 时从该 marker 起续扫（不重扫已扫页）。无 `\x1f` 行向后兼容旧格式（纯 prefix，从第一页扫）。`list_failed.txt` 行格式：`<编码prefix>\x1f<编码keyMarker>\x1f<编码versionIdMarker>\n`，三个 marker 都空 = 从第一页扫（含 root prefix）。prefix/markers 含 `\x1f`/`\n` 等撕裂字符无碍——文件恒为编码态，行结构不会破。`ListVersionsPage` 是 page-at-a-time：worker 分页循环里 `keyMarker`/`versionIDMarker` 是局部变量，失败时它们的值就是这次失败请求用的 marker = 续传点，直接 `recordListFailed(prefix, keyMarker, versionIDMarker, err)`——无 channel、无时序依赖、不可能丢 marker。
+14. **`-retry` 是 next-marker 页级续传**：每行格式 `prefix\x1fkeyMarker\x1fversionIdMarker`（三字段均为 URL 编码态，读取时 `parseRetryLine` 解码）——失败 prefix 已扫完的最后一页的 next-marker 被写入 `list_failed.txt`，retry 时从该 marker 起续扫（不重扫已扫页）。`list_failed.txt` 行格式：`<编码prefix>\x1f<编码keyMarker>\x1f<编码versionIdMarker>\n`，三个 marker 都空 = 从第一页扫（含 root prefix）。prefix/markers 含 `\x1f`/`\n` 等撕裂字符无碍——文件恒为编码态，行结构不会破。`ListVersionsPage` 是 page-at-a-time：worker 分页循环里 `keyMarker`/`versionIDMarker` 是局部变量，失败时它们的值就是这次失败请求用的 marker = 续传点，直接 `recordListFailed(prefix, keyMarker, versionIDMarker, err)`——无 channel、无时序依赖、不可能丢 marker。
 
 ## 6. 约束
 

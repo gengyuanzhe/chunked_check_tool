@@ -74,7 +74,7 @@ list（首次扫，-prefix 或全桶）
 
 - **`output_dir_timestamp: true`（默认）**：每次运行 output_dir 不同，retry 文件需指向**上一轮**的 `<output_dir>_<ts>/list_failed.txt`，不是本轮目录里的文件（本轮的 list_failed.txt 是这次失败才会写）。设 `output_dir_timestamp: false` 可固定目录、反复 append 到同一个 list_failed.txt，但要注意 append 模式下文件不会自动清空。
 - **`-retry` 是 next-marker 页级续传**：失败 prefix 已扫完的最后一页的 NextKeyMarker/NextVersionIdMarker 被写入 `list_failed.txt`，retry 时 `ListVersions` 从该 marker 起续扫。已扫页不会重扫——`delete_markers.txt` 不会重复。
-- **`list_failed.txt` 行格式**：`prefix\x1fkeyMarker\x1fversionIdMarker\n`。无 `\x1f` 行向后兼容旧格式（纯 prefix，从第一页扫）。**prefix 含 `\x1f` 不支持**——`\x1f` 是字段分隔符，无法在 3-field 格式里无歧义表示（与 `delete_markers.txt` 用 `\x1f` 分隔 key 同理的限制；S3 key/prefix 极少含 `\x1f`）。
+- **`list_failed.txt` 行格式**：`<prefix>\x1f<keyMarker>\x1f<versionIdMarker>\n`，三字段均为 URL 编码态（`-retry` 读取时解码）。prefix/markers 含 `\x1f`/`\n` 等撕裂字符无碍——文件恒为编码态，行结构不会破。
 - **mode 1 + `-retry`**：mode 1 是单流递归，多 entry 入口与单流语义冲突——`-retry` 文件含 ≥2 entry 时报错；只含 1 entry 时不报错，从该 entry 的 marker 续扫该 prefix。
 
 ## 配置
@@ -132,8 +132,6 @@ repair_next_vid_marker_on_short_response: false # true=短响应触发时按 a/b
 | `run.log` | 进程日志：stdout/stderr tee、配置快照（sk 掩码）、进度行、summary | 纯文本 |
 | `list_failed.txt` | 列举失败的前缀+页级 marker（惰性创建：文件不存在=无失败） | `<prefix>\x1f<keyMarker>\x1f<versionIdMarker>`（三字段均为 URL 编码态）；空 marker=从第一页扫 |
 | `list_failed.log` | 失败详情（slog text） | `bucket`/`prefix`/`http_code`/`s3_code`/`req_id`/`err` |
-
-**兼容性**：改动前的旧文件在 `encoding_type_url: false` 时代是原始态——不含 `+`/`%XX` 的值解码恒等无损；含字面 `+` 或合法 `%XX` 序列的旧值会被新读取器误解码。旧批次文件不要混入，整批重跑。
 
 ## 进度行格式
 

@@ -63,7 +63,7 @@ func TestParseRow_NullVersionIdPassesThrough(t *testing.T) {
 	}
 }
 
-// ParseRow 兼容 3 段（旧输入）和 4 段（新输入带 lastModified）。
+// ParseRow 接受 3 段和 4 段两种字段数。
 func TestParseRow_Accepts3And4Fields(t *testing.T) {
 	// 3 段：LastModified 为空
 	r3, ok := ParseRow("bkt\x1fk\x1fv1")

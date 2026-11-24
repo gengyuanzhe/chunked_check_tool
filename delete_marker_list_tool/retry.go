@@ -21,19 +21,13 @@ type RetryEntry struct {
 // 文件格式契约：三字段（prefix/keyMarker/versionIdMarker）均为 URL 编码态
 // （list_failed.txt 由 Output 层 QueryEscape 落盘），这里逐字段 url.QueryUnescape
 // 恢复原始形态——发请求用的就是原始形态。行结构：
-//   - 无 \x1f：纯 prefix（向后兼容旧 list_failed.txt），markers 空 = 从第一页扫
 //   - 2 个 \x1f：prefix\x1fkeyMarker\x1fversionIdMarker（标准格式）
-//   - 1 个 \x1f：格式非法（marker 必须成对），报错
 //   - 其他 \x1f 数量：格式非法，报错
 //   - 任一字段解码失败（非法 %XX）：格式非法，报错（工具生成的文件不应出现）
 //
-// 空行 = root prefix + 从第一页扫（对齐旧 list_failed.txt 语义）。
+// 空行 = root prefix + 从第一页扫。
 // 去重保序——按 (prefix, keyMarker, versionIDMarker) 三元组去重。
 // 空文件（无行）返回单元素 [{Prefix:""}]（root prefix），保证 retry 空文件仍能扫 root。
-//
-// 兼容性：改动前 encoding_type_url=false 写出的旧文件是原始态，不含 '+'/%XX 的
-// 值解码恒等无损；含字面 '+' 或合法 %XX 的旧值会被误解码——旧批次文件不要混入，
-// 整批重跑。
 func readRetryEntries(path string) ([]RetryEntry, error) {
 	f, err := os.Open(path)
 	if err != nil {

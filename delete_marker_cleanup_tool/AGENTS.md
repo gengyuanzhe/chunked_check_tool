@@ -55,7 +55,7 @@ flowchart TD
 ```mermaid
 flowchart LR
     File[input.txt] --> Scan[bufio.Scanner]
-    Scan --> Parse[ParseRow<br/>3/4 段兼容<br/>key/versionID 无条件 URL 解码]
+    Scan --> Parse[ParseRow<br/>4 段行解析<br/>key/versionID 无条件 URL 解码]
     Parse -->|torn line| FailLog[head/delete_failed.log<br/>torn note]
     Parse --> RowCh["rowCh<br/>buf 1024"]
     RowCh -->|抢任务| W1["worker 1<br/>endpoint 0"]

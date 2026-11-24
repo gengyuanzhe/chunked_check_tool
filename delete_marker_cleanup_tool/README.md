@@ -91,7 +91,6 @@ latency_window_sec: 60              # 请求时延统计窗口秒数（progress 
 - 由 `delete_marker_list_tool` 产出的 `delete_markers.txt` 直接消费
 - 本工具自己产出的 `head_failed.txt` / `delete_failed.txt` 也可直接喂回 `-input` 重跑（行格式同构，key 已编码）
 - `version_id` 字面量 `"null"` 解码恒等、原样透传（S3 开版本控制前的旧对象，合法值）
-- **兼容性**：改动前 `encoding_type_url: false` 时代的旧文件是原始态——不含 `+`/`%XX` 的值解码恒等无损；含字面 `+` 或合法 `%XX` 序列的旧值会被误解码。旧批次文件不要混入，整批重跑。
 
 ## 输出文件
 

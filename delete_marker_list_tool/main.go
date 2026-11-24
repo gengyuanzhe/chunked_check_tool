@@ -16,8 +16,7 @@ import (
 // -prefix 和 -retry 互斥：-retry 从文件读 prefix 列表（一行一个），-prefix
 // 是单值的语法糖。两者都空 = 扫整个 bucket（root prefix）。
 // -retry 文件每行格式（三字段均为 URL 编码态，读取时解码）：
-// prefix\x1fkeyMarker\x1fversionIdMarker（空 marker = 从第一页扫；无 \x1f =
-// 纯 prefix 向后兼容）。
+// prefix\x1fkeyMarker\x1fversionIdMarker（空 marker = 从第一页扫）。
 func main() {
 	cfgPath := flag.String("c", "", "config yaml path")
 	bucket := flag.String("bkt", "", "bucket name")

@@ -20,8 +20,7 @@ func TestReadRetryEntries_HappyPath(t *testing.T) {
 }
 
 func TestReadRetryEntries_EmptyLineIsRootPrefix(t *testing.T) {
-	// 空行=root prefix + 从第一页扫，保留不跳——list_failed.txt 里 root prefix
-	// 失败记成空行（向后兼容）。
+	// 空行=root prefix + 从第一页扫，保留不跳。
 	p := writeRetryFile(t, "\na/\n")
 	got, err := readRetryEntries(p)
 	if err != nil {
