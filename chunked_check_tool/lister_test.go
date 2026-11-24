@@ -351,3 +351,124 @@ func TestListerPassesConfiguredMaxKeys(t *testing.T) {
 		t.Errorf("ListPage maxKeys = %d, want 500 (cfg.MaxKeys)", fake.lastMaxKeys)
 	}
 }
+
+// TestListerSlashSuffixKeyFlowsAsObject pins the no-common-prefix-heuristic
+// invariant: a real object whose key ends in '/' flows to objCh as a normal
+// VerifyTask, the same as any other key. The lister MUST NOT classify keys
+// by suffix (e.g. "ends in /" → treat as a common prefix). The wire protocol
+// already separates Contents from CommonPrefixes via independent XML tags;
+// any client-side heuristic would silently drop or mis-route real objects
+// (delete_marker_list_tool pitfall 11).
+func TestListerSlashSuffixKeyFlowsAsObject(t *testing.T) {
+	fake := &scriptedS3{
+		pages: map[string][]pageResult{
+			"root/": {
+				{
+					objs: []ObjectInfo{
+						{Key: "root/sub/", ETag: "0123456789abcdef0123456789abcdef"}, // real object, ends in '/'
+						{Key: "root/file", ETag: "0123456789abcdef0123456789abcdef"},
+					},
+					prefixes: []string{"root/realprefix/"}, // a true common prefix from the wire
+				},
+			},
+			"root/realprefix/": {
+				{objs: []ObjectInfo{{Key: "root/realprefix/inner", ETag: "0123456789abcdef0123456789abcdef"}}},
+			},
+		},
+	}
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, ListType: 2, ListConcurrency: 1, CheckConcurrency: 1, IsCheck: true}
+	out, err := NewOutput(cfg, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatalf("NewOutput: %v", err)
+	}
+	defer out.Close()
+	stats := NewStats()
+	q := NewQueue()
+	lister := NewLister(q, out, stats, cfg)
+
+	objCh := make(chan VerifyTask, 8)
+	lister.Seed("root/")
+
+	var wg sync.WaitGroup
+	for i := 0; i < cfg.ListConcurrency; i++ {
+		wg.Add(1)
+		go lister.Run(context.Background(), context.Background(), &wg, objCh, i, fake, nil)
+	}
+	go func() {
+		wg.Wait()
+		close(objCh)
+	}()
+
+	got := map[string]bool{}
+	for t := range objCh {
+		got[t.Key] = true
+	}
+	// The slash-suffix object MUST appear as a regular task. If a heuristic
+	// ever re-classifies it as a common prefix, this assertion fires.
+	if !got["root/sub/"] {
+		t.Errorf("slash-suffix key 'root/sub/' missing from tasks (got %v); the lister must not classify keys by suffix", got)
+	}
+	if !got["root/file"] {
+		t.Errorf("plain key 'root/file' missing from tasks: %v", got)
+	}
+	if !got["root/realprefix/inner"] {
+		t.Errorf("common-prefix-descended object missing from tasks: %v", got)
+	}
+	// 3 objects total (2 root + 1 under the real common prefix). All counted
+	// as listed_obj (no ETag trickery — single-segment ETag → "normal object").
+	if got := stats.Snapshot().ListedObjects; got != 3 {
+		t.Errorf("ListedObjects = %d, want 3 (slash-suffix counted as object): snapshot=%+v", got, stats.Snapshot())
+	}
+}
+
+// TestListerSlashSuffixKeyFlowsAsObject_ListOnly is the list-only mode (IsCheck=false)
+// counterpart. processPrefix routes objects to local classification (no objCh push),
+// but the SAME per-object loop runs — a suffix heuristic would silently drop the
+// slash-suffix object from the listed counters. Pin the counter.
+func TestListerSlashSuffixKeyFlowsAsObject_ListOnly(t *testing.T) {
+	fake := &scriptedS3{
+		pages: map[string][]pageResult{
+			"root/": {
+				{
+					objs: []ObjectInfo{
+						{Key: "root/sub/", ETag: "0123456789abcdef0123456789abcdef"},
+						{Key: "root/file", ETag: "0123456789abcdef0123456789abcdef"},
+					},
+					prefixes: []string{"root/realprefix/"},
+				},
+			},
+			"root/realprefix/": {
+				{objs: []ObjectInfo{{Key: "root/realprefix/inner", ETag: "0123456789abcdef0123456789abcdef"}}},
+			},
+		},
+	}
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, ListType: 2, ListConcurrency: 1, CheckConcurrency: 1, IsCheck: false}
+	out, err := NewOutput(cfg, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatalf("NewOutput: %v", err)
+	}
+	defer out.Close()
+	stats := NewStats()
+	q := NewQueue()
+	lister := NewLister(q, out, stats, cfg)
+
+	objCh := make(chan VerifyTask, 8) // unused in list-only mode, but Run still closes it
+	lister.Seed("root/")
+
+	var wg sync.WaitGroup
+	for i := 0; i < cfg.ListConcurrency; i++ {
+		wg.Add(1)
+		go lister.Run(context.Background(), context.Background(), &wg, objCh, i, fake, nil)
+	}
+	go func() {
+		wg.Wait()
+		close(objCh)
+	}()
+	for range objCh {
+	}
+	if got := stats.Snapshot().ListedObjects; got != 3 {
+		t.Errorf("ListedObjects = %d, want 3 in list-only mode (slash-suffix counted as object): snapshot=%+v", got, stats.Snapshot())
+	}
+}

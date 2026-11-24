@@ -263,3 +263,57 @@ func (c *countingS3) AbortMultipart(ctx context.Context, bucket, key, uploadID s
 }
 
 var _ S3API = (*countingS3)(nil)
+
+// TestWalkerSlashSuffixKeyFlowsAsObject pins the no-common-prefix-heuristic
+// invariant on the Mode 3 walker code path (runRecursiveWalk), which is a
+// SEPARATE per-object loop from processPrefix. A real object whose key ends
+// in '/' MUST flow to objCh as a normal VerifyTask — the wire XML tags
+// (Contents vs CommonPrefixes) are authoritative; no client-side suffix
+// classification. Pins delete_marker_list_tool pitfall 11 for the walker.
+func TestWalkerSlashSuffixKeyFlowsAsObject(t *testing.T) {
+	tree := map[string][]pageResult{
+		"root/": {
+			{
+				objs: []ObjectInfo{
+					{Key: "root/sub/", ETag: "0123456789abcdef0123456789abcdef"}, // real object, ends in '/'
+					{Key: "root/file", ETag: "0123456789abcdef0123456789abcdef"},
+				},
+				prefixes: []string{"root/realprefix/"}, // a true common prefix from the wire
+			},
+		},
+		"root/realprefix/": {
+			{objs: []ObjectInfo{{Key: "root/realprefix/inner", ETag: "0123456789abcdef0123456789abcdef"}}},
+		},
+	}
+	fake := &scriptedS3{pages: tree}
+
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, ListType: 3, ListConcurrency: 2, CheckConcurrency: 1, IsCheck: true}
+	out, err := NewOutput(cfg, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatalf("NewOutput: %v", err)
+	}
+	defer out.Close()
+	stats := NewStats()
+
+	objCh := make(chan VerifyTask, 16)
+	runRecursiveWalk(context.Background(), context.Background(), fake, "root/", objCh, out, stats, cfg, nil)
+	close(objCh)
+
+	got := map[string]bool{}
+	for t := range objCh {
+		got[t.Key] = true
+	}
+	if !got["root/sub/"] {
+		t.Errorf("slash-suffix key 'root/sub/' missing from walker tasks (got %v); the walker must not classify keys by suffix", got)
+	}
+	if !got["root/file"] {
+		t.Errorf("plain key 'root/file' missing from walker tasks: %v", got)
+	}
+	if !got["root/realprefix/inner"] {
+		t.Errorf("common-prefix-descended object missing from walker tasks: %v", got)
+	}
+	if got := stats.Snapshot().ListedObjects; got != 3 {
+		t.Errorf("ListedObjects = %d, want 3 (slash-suffix counted as object): snapshot=%+v", got, stats.Snapshot())
+	}
+}
