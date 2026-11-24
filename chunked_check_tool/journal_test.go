@@ -434,7 +434,7 @@ func TestCheckpointOrderAndDurability(t *testing.T) {
 		jdata, _ := os.ReadFile(journalPath)
 		fdata, ferr := os.ReadFile(filepath.Join(dir, "check_failed.txt"))
 		if strings.Contains(string(jdata), "cursor|p|T1") &&
-			ferr == nil && strings.Contains(string(fdata), "test-bkt|obj/k1") {
+			ferr == nil && strings.Contains(string(fdata), "test-bkt\x1fobj%2Fk1") {
 			return
 		}
 		if time.Now().After(deadline) {

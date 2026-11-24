@@ -90,7 +90,7 @@ func TestDrainQueuedPrefixesRecordsSeeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(data), "plain/prefix\nresumed/|tok42\n"; got != want {
+	if got, want := string(data), "plain%2Fprefix\nresumed%2F\x1ftok42\n"; got != want {
 		t.Errorf("list_failed.txt = %q, want %q", got, want)
 	}
 	if got := stats.Snapshot().ListFailed; got != 2 {
@@ -169,7 +169,7 @@ func TestListerGracefulCancelRecordsNextPageToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(data), "root/|tok2\n"; got != want {
+	if got, want := string(data), "root%2F\x1ftok2\n"; got != want {
 		t.Errorf("list_failed.txt = %q, want %q (resume cursor = next of last successful page)", got, want)
 	}
 	if got := stats.Snapshot().ListFailed; got != 1 {
@@ -219,7 +219,7 @@ func TestListerHardAbortMidPageRecordsCurrentPageToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(data), "root/\n"; got != want {
+	if got, want := string(data), "root%2F\n"; got != want {
 		t.Errorf("list_failed.txt = %q, want %q (current page cursor re-lists the page; root/b is otherwise lost)", got, want)
 	}
 	if got := stats.Snapshot().ListFailed; got != 1 {
@@ -255,7 +255,7 @@ func TestWalkerCancelledBeforeStartRecordsPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(data), "root/\n"; got != want {
+	if got, want := string(data), "root%2F\n"; got != want {
 		t.Errorf("list_failed.txt = %q, want %q", got, want)
 	}
 	if got := stats.Snapshot().ListFailed; got != 1 {
@@ -300,7 +300,7 @@ func TestRunInterruptedDrainsQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(data), "scanscope/\n"; got != want {
+	if got, want := string(data), "scanscope%2F\n"; got != want {
 		t.Errorf("list_failed.txt = %q, want %q", got, want)
 	}
 	if !strings.Contains(buf.String(), "list_failed: 1") {

@@ -153,8 +153,8 @@ func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read check_failed.txt: %v", err)
 	}
-	if line := strings.TrimSpace(string(cfBytes)); line != "test-bkt|path/obj" {
-		t.Errorf("check_failed.txt = %q, want %q", line, "test-bkt|path/obj")
+	if line := strings.TrimSpace(string(cfBytes)); line != "test-bkt\x1fpath%2Fobj" {
+		t.Errorf("check_failed.txt = %q, want %q", line, "test-bkt\x1fpath%2Fobj")
 	}
 
 	// check_failed.log is slog text-handler output. req_id must appear
@@ -291,8 +291,8 @@ func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read mp_check_failed: %v", err)
 	}
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|k|2|0|5242880" {
-		t.Errorf("mp_check_failed.txt = %q, want %q", line, "test-bkt|k|2|0|5242880")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fk\x1f2\x1f0\x1f5242880" {
+		t.Errorf("mp_check_failed.txt = %q, want %q", line, "test-bkt\x1fk\x1f2\x1f0\x1f5242880")
 	}
 }
 
@@ -330,8 +330,8 @@ func TestCheckerOffsetModeCorruptedCarriesOffsets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read corrupted_mp: %v", err)
 	}
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|k|2|0|5242880" {
-		t.Errorf("corrupted_mp.txt = %q, want %q", line, "test-bkt|k|2|0|5242880")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fk\x1f2\x1f0\x1f5242880" {
+		t.Errorf("corrupted_mp.txt = %q, want %q", line, "test-bkt\x1fk\x1f2\x1f0\x1f5242880")
 	}
 }
 
@@ -360,8 +360,8 @@ func TestCheckerOffsetModeFallbackWritesListParseFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read list_parse_failed.txt: %v", err)
 	}
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|k" {
-		t.Errorf("list_parse_failed.txt = %q, want %q", line, "test-bkt|k")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fk" {
+		t.Errorf("list_parse_failed.txt = %q, want %q", line, "test-bkt\x1fk")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "owner-A", "mp.txt")); !os.IsNotExist(err) {
 		t.Errorf("mp.txt should not exist in mode=offset; stat err=%v", err)
@@ -799,7 +799,7 @@ func TestCheckerHeadFirstHeadFailureRoutesToMpCheckFailed(t *testing.T) {
 		t.Fatalf("read mp_check_failed.txt: %v", err)
 	}
 	// Line shape = bkt|key|partcnt|off0|off1, feedable back into -check-file.
-	wantLine := "mybucket|k|2|0|5242880"
+	wantLine := "mybucket\x1fk\x1f2\x1f0\x1f5242880"
 	if !strings.Contains(string(data), wantLine) {
 		t.Errorf("mp_check_failed.txt = %q, want substring %q", string(data), wantLine)
 	}
@@ -835,7 +835,7 @@ func TestCheckerHeadFirstHeadFailureRegularRoutesToCheckFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read check_failed.txt: %v", err)
 	}
-	if got, want := string(data), "mybucket|k\n"; got != want {
+	if got, want := string(data), "mybucket\x1fk\n"; got != want {
 		t.Errorf("check_failed.txt = %q, want %q", got, want)
 	}
 }

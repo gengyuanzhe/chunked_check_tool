@@ -152,7 +152,7 @@ func TestRunCheckFileEndToEnd(t *testing.T) {
 	}
 
 	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_objects.txt"), "srcbucket|regcorrupt\n")
-	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "srcbucket|mpcorrupt|1|0\n")
+	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "srcbucket\x1fmpcorrupt\x1f1\x1f0\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "srcbucket|mpclean\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "ok_objects.txt"), "srcbucket|driftreg\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "mp.txt"), "srcbucket|driftmp\n")
@@ -284,7 +284,7 @@ func TestRunListFileMultipartResultsEndToEnd(t *testing.T) {
 
 	// corrupted_mp lines carry the input offsets (bkt|key|partcnt|offs...),
 	// shape-compatible with -backup-file input.
-	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "srcbucket|mp1|1|0\n")
+	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "srcbucket\x1fmp1\x1f1\x1f0\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "srcbucket|mpclean\n")
 	assertFileContent(t, dir, "parse_failed.txt", "srcbucket|bad|1|100\n")
 

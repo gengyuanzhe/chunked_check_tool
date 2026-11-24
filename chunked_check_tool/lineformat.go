@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"net/url"
 )
 
 // compiledLineFormat is a pre-parsed result-line template: a sequence of
@@ -12,7 +13,14 @@ import (
 //
 // Supported field tokens in the format string: <bucket>, <key>, <owner>.
 // Anything else inside <...> is a parse error. Literal text (including
-// the "|" separator) is written verbatim.
+// the default "|" separator) is written verbatim.
+//
+// Server-field VALUES are QueryEscape'd at render time (boundary B): <key>
+// and <owner> come from the LIST response and may contain the format's own
+// separator, newlines, or \x1f; the escaped values cannot, so the line
+// structure survives hostile keys no matter what separator the format
+// uses. <bucket> comes from the CLI flag and stays raw. Result files are
+// terminal outputs (human/script consumers), not tool round-trip inputs.
 type compiledLineFormat []fmtSegment
 
 type fmtSegment struct {
@@ -70,9 +78,9 @@ func (cf compiledLineFormat) writeTo(w io.Writer, bucket, owner, key string) {
 		case "bucket":
 			w.Write([]byte(bucket))
 		case "key":
-			w.Write([]byte(key))
+			w.Write([]byte(url.QueryEscape(key)))
 		case "owner":
-			w.Write([]byte(owner))
+			w.Write([]byte(url.QueryEscape(owner)))
 		}
 	}
 }

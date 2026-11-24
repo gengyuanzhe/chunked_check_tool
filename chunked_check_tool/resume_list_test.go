@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -29,17 +28,16 @@ func TestWriteListFailedTokenFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read list_failed.txt: %v", err)
 	}
-	want := "data/2026/\ndata/2027/|abc123token\ndata/2028/\n"
+	want := "data%2F2026%2F\ndata%2F2027%2F\x1fabc123token\ndata%2F2028%2F\n"
 	if string(data) != want {
 		t.Errorf("list_failed.txt = %q, want %q", string(data), want)
 	}
 }
 
-// TestWriteListFailedInvalidPrefix — prefix containing '|' violates the
-// field-separator contract. Such lines cannot be parsed by -resume-list
-// (SplitN("|", 2) would split inside the prefix), so they are routed to
-// invalid_keys.txt instead of list_failed.txt.
-func TestWriteListFailedInvalidPrefix(t *testing.T) {
+// TestWriteListFailedPipePrefixEscaped — a prefix containing '|' (legal in
+// S3 keys) is now safely escapable: the line lands in list_failed.txt with
+// the pipe percent-encoded, and no invalid_keys diversion exists anymore.
+func TestWriteListFailedPipePrefixEscaped(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: false}
 	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
@@ -49,15 +47,9 @@ func TestWriteListFailedInvalidPrefix(t *testing.T) {
 	if err := o.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// list_failed.txt must NOT contain the violating prefix.
 	listData, _ := os.ReadFile(filepath.Join(dir, "list_failed.txt"))
-	if strings.Contains(string(listData), "data/a|b/") {
-		t.Errorf("list_failed.txt should not contain prefix with |: %q", string(listData))
-	}
-	// invalid_keys.txt must contain it.
-	invalidData, _ := os.ReadFile(filepath.Join(dir, "invalid_keys.txt"))
-	if !strings.Contains(string(invalidData), "data/a|b/") {
-		t.Errorf("invalid_keys.txt = %q, want substring %q", string(invalidData), "data/a|b/")
+	if got, want := string(listData), "data%2Fa%7Cb%2F\x1ftokenX\n"; got != want {
+		t.Errorf("list_failed.txt = %q, want %q", got, want)
 	}
 }
 

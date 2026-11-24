@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,10 +33,10 @@ func TestOutputPerOwnerRouting(t *testing.T) {
 		path string
 		want string
 	}{
-		{ownerSub(dir, "owner-A", "corrupted_objects.txt"), "test-bkt|obj/a1"},
-		{ownerSub(dir, "owner-B", "corrupted_objects.txt"), "test-bkt|obj/b1"},
-		{ownerSub(dir, "owner-A", "ok_objects.txt"), "test-bkt|obj/a-ok"},
-		{ownerSub(dir, "owner-B", "mp.txt"), "test-bkt|obj/b-mp"},
+		{ownerSub(dir, "owner-A", "corrupted_objects.txt"), "test-bkt|obj%2Fa1"},
+		{ownerSub(dir, "owner-B", "corrupted_objects.txt"), "test-bkt|obj%2Fb1"},
+		{ownerSub(dir, "owner-A", "ok_objects.txt"), "test-bkt|obj%2Fa-ok"},
+		{ownerSub(dir, "owner-B", "mp.txt"), "test-bkt|obj%2Fb-mp"},
 	} {
 		data, err := os.ReadFile(c.path)
 		if err != nil {
@@ -62,8 +63,8 @@ func TestOutputMultipartAllKeyOnly(t *testing.T) {
 	o.WriteMultipartAll("owner-A", "key/with|pipe")
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "mp.txt"))
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|key/with|pipe" {
-		t.Errorf("multipart line = %q, want %q (bucket|key, key may contain |)", line, "test-bkt|key/with|pipe")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|key%2Fwith%7Cpipe" {
+		t.Errorf("multipart line = %q, want %q (bucket|key, values escaped)", line, "test-bkt|key%2Fwith%7Cpipe")
 	}
 }
 
@@ -76,8 +77,8 @@ func TestOutputCorruptedMultipartPerOwner(t *testing.T) {
 	o.WriteCorruptedMultipart("owner-A", "mp/k1", nil)
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/k1" {
-		t.Errorf("corrupted_mp = %q, want %q", line, "test-bkt|mp/k1")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp%2Fk1" {
+		t.Errorf("corrupted_mp = %q, want %q", line, "test-bkt|mp%2Fk1")
 	}
 }
 
@@ -93,8 +94,8 @@ func TestOutputOffsetModeCorruptedMultipartCarriesOffsets(t *testing.T) {
 	o.WriteCorruptedMultipart("owner-A", "mp/k1", []int64{0, 5242880, 10485760})
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/k1|3|0|5242880|10485760" {
-		t.Errorf("corrupted_mp = %q, want %q", line, "test-bkt|mp/k1|3|0|5242880|10485760")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fmp%2Fk1\x1f3\x1f0\x1f5242880\x1f10485760" {
+		t.Errorf("corrupted_mp = %q, want %q", line, "test-bkt\x1fmp%2Fk1\x1f3\x1f0\x1f5242880\x1f10485760")
 	}
 }
 
@@ -109,8 +110,8 @@ func TestOutputSegmentModeCorruptedMultipartIgnoresOffsets(t *testing.T) {
 	o.WriteCorruptedMultipart("owner-A", "mp/k1", []int64{0, 5242880})
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/k1" {
-		t.Errorf("corrupted_mp = %q, want %q (segment mode keeps line format)", line, "test-bkt|mp/k1")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp%2Fk1" {
+		t.Errorf("corrupted_mp = %q, want %q (segment mode keeps line format)", line, "test-bkt|mp%2Fk1")
 	}
 }
 
@@ -125,8 +126,8 @@ func TestOutputOffsetModeListParseFailedFallback(t *testing.T) {
 	o.WriteListParseFailed("mp/nosupport")
 	o.Close()
 	data, _ := os.ReadFile(filepath.Join(dir, "list_parse_failed.txt"))
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/nosupport" {
-		t.Errorf("list_parse_failed.txt = %q, want %q", line, "test-bkt|mp/nosupport")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fmp%2Fnosupport" {
+		t.Errorf("list_parse_failed.txt = %q, want %q", line, "test-bkt\x1fmp%2Fnosupport")
 	}
 	if _, err := os.Stat(ownerSub(dir, "owner-A", "mp.txt")); !os.IsNotExist(err) {
 		t.Errorf("mp.txt should not exist in mode=offset; stat err=%v", err)
@@ -142,8 +143,8 @@ func TestOutputOffsetModeMpCheckFailedEnabled(t *testing.T) {
 	o.WriteMpCheckFailed("mp/k1", []int64{0, 5242880})
 	o.Close()
 	data, _ := os.ReadFile(filepath.Join(dir, "mp_check_failed.txt"))
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/k1|2|0|5242880" {
-		t.Errorf("mp_check_failed.txt = %q, want %q", line, "test-bkt|mp/k1|2|0|5242880")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fmp%2Fk1\x1f2\x1f0\x1f5242880" {
+		t.Errorf("mp_check_failed.txt = %q, want %q", line, "test-bkt\x1fmp%2Fk1\x1f2\x1f0\x1f5242880")
 	}
 }
 
@@ -157,8 +158,8 @@ func TestOutputListFileModeCorruptedMultipartCarriesOffsets(t *testing.T) {
 	o.WriteCorruptedMultipart("owner-A", "mp/k1", []int64{0, 5242880})
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/k1|2|0|5242880" {
-		t.Errorf("corrupted_mp = %q, want %q", line, "test-bkt|mp/k1|2|0|5242880")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fmp%2Fk1\x1f2\x1f0\x1f5242880" {
+		t.Errorf("corrupted_mp = %q, want %q", line, "test-bkt\x1fmp%2Fk1\x1f2\x1f0\x1f5242880")
 	}
 }
 
@@ -171,8 +172,8 @@ func TestOutputMultipartOkPerOwner(t *testing.T) {
 	o.WriteMultipartOk("owner-A", "mp/clean")
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "ok_mp.txt"))
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/clean" {
-		t.Errorf("ok_multipart = %q, want %q", line, "test-bkt|mp/clean")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp%2Fclean" {
+		t.Errorf("ok_multipart = %q, want %q", line, "test-bkt|mp%2Fclean")
 	}
 }
 
@@ -198,8 +199,8 @@ func TestOutputCheckFailedAtRoot(t *testing.T) {
 	o.WriteCheckFailed("obj/c")
 	o.Close()
 	data, _ := os.ReadFile(filepath.Join(dir, "check_failed.txt"))
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|obj/c" {
-		t.Errorf("check_failed.txt = %q, want %q", line, "test-bkt|obj/c")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fobj%2Fc" {
+		t.Errorf("check_failed.txt = %q, want %q", line, "test-bkt\x1fobj%2Fc")
 	}
 	// Per-owner folder should NOT have been created just from a check_failed.
 	if _, err := os.Stat(filepath.Join(dir, "owner-A")); !os.IsNotExist(err) {
@@ -216,8 +217,8 @@ func TestOutputMpCheckFailedAtRoot(t *testing.T) {
 	o.WriteMpCheckFailed("mp/k1", []int64{0, 5242880})
 	o.Close()
 	data, _ := os.ReadFile(filepath.Join(dir, "mp_check_failed.txt"))
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|mp/k1|2|0|5242880" {
-		t.Errorf("mp_check_failed.txt = %q, want %q", line, "test-bkt|mp/k1|2|0|5242880")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fmp%2Fk1\x1f2\x1f0\x1f5242880" {
+		t.Errorf("mp_check_failed.txt = %q, want %q", line, "test-bkt\x1fmp%2Fk1\x1f2\x1f0\x1f5242880")
 	}
 }
 
@@ -253,8 +254,8 @@ func TestOutputListFailedLogStructured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read list_failed.txt: %v", err)
 	}
-	if line := strings.TrimSpace(string(txtBytes)); line != "prefix/x" {
-		t.Errorf("list_failed.txt = %q, want %q", line, "prefix/x")
+	if line := strings.TrimSpace(string(txtBytes)); line != "prefix%2Fx" {
+		t.Errorf("list_failed.txt = %q, want %q", line, "prefix%2Fx")
 	}
 
 	logBytes, err := os.ReadFile(filepath.Join(dir, "list_failed.log"))
@@ -417,9 +418,9 @@ func TestNewOutputListFileModeEnablesMultipartResults(t *testing.T) {
 	if err := o.Close(); err != nil {
 		t.Fatal(err)
 	}
-	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "test-bkt|mp-bad|2|0|1024\n")
+	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "test-bkt\x1fmp-bad\x1f2\x1f0\x1f1024\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "test-bkt|mp-ok\n")
-	assertFileContent(t, dir, "mp_check_failed.txt", "test-bkt|mp-err|2|0|1024\n")
+	assertFileContent(t, dir, "mp_check_failed.txt", "test-bkt\x1fmp-err\x1f2\x1f0\x1f1024\n")
 	if _, err := os.Stat(filepath.Join(dir, "_unknown", "mp.txt")); !os.IsNotExist(err) {
 		t.Errorf("mp.txt should not be written in list-file mode")
 	}
@@ -440,7 +441,7 @@ func TestNewOutputListFileModeOkMpOptIn(t *testing.T) {
 	if err := o.Close(); err != nil {
 		t.Fatal(err)
 	}
-	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "test-bkt|mp-bad|2|0|1024\n")
+	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "test-bkt\x1fmp-bad\x1f2\x1f0\x1f1024\n")
 	if _, err := os.Stat(filepath.Join(dir, "_unknown", "ok_mp.txt")); !os.IsNotExist(err) {
 		t.Errorf("ok_mp.txt should require is_multipart_success_log=true")
 	}
@@ -470,7 +471,7 @@ func TestOutputPeriodicFlushRoot(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		data, err := os.ReadFile(path)
-		if err == nil && strings.TrimSpace(string(data)) == "test-bkt|obj/k1" {
+		if err == nil && strings.TrimSpace(string(data)) == "test-bkt\x1fobj%2Fk1" {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -506,7 +507,7 @@ func TestOutputPeriodicFlushOwner(t *testing.T) {
 		deadline := time.Now().Add(2 * time.Second)
 		for {
 			data, err := os.ReadFile(path)
-			if err == nil && strings.TrimSpace(string(data)) == "test-bkt|"+c.key {
+			if err == nil && strings.TrimSpace(string(data)) == "test-bkt|"+url.QueryEscape(c.key) {
 				break
 			}
 			if time.Now().After(deadline) {
@@ -601,5 +602,89 @@ func TestOutputFlushAndWaitLiveProducer(t *testing.T) {
 	}
 	if got := strings.Count(string(data), "\n"); got != N {
 		t.Errorf("lines on disk after producer done + FlushAndWait = %d, want %d", got, N)
+	}
+}
+
+// TestOutputRecordFileSeparatorAndEscape — all record files use \x1f (ASCII
+// Unit Separator) as the field separator and url.QueryEscape every server
+// field (key/prefix/token) at the write boundary. A key containing '|',
+// newline, or \x1f can therefore never tear the line structure. Bucket is
+// CLI-provided (not a server field) and stays raw; tool-generated numbers
+// stay raw. This is boundary B: unconditional, independent of
+// encoding_type_url.
+func TestOutputRecordFileSeparatorAndEscape(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: 5 * 1024 * 1024}
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+
+	o.WriteCheckFailed("weird|key\nnext")
+	o.WriteListFailed("pfx|with|pipe", "tok\x1fbad")
+	o.WriteMpCheckFailed("mp|k", []int64{0, 100})
+	o.Close()
+
+	data, _ := os.ReadFile(filepath.Join(dir, "check_failed.txt"))
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fweird%7Ckey%0Anext" {
+		t.Errorf("check_failed.txt = %q, want %q", line, "test-bkt\x1fweird%7Ckey%0Anext")
+	}
+	data, _ = os.ReadFile(filepath.Join(dir, "list_failed.txt"))
+	if line := strings.TrimSpace(string(data)); line != "pfx%7Cwith%7Cpipe\x1ftok%1Fbad" {
+		t.Errorf("list_failed.txt = %q, want %q", line, "pfx%7Cwith%7Cpipe\x1ftok%1Fbad")
+	}
+	data, _ = os.ReadFile(filepath.Join(dir, "mp_check_failed.txt"))
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fmp%7Ck\x1f2\x1f0\x1f100" {
+		t.Errorf("mp_check_failed.txt = %q, want %q", line, "test-bkt\x1fmp%7Ck\x1f2\x1f0\x1f100")
+	}
+}
+
+// TestOutputListFailedSingleFieldAndEmpty — a failed first page writes the
+// bare prefix (no trailing separator); the root prefix failure writes an
+// empty line (the -resume-list legal entry). An empty token with an empty
+// prefix stays empty.
+func TestOutputListFailedSingleFieldAndEmpty(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true}
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+	o.WriteListFailed("data/2026/", "")
+	o.WriteListFailed("", "")
+	o.Close()
+	data, _ := os.ReadFile(filepath.Join(dir, "list_failed.txt"))
+	// split on the raw content; the final "" element is the file's trailing
+	// newline, not a third entry.
+	lines := strings.Split(string(data[:len(data)-1]), "\n")
+	if len(lines) != 2 || lines[0] != "data%2F2026%2F" || lines[1] != "" {
+		t.Errorf("list_failed.txt lines = %#v, want [data%%2F2026%%2F, \"\"]", lines)
+	}
+}
+
+// TestOutputOffsetLineEscapesKey — corrupted_mp.txt in offset mode writes
+// bkt\x1fkey\x1fpartcnt\x1foff0|... with the key escaped (bucket and
+// offsets raw).
+func TestOutputOffsetLineEscapesKey(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+	o.WriteCorruptedMultipart("owner", "corrupt|ed.bin", []int64{0, 5242880})
+	o.Close()
+	data, _ := os.ReadFile(filepath.Join(dir, "owner", "corrupted_mp.txt"))
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fcorrupt%7Ced.bin\x1f2\x1f0\x1f5242880" {
+		t.Errorf("corrupted_mp.txt = %q, want %q", line, "test-bkt\x1fcorrupt%7Ced.bin\x1f2\x1f0\x1f5242880")
+	}
+}
+
+// TestOutputResultLineFormatEscapesValues — result_line_format files keep
+// the configured separator as literal text but escape the server-field
+// VALUES (<key>, <owner>); <bucket> is CLI-provided and stays raw. The line
+// structure is safe because the values can no longer contain the separator.
+func TestOutputResultLineFormatEscapesValues(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, ResultLineFormat: "<bucket>|<key>|<owner>"}
+	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+	o.WriteCorrupted("owner|id", "a|b\nc")
+	o.Close()
+	// ownerDirName keeps the raw ownerID as the directory (only path
+	// separators are folded); the ESCAPED form appears in line content.
+	data, _ := os.ReadFile(filepath.Join(dir, "owner|id", "corrupted_objects.txt"))
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|a%7Cb%0Ac|owner%7Cid" {
+		t.Errorf("corrupted_objects.txt = %q, want %q", line, "test-bkt|a%7Cb%0Ac|owner%7Cid")
 	}
 }

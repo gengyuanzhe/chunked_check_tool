@@ -55,8 +55,8 @@ func TestLineFormatWriteTo(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	cf.writeTo(&buf, "mybucket", "ownerX", "path/obj")
-	if got := buf.String(); got != "mybucket|path/obj" {
-		t.Errorf("got %q, want %q", got, "mybucket|path/obj")
+	if got := buf.String(); got != "mybucket|path%2Fobj" {
+		t.Errorf("got %q, want %q", got, "mybucket|path%2Fobj")
 	}
 }
 
@@ -67,11 +67,11 @@ func TestLineFormatOwnerField(t *testing.T) {
 	if got := buf.String(); got != "own1:bkt:k1" {
 		t.Errorf("got %q, want %q", got, "own1:bkt:k1")
 	}
-	// key containing '|' — format only injects <key> as-is, so the literal
-	// '|' in the key is preserved and does NOT confuse the format.
+	// key containing '|' — the value is escaped at render, so the literal
+	// '|' in the key cannot tear the line's separator structure.
 	buf.Reset()
 	cf.writeTo(&buf, "bkt", "own1", "a|b")
-	if got := buf.String(); !strings.HasSuffix(got, ":bkt:a|b") || !strings.HasPrefix(got, "own1:bkt:") {
+	if got := buf.String(); !strings.HasSuffix(got, ":bkt:a%7Cb") || !strings.HasPrefix(got, "own1:bkt:") {
 		t.Errorf("key with | produced %q", got)
 	}
 }

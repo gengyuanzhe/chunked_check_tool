@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,6 +13,16 @@ import (
 	"sync"
 	"time"
 )
+
+// rowSep is the field separator of every record file line — ASCII Unit
+// Separator (\x1f), migrated from '|'. S3 keys are allowed to contain '|'
+// and occasionally do; \x1f is a control character that essentially never
+// appears in a key. The second guarantee is the escape rule below: server
+// fields are QueryEscape'd on write, so '|', '\n', '\r' and \x1f itself
+// (%7C, %0A, %0D, %1F) can never reach the file raw — the line structure
+// cannot tear. Parse side (resume-list, file inputs, journal) splits on
+// \x1f and unescapes exactly once.
+const rowSep = "\x1f"
 
 // ownerLine pairs the ownerID (drives per-owner output routing) with the
 // object key and, for corrupted_mp lines in offset/list-file mode, the
@@ -541,21 +552,22 @@ func (o *Output) renderLineFmt(w io.Writer, bucket string, ol ownerLine) {
 	o.lineFmt.writeTo(w, bucket, ol.ownerID, ol.key)
 }
 
-// renderMultipartOffsets writes bucket|key|partcnt|off0|off1|... — the exact
-// -list-file / -backup-file input shape, so corrupted_mp.txt can be fed
-// straight back for re-check or backup. strconv.AppendInt into a per-call
-// stack buffer keeps it allocation-free apart from growth. Lines with no
-// offsets (should not happen — corrupted implies probed) fall back to the
-// plain format rather than emitting a malformed partcnt=0 line.
+// renderMultipartOffsets writes bucket\x1fkey\x1fpartcnt\x1foff0\x1foff1... —
+// the exact -list-file / -backup-file input shape, so corrupted_mp.txt can
+// be fed straight back for re-check or backup. The key is QueryEscape'd
+// (server field); bucket and offsets are tool-safe and raw. strconv.AppendInt
+// into a per-call stack buffer keeps it allocation-free apart from growth.
+// Lines with no offsets (should not happen — corrupted implies probed) fall
+// back to the plain format rather than emitting a malformed partcnt=0 line.
 func (o *Output) renderMultipartOffsets(w io.Writer, bucket string, ol ownerLine) {
 	if len(ol.offsets) == 0 {
 		o.renderLineFmt(w, bucket, ol)
 		return
 	}
-	sep := []byte{'|'}
+	sep := []byte(rowSep)
 	w.Write([]byte(bucket))
 	w.Write(sep)
-	w.Write([]byte(ol.key))
+	w.Write([]byte(url.QueryEscape(ol.key)))
 	var buf [20]byte
 	w.Write(sep)
 	w.Write(strconv.AppendInt(buf[:0], int64(len(ol.offsets)), 10))
@@ -711,30 +723,18 @@ func orDash(s string) string {
 // `continuationToken`. Token is the cursor of the FAILED page (i.e. the `next`
 // returned by the previous successful page) — empty when the first page failed
 // or when the caller has no resumption cursor (Mode 1 root pagination, legacy
-// callers). Line format `prefix|token`; when token=="" the line is just
-// `prefix`. -resume-list parses these lines and feeds (prefix, token) back
-// into the BFS queue to continue enumeration from the failed page.
-//
-// If prefix contains '|', the contract (key/prefix contains no '|') is
-// violated — the line would be unparseable by -resume-list. Such prefixes
-// are written to invalid_keys.txt instead and the structured reason goes to
-// list_failed.log; they cannot be auto-resumed and need manual handling.
+// callers). Line format `prefix\x1ftoken` with both fields QueryEscape'd;
+// when token=="" the line is just the escaped prefix, when prefix=="" too
+// the line is empty (the -resume-list root-prefix entry). -resume-list
+// parses these lines and feeds (prefix, token) back into the BFS queue to
+// continue enumeration from the failed page.
 func (o *Output) WriteListFailed(prefix, continuationToken string) {
-	if strings.Contains(prefix, "|") {
-		o.invalidKeysCh <- prefix
-		if o.listLogger != nil {
-			o.listLogger.Error("invalid prefix contains separator",
-				slog.String("bucket", orDash(o.bucket)),
-				slog.String("prefix", prefix),
-				slog.String("reason", "prefix contains '|', cannot be written to list_failed.txt for -resume-list"))
-		}
+	pfx := url.QueryEscape(prefix)
+	if continuationToken == "" {
+		o.listFailedCh <- pfx
 		return
 	}
-	if continuationToken == "" {
-		o.listFailedCh <- prefix
-	} else {
-		o.listFailedCh <- prefix + "|" + continuationToken
-	}
+	o.listFailedCh <- pfx + rowSep + url.QueryEscape(continuationToken)
 }
 func (o *Output) WriteListFailedLog(prefix string, statusCode int, s3Code, reqID string, err error) {
 	if o.listLogger == nil {
@@ -785,12 +785,13 @@ func (o *Output) WriteListParseFailedLog(key, ownerID string, size int64, etag s
 // not parse in mode=offset. Routed to root-level list_parse_failed.txt —
 // distinct from mp.txt (which is for mode=off / type drift) and from
 // parse_failed.txt (which is for malformed -list-file / -backup-file input
-// lines). Line format `bucket|key`, aligned with check_failed.txt /
-// mp_check_failed.txt so the file can be fed back to -check-file for retry
-// (the retry HEADs the object and re-derives offsets from the ETag).
+// lines). Line format `bucket\x1fkey` (key QueryEscape'd), aligned with
+// check_failed.txt / mp_check_failed.txt so the file can be fed back to
+// -check-file for retry (the retry HEADs the object and re-derives offsets
+// from the ETag).
 func (o *Output) WriteListParseFailed(key string) {
 	if o.listParseFailedEnabled {
-		o.listParseFailedCh <- o.bucket + "|" + key
+		o.listParseFailedCh <- o.bucket + rowSep + url.QueryEscape(key)
 	}
 }
 
@@ -802,13 +803,13 @@ func (o *Output) WriteListParseFailed(key string) {
 func (o *Output) WriteInvalidKey(key string) { o.invalidKeysCh <- key }
 
 // WriteCheckFailed records a failed RangeGet on a regular object. Line format
-// `bkt|key` — aligned with -backup-file's regular-object input, so the file
-// can be fed straight back for backup retry. ETag/Size are NOT included:
-// backup retry HEADs the object to re-obtain them, and including them would
-// break -backup-file's 2-field regular-object shape.
+// `bkt\x1fkey` (key QueryEscape'd) — aligned with -backup-file's regular-object
+// input, so the file can be fed straight back for backup retry. ETag/Size
+// are NOT included: backup retry HEADs the object to re-obtain them, and
+// including them would break -backup-file's 2-field regular-object shape.
 func (o *Output) WriteCheckFailed(key string) {
 	if o.checkEnabled {
-		o.checkFailedCh <- o.bucket + "|" + key
+		o.checkFailedCh <- o.bucket + rowSep + url.QueryEscape(key)
 	}
 }
 func (o *Output) WriteCheckFailedLog(key string, statusCode int, s3Code, reqID string, err error) {
@@ -830,21 +831,22 @@ func (o *Output) WriteCheckFailedLog(key string, statusCode int, s3Code, reqID s
 }
 
 // WriteMpCheckFailed records a failed RangeGet on a multipart object's probe.
-// Line format `bkt|key|partcnt|off0|off1|...` — aligned with corrupted_mp.txt
-// (mode=1 offset / list-file mode) and -backup-file/-list-file multipart
-// input, so the file can be fed straight back for backup or re-check.
+// Line format `bkt\x1fkey\x1fpartcnt\x1foff0\x1foff1...` (key QueryEscape'd,
+// numbers raw) — aligned with corrupted_mp.txt (mode=1 offset / list-file
+// mode) and -backup-file/-list-file multipart input, so the file can be fed
+// straight back for backup or re-check.
 func (o *Output) WriteMpCheckFailed(key string, offsets []int64) {
 	if !o.mpCheckFailedEnabled {
 		return
 	}
 	var b []byte
 	b = append(b, o.bucket...)
-	b = append(b, '|')
-	b = append(b, key...)
-	b = append(b, '|')
+	b = append(b, rowSep...)
+	b = append(b, url.QueryEscape(key)...)
+	b = append(b, rowSep...)
 	b = strconv.AppendInt(b, int64(len(offsets)), 10)
 	for _, off := range offsets {
-		b = append(b, '|')
+		b = append(b, rowSep...)
 		b = strconv.AppendInt(b, off, 10)
 	}
 	o.mpCheckFailedCh <- string(b)
