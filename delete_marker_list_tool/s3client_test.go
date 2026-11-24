@@ -579,3 +579,59 @@ func TestListVersionsPage_EncodingTypeURL_DecodesCommonPrefix(t *testing.T) {
 		}
 	}
 }
+
+// TestListVersionsPage_EncodingTypeURL_DecodesNextKeyMarker 验证 encoding_type_url=true 时
+// NextKeyMarker 在 s3client 出口被 url.QueryUnescape 解码——翻页时 key-marker 必须回传
+// 原始形态：服务端对 key-marker 只做一次标准 query 解码后按原始 key 定位翻页位置，
+// 编码态回传会让位置错位（minio 实测：边界 key 剩余版本与字典序缺口的 key 漏扫）。
+// NextVersionIdMarker 不在 encoding-type=url 的编码字段列表，原样返回。
+func TestListVersionsPage_EncodingTypeURL_DecodesNextKeyMarker(t *testing.T) {
+	// 首请求（无 key-marker）返回截断页，NextKeyMarker 为编码态（含 minio 风格
+	// 内部缓存标签）；后续请求捕获 key-marker/version-id-marker 参数。
+	const pageXML = `<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix><EncodingType>url</EncodingType><IsTruncated>true</IsTruncated>
+<NextKeyMarker>b%20c%5Bminio_cache%3Av2%2Creturn%3A%5D</NextKeyMarker><NextVersionIdMarker>vid-1</NextVersionIdMarker>
+<Version><Key>a.txt</Key><VersionId>vA</VersionId><IsLatest>true</IsLatest><LastModified>2024-01-01T00:00:00.000Z</LastModified></Version>
+</ListVersionsResult>`
+
+	var sawKeyMarker, sawVIDMarker string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if q.Get("key-marker") != "" {
+			sawKeyMarker = q.Get("key-marker")
+			sawVIDMarker = q.Get("version-id-marker")
+		}
+		w.Write([]byte(pageXML))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, EncodingTypeURL: true}
+	c, err := NewS3Client(cfg, srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := c.ListVersionsPage(context.Background(), "testbucket", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDecoded := "b c[minio_cache:v2,return:]"
+	if page.NextKeyMarker != wantDecoded {
+		t.Errorf("NextKeyMarker=%q want %q (decoded at exit)", page.NextKeyMarker, wantDecoded)
+	}
+	if page.NextVersionIDMarker != "vid-1" {
+		t.Errorf("NextVersionIDMarker=%q want %q (not encoded, kept as-is)", page.NextVersionIDMarker, "vid-1")
+	}
+
+	// 翻页：出口解码后的 marker 传回下一页请求，服务端 query 解码后应看到原始形态。
+	if _, err := c.ListVersionsPage(context.Background(), "testbucket", "", true, page.NextKeyMarker, page.NextVersionIDMarker); err != nil {
+		t.Fatal(err)
+	}
+	if sawKeyMarker != wantDecoded {
+		t.Errorf("second request key-marker=%q want %q (raw form round-trip)", sawKeyMarker, wantDecoded)
+	}
+	if sawVIDMarker != "vid-1" {
+		t.Errorf("second request version-id-marker=%q want %q", sawVIDMarker, "vid-1")
+	}
+}
