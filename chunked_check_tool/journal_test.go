@@ -11,10 +11,11 @@ import (
 	"time"
 )
 
-// TestParseJournalLineDiscoveredRestOfLine — discovered lines carry the
-// prefix as the whole rest of the line (verbatim, pipes included).
-func TestParseJournalLineDiscoveredRestOfLine(t *testing.T) {
-	ev, err := parseJournalLine("discovered|data|2026")
+// TestParseJournalLineDiscoveredPrefix — discovered lines carry the escaped
+// prefix after the verb separator; unescaping restores pipes and any other
+// server-legal bytes.
+func TestParseJournalLineDiscoveredPrefix(t *testing.T) {
+	ev, err := parseJournalLine("discovered\x1fdata%7C2026")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -29,10 +30,10 @@ func TestParseJournalLineDiscoveredRestOfLine(t *testing.T) {
 	}
 }
 
-// TestParseJournalLineCursorSplitsAtLastPipe — tokens never contain "|" (S3
-// contract: V2 base64, V1 keys), so the split point is the LAST pipe.
-func TestParseJournalLineCursorSplitsAtLastPipe(t *testing.T) {
-	ev, err := parseJournalLine("cursor|a|b|TOKEN")
+// TestParseJournalLineCursorSplitsOnSeparator — escaped fields can never
+// contain \x1f, so the split is unambiguous for any prefix/token.
+func TestParseJournalLineCursorSplitsOnSeparator(t *testing.T) {
+	ev, err := parseJournalLine("cursor\x1fa%7Cb\x1fTOKEN")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -50,26 +51,26 @@ func TestParseJournalLineCursorSplitsAtLastPipe(t *testing.T) {
 // TestParseJournalLineEmptyPrefix — the root prefix renders as an empty
 // field; cursor with empty prefix + token stays parseable.
 func TestParseJournalLineEmptyPrefix(t *testing.T) {
-	ev, err := parseJournalLine("discovered|")
+	ev, err := parseJournalLine("discovered\x1f")
 	if err != nil {
 		t.Fatalf("parse discovered|: %v", err)
 	}
 	if ev.Prefix != "" {
 		t.Errorf("prefix = %q, want empty (root)", ev.Prefix)
 	}
-	ev, err = parseJournalLine("cursor||T")
+	ev, err = parseJournalLine("cursor\x1f\x1fT")
 	if err != nil {
 		t.Fatalf("parse cursor||T: %v", err)
 	}
 	if ev.Prefix != "" || ev.Token != "T" {
-		t.Errorf("cursor||T = (%q, %q), want (%q, %q)", ev.Prefix, ev.Token, "", "T")
+		t.Errorf("cursor empty-prefix = (%q, %q), want (%q, %q)", ev.Prefix, ev.Token, "", "T")
 	}
-	ev, err = parseJournalLine("done|")
+	ev, err = parseJournalLine("done\x1f")
 	if err != nil {
 		t.Fatalf("parse done|: %v", err)
 	}
 	if ev.Prefix != "" || ev.Kind != journalEventDone {
-		t.Errorf("done| = (%q, %v), want (\"\", done)", ev.Prefix, ev.Kind)
+		t.Errorf("done empty-prefix = (%q, %v), want (\"\", done)", ev.Prefix, ev.Kind)
 	}
 }
 
@@ -78,7 +79,7 @@ func TestParseJournalLineEmptyPrefix(t *testing.T) {
 func TestParseJournalLineMalformed(t *testing.T) {
 	for _, line := range []string{
 		"unknown|x",
-		"cursor|onlytoken",
+		"cursor\x1fonlytoken",
 		"discovered", // no verb separator
 		"",           // empty line
 	} {
@@ -97,10 +98,10 @@ func TestFormatJournalEvent(t *testing.T) {
 		token  string
 		want   string
 	}{
-		{journalEventDiscovered, "data|2026", "", "discovered|data|2026"},
-		{journalEventCursor, "a|b", "TOKEN", "cursor|a|b|TOKEN"},
-		{journalEventCursor, "", "T", "cursor||T"},
-		{journalEventDone, "p", "", "done|p"},
+		{journalEventDiscovered, "data|2026", "", "discovered\x1fdata%7C2026"},
+		{journalEventCursor, "a|b", "TOKEN", "cursor\x1fa%7Cb\x1fTOKEN"},
+		{journalEventCursor, "", "T", "cursor\x1f\x1fT"},
+		{journalEventDone, "p", "", "done\x1fp"},
 	}
 	for _, c := range cases {
 		got := formatJournalEvent(c.prefix, c.token, c.kind)
@@ -117,7 +118,7 @@ func TestFormatJournalEvent(t *testing.T) {
 // TestReplayJournalLastEventWins — replay keeps the last event per prefix;
 // every event marks the prefix as known (Discovered).
 func TestReplayJournalLastEventWins(t *testing.T) {
-	path := writeJournal(t, "discovered|p\ncursor|p|T1\ncursor|p|T2\ndone|q\n")
+	path := writeJournal(t, "discovered\x1fp\ncursor\x1fp\x1fT1\ncursor\x1fp\x1fT2\ndone\x1fq\n")
 	states, err := ReplayJournal(path)
 	if err != nil {
 		t.Fatalf("replay: %v", err)
@@ -136,7 +137,7 @@ func TestReplayJournalLastEventWins(t *testing.T) {
 // batch the dying process half-wrote; replay drops it (the journal then
 // remembers less, recovery redoes more — the safe direction).
 func TestReplayJournalDropsTornTail(t *testing.T) {
-	path := writeJournal(t, "discovered|p\ncursor|p|T")
+	path := writeJournal(t, "discovered\x1fp\ncursor\x1fp\x1fT")
 	states, err := ReplayJournal(path)
 	if err != nil {
 		t.Fatalf("replay: %v", err)
@@ -150,7 +151,7 @@ func TestReplayJournalDropsTornTail(t *testing.T) {
 // TestReplayJournalMalformedLine — a structurally broken line in the middle
 // of the journal is a real corruption, not a torn tail: replay fails loudly.
 func TestReplayJournalMalformedLine(t *testing.T) {
-	path := writeJournal(t, "discovered|p\nnonsense\n")
+	path := writeJournal(t, "discovered\x1fp\nnonsense\n")
 	if _, err := ReplayJournal(path); err == nil {
 		t.Errorf("replay with malformed middle line = nil error, want error")
 	}
@@ -398,7 +399,7 @@ func TestCheckpointImmediateFirstWrite(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		data, err := os.ReadFile(journalPath)
-		if err == nil && strings.Contains(string(data), "discovered|\n") {
+		if err == nil && strings.Contains(string(data), "discovered\x1f\n") {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -433,7 +434,7 @@ func TestCheckpointOrderAndDurability(t *testing.T) {
 	for {
 		jdata, _ := os.ReadFile(journalPath)
 		fdata, ferr := os.ReadFile(filepath.Join(dir, "check_failed.txt"))
-		if strings.Contains(string(jdata), "cursor|p|T1") &&
+		if strings.Contains(string(jdata), "cursor\x1fp\x1fT1") &&
 			ferr == nil && strings.Contains(string(fdata), "test-bkt\x1fobj%2Fk1") {
 			return
 		}
@@ -463,9 +464,9 @@ func TestCheckpointBatchOrderDiscoveredFirst(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		data, err := os.ReadFile(journalPath)
-		if err == nil && strings.Contains(string(data), "cursor|p|T1") {
-			di := strings.Index(string(data), "discovered|sub")
-			ci := strings.Index(string(data), "cursor|p|T1")
+		if err == nil && strings.Contains(string(data), "cursor\x1fp\x1fT1") {
+			di := strings.Index(string(data), "discovered\x1fsub")
+			ci := strings.Index(string(data), "cursor\x1fp\x1fT1")
 			if di < 0 || di > ci {
 				t.Fatalf("batch order wrong: discovered@%d cursor@%d in %q", di, ci, data)
 			}
@@ -493,7 +494,7 @@ func TestCheckpointFinalOnStop(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for { // wait for the startup checkpoint
 		data, err := os.ReadFile(journalPath)
-		if err == nil && strings.Contains(string(data), "discovered|p") {
+		if err == nil && strings.Contains(string(data), "discovered\x1fp") {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -504,7 +505,7 @@ func TestCheckpointFinalOnStop(t *testing.T) {
 	tr.AddDiscovered("late-sub") // arrives after the startup checkpoint
 	stop()                       // cancel -> final checkpoint must include it
 	data, err := os.ReadFile(journalPath)
-	if err != nil || !strings.Contains(string(data), "discovered|late-sub") {
+	if err != nil || !strings.Contains(string(data), "discovered\x1flate-sub") {
 		t.Fatalf("final checkpoint missed post-tick state: %q err=%v", data, err)
 	}
 }
@@ -526,8 +527,8 @@ func TestCheckpointCommitClearsDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(string(data), "discovered|x\n"); n != 1 {
-		t.Errorf("discovered|x appears %d times, want exactly 1 (Commit clears the delta): %q", n, data)
+	if n := strings.Count(string(data), "discovered\x1fx\n"); n != 1 {
+		t.Errorf("discovered line appears %d times, want exactly 1 (Commit clears the delta): %q", n, data)
 	}
 }
 
@@ -996,10 +997,10 @@ func TestAppendJournalBatchRollsBackShortWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if _, err := f.WriteString("done|early\n"); err != nil {
+	if _, err := f.WriteString("done\x1fearly\n"); err != nil {
 		t.Fatal(err)
 	}
-	swf := &shortWriteFile{File: f, limit: 7} // "discovered|p" is 12 bytes: writes 7, fails
+	swf := &shortWriteFile{File: f, limit: 7} // "discovered\x1fp" is 13 bytes: writes 7, fails
 	snap := journalSnapshot{
 		Discovered: []string{"p"},
 		Cursors:    []journalCursorEntry{{Prefix: "p", Token: "T"}},
@@ -1010,15 +1011,15 @@ func TestAppendJournalBatchRollsBackShortWrite(t *testing.T) {
 	if len(swf.truncates) != 1 {
 		t.Fatalf("truncate calls = %v, want exactly one rollback to the batch boundary", swf.truncates)
 	}
-	if want := int64(len("done|early\n")); swf.truncates[0] != want {
+	if want := int64(len("done\x1fearly\n")); swf.truncates[0] != want {
 		t.Errorf("truncate offset = %d, want %d (pre-batch boundary)", swf.truncates[0], want)
 	}
 	data, err := os.ReadFile(f.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "done|early\n" {
-		t.Errorf("file after rollback = %q, want %q (fragment gone)", data, "done|early\n")
+	if string(data) != "done\x1fearly\n" {
+		t.Errorf("file after rollback = %q, want %q (fragment gone)", data, "done\x1fearly\n")
 	}
 	// The next batch (full write) must land cleanly: no merge with ghosts.
 	swf.limit = 1 << 30
@@ -1026,22 +1027,18 @@ func TestAppendJournalBatchRollsBackShortWrite(t *testing.T) {
 		t.Fatalf("retry append: %v", err)
 	}
 	data, _ = os.ReadFile(f.Name())
-	want := "done|early\ndiscovered|p\ncursor|p|T\n"
+	want := "done\x1fearly\ndiscovered\x1fp\ncursor\x1fp\x1fT\n"
 	if string(data) != want {
 		t.Errorf("file after retry = %q, want %q", data, want)
 	}
 }
 
-// TestSnapshotSkipsCursorWhenTokenHasPipeOrNewline — the cursor line
-// grammar ("cursor|<prefix>|<token>", split at the LAST pipe) assumes the
-// token has no "|". A V1 NextMarker is a real key and may contain "|":
-// emitting "cursor|p1|tok|pipe" would replay as prefix "p1|tok" token
-// "pipe" — a phantom prefix plus a lost cursor (a coverage risk when the
-// phantom prefix really exists). A token with "\n" corrupts the line
-// format outright. Skip the cursor line for both: the prefix stays
-// discovered, so a resume re-lists it from the top (redo work, never a
-// hole).
-func TestSnapshotSkipsCursorWhenTokenHasPipeOrNewline(t *testing.T) {
+// TestSnapshotEmitsCursorWithPipeOrNewlineToken — the \x1f+escape journal
+// grammar round-trips ANY token (V1 NextMarker is a real key and may contain
+// "|" or "\n"; both are percent-encoded on write). The old pipe grammar had
+// to skip such cursor lines (costing a full prefix re-list on resume); with
+// escaping the cursor persists and replays exactly.
+func TestSnapshotEmitsCursorWithPipeOrNewlineToken(t *testing.T) {
 	tr := NewJournalTracker()
 	tr.RecordSeed("p1", "")
 	seq1 := tr.RegisterPage("p1", 1, "tok|pipe")
@@ -1051,22 +1048,24 @@ func TestSnapshotSkipsCursorWhenTokenHasPipeOrNewline(t *testing.T) {
 	tr.Terminal("p2", seq2)
 
 	snap := tr.Snapshot()
+	tokens := map[string]string{}
 	for _, c := range snap.Cursors {
-		if strings.ContainsAny(c.Token, "|\n") {
-			t.Errorf("cursor emitted for token %q — grammar cannot round-trip it", c.Token)
-		}
+		tokens[c.Prefix] = c.Token
 	}
-	foundP1, foundP2 := false, false
-	for _, p := range snap.Discovered {
-		if p == "p1" {
-			foundP1 = true
-		}
-		if p == "p2" {
-			foundP2 = true
-		}
+	if tokens["p1"] != "tok|pipe" || tokens["p2"] != "tok\nnl" {
+		t.Errorf("cursors = %+v, want p1→%q p2→%q (escape makes any token round-trippable)", snap.Cursors, "tok|pipe", "tok\nnl")
 	}
-	if !foundP1 || !foundP2 {
-		t.Errorf("discovered = %v, want p1 and p2 present (top-re-list fallback)", snap.Discovered)
+	// Round-trip through the emitter and parser: format -> parse gives back
+	// the exact (prefix, token).
+	for _, c := range snap.Cursors {
+		line := formatJournalEvent(c.Prefix, c.Token, journalEventCursor)
+		ev, err := parseJournalLine(line)
+		if err != nil {
+			t.Fatalf("parseJournalLine(%q): %v", line, err)
+		}
+		if ev.Prefix != c.Prefix || ev.Token != c.Token {
+			t.Errorf("round-trip %q = (%q, %q), want (%q, %q)", line, ev.Prefix, ev.Token, c.Prefix, c.Token)
+		}
 	}
 }
 
@@ -1103,7 +1102,7 @@ func TestCheckpointPostSeedTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"discovered|\n", "discovered|media\n", "cursor|media|tok1\n"} {
+	for _, want := range []string{"discovered\x1f\n", "discovered\x1fmedia\n", "cursor\x1fmedia\x1ftok1\n"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("journal after post-seed trigger missing %q (got %q) — early kill is unresumable", want, data)
 		}

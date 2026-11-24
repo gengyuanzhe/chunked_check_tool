@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -31,10 +32,11 @@ const (
 	journalEventDone
 )
 
-// journalEvent is one parsed journal line. Prefix is verbatim and may
-// contain "|" — discovered/done lines carry it as the whole rest of the
-// line, cursor lines split at the LAST "|" because tokens never contain
-// "|" (V2 continuation tokens are base64, V1 tokens are keys).
+// journalEvent is one parsed journal line. Prefix and token are the raw
+// (unescaped) forms: the line format QueryEscapes both (boundary B — they
+// are server fields: prefix comes from LIST CommonPrefixes, V1 tokens are
+// real keys), so the \x1f split is unambiguous for ANY prefix/token,
+// including ones containing '|', '\n' or \x1f itself.
 type journalEvent struct {
 	Kind   journalEventKind
 	Prefix string
@@ -49,35 +51,49 @@ type journalState struct {
 }
 
 func parseJournalLine(line string) (journalEvent, error) {
-	verbEnd := strings.IndexByte(line, '|')
-	if verbEnd < 0 {
+	verb, rest, ok := strings.Cut(line, rowSep)
+	if !ok {
 		return journalEvent{}, fmt.Errorf("journal line has no verb separator: %q", line)
 	}
-	verb, rest := line[:verbEnd], line[verbEnd+1:]
 	switch verb {
-	case "discovered":
-		return journalEvent{Kind: journalEventDiscovered, Prefix: rest}, nil
-	case "done":
-		return journalEvent{Kind: journalEventDone, Prefix: rest}, nil
+	case "discovered", "done":
+		prefix, err := url.QueryUnescape(rest)
+		if err != nil {
+			return journalEvent{}, fmt.Errorf("journal %s prefix invalid escape %q: %w", verb, rest, err)
+		}
+		kind := journalEventDiscovered
+		if verb == "done" {
+			kind = journalEventDone
+		}
+		return journalEvent{Kind: kind, Prefix: prefix}, nil
 	case "cursor":
-		tokenStart := strings.LastIndexByte(rest, '|')
-		if tokenStart < 0 {
+		prefixEsc, tokenEsc, hasTok := strings.Cut(rest, rowSep)
+		if !hasTok {
 			return journalEvent{}, fmt.Errorf("cursor line has no token separator: %q", line)
 		}
-		return journalEvent{Kind: journalEventCursor, Prefix: rest[:tokenStart], Token: rest[tokenStart+1:]}, nil
+		prefix, err := url.QueryUnescape(prefixEsc)
+		if err != nil {
+			return journalEvent{}, fmt.Errorf("cursor prefix invalid escape %q: %w", prefixEsc, err)
+		}
+		token, err := url.QueryUnescape(tokenEsc)
+		if err != nil {
+			return journalEvent{}, fmt.Errorf("cursor token invalid escape %q: %w", tokenEsc, err)
+		}
+		return journalEvent{Kind: journalEventCursor, Prefix: prefix, Token: token}, nil
 	default:
 		return journalEvent{}, fmt.Errorf("unknown journal verb %q", verb)
 	}
 }
 
 func formatJournalEvent(prefix, token string, kind journalEventKind) string {
+	esc := url.QueryEscape(prefix)
 	switch kind {
 	case journalEventDiscovered:
-		return "discovered|" + prefix
+		return "discovered" + rowSep + esc
 	case journalEventDone:
-		return "done|" + prefix
+		return "done" + rowSep + esc
 	default:
-		return "cursor|" + prefix + "|" + token
+		return "cursor" + rowSep + esc + rowSep + url.QueryEscape(token)
 	}
 }
 
@@ -324,11 +340,12 @@ func (t *JournalTracker) Snapshot() journalSnapshot {
 			snap.Dones = append(snap.Dones, prefix)
 			continue
 		}
-		if tok := st.continuation(); tok != "" && !strings.ContainsAny(tok, "|\n") {
-			// A token with "|" breaks the cursor grammar's last-pipe split
-			// (V1 NextMarker is a key and can contain it); "\n" breaks the
-			// line format. Skipping costs a full prefix re-list on resume —
-			// redo work, never a coverage hole.
+		if tok := st.continuation(); tok != "" {
+			// The \x1f+escape grammar round-trips any token (V1 NextMarker
+			// is a real key and may contain '|' or '\n'; both are
+			// percent-encoded by formatJournalEvent). The old pipe grammar
+			// had to skip such tokens here, costing a full prefix re-list
+			// on resume.
 			snap.Cursors = append(snap.Cursors, journalCursorEntry{Prefix: prefix, Token: tok})
 		}
 	}
