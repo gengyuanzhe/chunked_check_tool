@@ -9,39 +9,6 @@ import (
 	"testing"
 )
 
-func TestLister_KeyWithUnitSeparator_RoutedToInvalid(t *testing.T) {
-	// XML 里嵌入 \x1f 控制字符——用 CDATA 包裹避免 XML 解析器干扰。
-	// XML 1.0 规范不允许 \x1f 在文本内容里直接出现（仅 \t \n \r 允许），
-	// 所以这里用 URL 编码后的 key 测试 WriteDeleteMarker 的路由逻辑，
-	// 而不是依赖 XML 解析。直接用 WriteDeleteMarker 测试路由。
-	dir := filepath.Join(t.TempDir(), "out")
-	cfg := &Config{
-		Endpoints: []string{"http://fake:9000"}, Scheme: "http", AK: "a", SK: "s",
-		ListType: 1, ListConcurrency: 1,
-		OutputDir: dir, OutputDirTimestamp: false,
-	}
-	out, err := NewOutput(cfg, "testbucket")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 直接调 WriteDeleteMarker 验证 \x1f 路由——这是 lister 调用的同一入口。
-	out.WriteDeleteMarker("a\x1fb", "v1", "2026-11-13T15:30:00Z")
-	out.FlushAndWait()
-	out.Close()
-
-	// delete_markers.txt must be empty
-	dm := readFile(t, filepath.Join(dir, "delete_markers.txt"))
-	if strings.TrimSpace(dm) != "" {
-		t.Errorf("delete_markers.txt should be empty, got %q", dm)
-	}
-	// invalid_keys.txt must contain url-encoded key
-	b := readFile(t, filepath.Join(dir, "invalid_keys.txt"))
-	want := "testbucket\x1fa%1Fb\x1fv1\x1f2026-11-13T15:30:00Z"
-	if !strings.Contains(b, want) {
-		t.Errorf("invalid_keys.txt missing %q: got %q", want, b)
-	}
-}
-
 func TestLister_Mode2_FailureRecordedOtherPrefixesContinue(t *testing.T) {
 	// prefix="" → DeleteMarker(a.txt) + CommonPrefixes(sub/, bad/)
 	// prefix="sub/" → DeleteMarker(sub/c.txt)
@@ -108,14 +75,14 @@ func TestLister_Mode2_FailureRecordedOtherPrefixesContinue(t *testing.T) {
 	if !strings.Contains(b, "testbucket\x1fa.txt\x1fdm-a") {
 		t.Errorf("missing a.txt marker: %q", b)
 	}
-	if !strings.Contains(b, "testbucket\x1fsub/c.txt\x1fdm-c") {
+	if !strings.Contains(b, "testbucket\x1fsub%2Fc.txt\x1fdm-c") {
 		t.Errorf("missing sub/c.txt marker: %q", b)
 	}
 
-	// list_failed.txt should contain "bad/"
+	// list_failed.txt should contain "bad/"（QueryEscape 态）
 	fb := readFile(t, filepath.Join(dir, "list_failed.txt"))
-	if !strings.Contains(fb, "bad/") {
-		t.Errorf("list_failed.txt missing bad/: %q", fb)
+	if !strings.Contains(fb, "bad%2F") {
+		t.Errorf("list_failed.txt missing bad/ encoded form: %q", fb)
 	}
 
 	// list_failed.log should exist and mention 500

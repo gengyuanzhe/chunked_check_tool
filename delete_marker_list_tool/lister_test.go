@@ -67,7 +67,7 @@ func TestLister_Mode1_HappyPath(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("got %d markers, want 2: %q", len(lines), b)
 	}
-	want := map[string]bool{"testbucket\x1fa.txt\x1fdm-a\x1f2026-01-02T15:04:05Z": false, "testbucket\x1fsub/c.txt\x1fdm-c\x1f2026-01-03T15:04:05Z": false}
+	want := map[string]bool{"testbucket\x1fa.txt\x1fdm-a\x1f2026-01-02T15:04:05Z": false, "testbucket\x1fsub%2Fc.txt\x1fdm-c\x1f2026-01-03T15:04:05Z": false}
 	for _, l := range lines {
 		if _, ok := want[l]; !ok {
 			t.Errorf("unexpected line %q", l)
@@ -153,8 +153,8 @@ func TestLister_Mode2_RetryMultiplePrefixes(t *testing.T) {
 
 	b := readFile(t, filepath.Join(dir, "delete_markers.txt"))
 	want := map[string]bool{
-		"testbucket\x1fa/m.txt\x1fdm-a\x1f2026-01-02T15:04:05Z": false,
-		"testbucket\x1fb/m.txt\x1fdm-b\x1f2026-01-03T15:04:05Z": false,
+		"testbucket\x1fa%2Fm.txt\x1fdm-a\x1f2026-01-02T15:04:05Z": false,
+		"testbucket\x1fb%2Fm.txt\x1fdm-b\x1f2026-01-03T15:04:05Z": false,
 	}
 	for _, line := range strings.Split(strings.TrimRight(b, "\n"), "\n") {
 		if line == "" {
@@ -229,7 +229,7 @@ func TestLister_Mode2_KeyEndingInSlashWithNullVersion(t *testing.T) {
 	}
 
 	b := readFile(t, filepath.Join(dir, "delete_markers.txt"))
-	wantLine := "testbucket\x1f94-abc-0/\x1fnull"
+	wantLine := "testbucket\x1f94-abc-0%2F\x1fnull"
 	if !strings.Contains(b, wantLine) {
 		t.Errorf("delete_markers.txt missing %q: got %q", wantLine, b)
 	}
@@ -385,7 +385,7 @@ func TestLister_Mode2_BFSWithCommonPrefix(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("got %d markers, want 2: %q", len(lines), b)
 	}
-	want := map[string]bool{"testbucket\x1fa.txt\x1fdm-a\x1f2026-01-02T15:04:05Z": false, "testbucket\x1fsub/c.txt\x1fdm-c\x1f2026-01-03T15:04:05Z": false}
+	want := map[string]bool{"testbucket\x1fa.txt\x1fdm-a\x1f2026-01-02T15:04:05Z": false, "testbucket\x1fsub%2Fc.txt\x1fdm-c\x1f2026-01-03T15:04:05Z": false}
 	for _, l := range lines {
 		if _, ok := want[l]; !ok {
 			t.Errorf("unexpected line %q", l)

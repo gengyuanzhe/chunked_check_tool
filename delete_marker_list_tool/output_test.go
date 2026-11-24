@@ -32,8 +32,9 @@ func TestWriteDeleteMarker_RowShape(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("got %d lines, want 2: %q", len(lines), string(b))
 	}
-	want0 := "testbucket\x1fphotos/a.jpg\x1fv1\x1f2026-11-13T15:30:00Z"
-	want1 := "testbucket\x1fphotos/b.jpg\x1fnull\x1f2026-11-13T15:31:00Z"
+	// server 字段（key/versionID）一律 QueryEscape：'/'→%2F；"null" 恒等。
+	want0 := "testbucket\x1fphotos%2Fa.jpg\x1fv1\x1f2026-11-13T15:30:00Z"
+	want1 := "testbucket\x1fphotos%2Fb.jpg\x1fnull\x1f2026-11-13T15:31:00Z"
 	if lines[0] != want0 {
 		t.Errorf("line0=%q want %q", lines[0], want0)
 	}
@@ -42,37 +43,12 @@ func TestWriteDeleteMarker_RowShape(t *testing.T) {
 	}
 }
 
-func TestWriteInvalidKey_UrlEncodesKey(t *testing.T) {
-	o, dir := newTestOutput(t)
-	// key contains \x1f — must be URL-encoded and routed to invalid_keys.txt
-	o.WriteDeleteMarker("a\x1fb", "v1", "2026-11-13T15:30:00Z")
-	o.FlushAndWait()
-	o.Close()
-	b, err := os.ReadFile(filepath.Join(dir, "invalid_keys.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	line := strings.TrimRight(string(b), "\n")
-	// "a\x1fb" → url.QueryEscape → "a%1Fb"
-	want := "testbucket\x1fa%1Fb\x1fv1\x1f2026-11-13T15:30:00Z"
-	if line != want {
-		t.Errorf("got %q want %q", line, want)
-	}
-	// delete_markers.txt must be empty
-	dm, err := os.ReadFile(filepath.Join(dir, "delete_markers.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(string(dm)) != "" {
-		t.Errorf("delete_markers.txt should be empty, got %q", string(dm))
-	}
-}
-
-// TestWriteInvalidKey_NewlineRoutedToInvalidKeys 验证含 \n / \r 的 key 也被
-// 路由到 invalid_keys.txt（防止撕裂 delete_markers.txt 行结构）。
-// \x1f 撕裂字段、\n/\r 撕裂整行——三类字符走同一兜底路径。
-func TestWriteInvalidKey_NewlineRoutedToInvalidKeys(t *testing.T) {
+// TestWriteDeleteMarker_EscapesTearingChars 验证含撕裂类字符（\x1f 字段分隔、
+// \n/\r 行分隔）的 key 统一 QueryEscape 进 delete_markers.txt——编码后行结构
+// 不会被撕裂，不再有 invalid_keys 分流。
+func TestWriteDeleteMarker_EscapesTearingChars(t *testing.T) {
 	cases := []struct{ name, key, escaped string }{
+		{"unit_sep", "a\x1fb", "a%1Fb"},
 		{"lf", "a\nb", "a%0Ab"},
 		{"cr", "a\rb", "a%0Db"},
 		{"crlf", "a\r\nb", "a%0D%0Ab"},
@@ -83,44 +59,36 @@ func TestWriteInvalidKey_NewlineRoutedToInvalidKeys(t *testing.T) {
 			o.WriteDeleteMarker(c.key, "v1", "2026-11-13T15:30:00Z")
 			o.FlushAndWait()
 			o.Close()
-			b, err := os.ReadFile(filepath.Join(dir, "invalid_keys.txt"))
+			b, err := os.ReadFile(filepath.Join(dir, "delete_markers.txt"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			line := strings.TrimRight(string(b), "\n")
+			lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+			if len(lines) != 1 {
+				t.Fatalf("got %d lines, want 1 (row must not tear): %q", len(lines), string(b))
+			}
 			want := "testbucket\x1f" + c.escaped + "\x1fv1\x1f2026-11-13T15:30:00Z"
-			if line != want {
-				t.Errorf("got %q want %q", line, want)
-			}
-			// delete_markers.txt must be empty (single-line key only there).
-			dm, err := os.ReadFile(filepath.Join(dir, "delete_markers.txt"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.TrimSpace(string(dm)) != "" {
-				t.Errorf("delete_markers.txt should be empty, got %q", string(dm))
+			if lines[0] != want {
+				t.Errorf("line=%q want %q", lines[0], want)
 			}
 		})
 	}
 }
 
-// TestContainsRowSep 覆盖三类撕裂字符：\x1f（字段分隔）、\n/\r（行分隔）。
-func TestContainsRowSep(t *testing.T) {
-	for _, c := range []struct {
-		s    string
-		want bool
-	}{
-		{"photos/a.jpg", false},
-		{"", false},
-		{"a\x1fb", true},
-		{"a\nb", true},
-		{"a\rb", true},
-		{"a\r\nb", true},
-		{"a\x1f\nb", true},
-	} {
-		if got := containsRowSep(c.s); got != c.want {
-			t.Errorf("containsRowSep(%q)=%v want %v", c.s, got, c.want)
-		}
+// TestWriteDeleteMarker_EscapesVersionID 验证 versionID 也统一 QueryEscape
+// （AWS 风格 version-id 含 '/' 等字符）。
+func TestWriteDeleteMarker_EscapesVersionID(t *testing.T) {
+	o, dir := newTestOutput(t)
+	o.WriteDeleteMarker("a.txt", "3/L4kqtJlcpX", "2026-11-13T15:30:00Z")
+	o.FlushAndWait()
+	o.Close()
+	b, err := os.ReadFile(filepath.Join(dir, "delete_markers.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "testbucket\x1fa.txt\x1f3%2FL4kqtJlcpX\x1f2026-11-13T15:30:00Z"
+	if strings.TrimRight(string(b), "\n") != want {
+		t.Errorf("got %q want %q", string(b), want)
 	}
 }
 
@@ -135,8 +103,8 @@ func TestWriteListFailed_Contract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Three lines, each `prefix\x1fkeyMarker\x1fversionIdMarker\n`
-	want := "photos/\x1f\x1f\n\x1f\x1f\nphotos/\x1fk1\x1fv1\n"
+	// Three lines, each `prefix\x1fkeyMarker\x1fversionIdMarker\n`（三字段均编码）
+	want := "photos%2F\x1f\x1f\n\x1f\x1f\nphotos%2F\x1fk1\x1fv1\n"
 	if string(b) != want {
 		t.Errorf("got %q want %q", string(b), want)
 	}

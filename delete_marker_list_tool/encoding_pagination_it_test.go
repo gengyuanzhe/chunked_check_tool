@@ -12,34 +12,35 @@ import (
 	"time"
 )
 
-// TestIntegration_EncodingTypeURL_PaginationRoundTrip 验证 encoding_type_url=true
-// 时的翻页 marker 回传闭环。
+// TestIntegration_EncodingTypeURL_PaginationRoundTrip 验证 encoding_type_url
+// 开/关两种模式下的翻页 marker 回传闭环 + 文件格式不变量。
 //
 // 服务端（minio）语义（cmd/api-resources.go getListBucketObjectVersionsArgs）：
 // key-marker 请求参数只做一次标准 query 解码，直接按原始 key 使用——客户端必须
 // 回传"解码态"的 marker。服务端响应侧 NextKeyMarker 用 s3EncodeName 编码
-// （空格→%20、!→%21、~→%7E、非 ASCII 逐字节 %XX；'/' 与字母数字不编码）。
+// （空格→'+'、!→%21、~→%7E、非 ASCII 逐字节 %XX；'/' 与字母数字不编码）。
 //
 // 数据布局（每 key put+delete = 2 版本，delete marker 在前）：max_keys=3 强制分页，
 // 页边界 key 刻意选含"会被编码字符"的 key：
 //
 //	a1 < "b c" < "b!x" < "b~" < "中" < "zz"   （字典序）
 //
-// 断言（两种 encoding 下都应成立）：6 个 delete marker 各出现恰好一次，
-// delete_markers.txt 的 key 字段为 wire 编码态（encoding=true 时）。
+// 断言：6 个 delete marker 各出现恰好一次，且两种 encoding 模式下
+// delete_markers.txt 的 key 字段是**同一份** QueryEscape 规范编码集合——
+// 文件格式与 encoding_type_url 配置无关（写侧无条件 QueryEscape）。
 //
 // 若客户端把编码态 NextKeyMarker 原样回传（不解码），服务端按原始 key 用 marker：
-//   - "b c" 页边界：编码 marker "b%20c" > "b!x"（'%'=0x25 > '!'=0x21）→ b!x 被跳过（漏）；
-//   - "中" 页边界：编码 marker "%E4%B8%AD" < "中"（0xE4 > 0x25）→ 中 被重复列举（重）。
+//   - "b c" 页边界：编码 marker "b+c" > "b!x"（'+'=0x2B > '!'=0x21）→ b!x 被跳过（漏）；
+//   - "中" 页边界：编码 marker 与原始 key 错位 → 中 的剩余版本被跳过（漏）。
 func TestIntegration_EncodingTypeURL_PaginationRoundTrip(t *testing.T) {
 	seedKeys := []string{"a1", "b c", "b!x", "b~", "中", "zz"}
-	// wire 编码态（minio s3URLEncode，QueryEscape 风格）：'/'、字母数字不编码，
-	// 空格→'+'，其余 %XX。
-	wantEncoded := []string{"a1", "b+c", "b%21x", "b%7E", "%E4%B8%AD", "zz"}
+	// 文件规范编码态（url.QueryEscape）：字母数字与 '-' '_' '.' '~' 不编码
+	// （'~' 与 minio 的 s3URLEncode 不同——它强制编码 '~'），空格→'+'，其余 %XX。
+	wantEncoded := []string{"a1", "b+c", "b%21x", "b~", "%E4%B8%AD", "zz"}
 
 	t.Run("control_encoding_off", func(t *testing.T) {
 		keys := seedAndScan(t, seedKeys, false)
-		assertKeySet(t, keys, seedKeys, "encoding=false")
+		assertKeySet(t, keys, wantEncoded, "encoding=false")
 	})
 
 	t.Run("encoding_on_roundtrip", func(t *testing.T) {

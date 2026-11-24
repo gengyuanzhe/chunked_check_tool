@@ -29,7 +29,7 @@ type S3Client struct {
 	latency                *LatencyTracker // 可选——nil 不记录。main 启动时注入 &stats.Latency。
 	logger                 *slog.Logger    // 可选——nil 不打诊断。main 在 cfg.DebugLog=true 时注入 Debug-level logger。
 	maxKeys                int32           // 每页 MaxKeys；0=用 SDK 默认 1000（不显式设）。NewS3Client 从 cfg.MaxKeys 读。
-	encodingTypeURL        bool            // true=请求带 EncodingType=url（wire 上 key URL 编码，避免 \x1f 等控制字符撕裂 XML）。SDK 不自动解码——本工具在出口解码 CommonPrefixes 与 NextKeyMarker（内部状态/翻页必须原始态），Versions[].Key 保持编码态落盘，cleanup 工具读 delete_markers.txt 时自行 url.QueryUnescape。
+	encodingTypeURL        bool            // true=请求带 EncodingType=url（wire 上 server 字段 URL 编码，避免 \x1f 等控制字符撕裂 XML）。SDK 不自动解码——s3client 出口（decodeWire，边界 A）把全部 server 字段（Key/CommonPrefix/NextKeyMarker）解码为原始形态；文件统一 QueryEscape 交给 Output 层（边界 B），与此配置无关。
 	repairNextVIDMarkerOnShortResponse bool          // true=短响应触发时按 a/b/c 规则修复 NextVersionIdMarker（见 repairNextVIDMarkerShortResponse）。
 }
 
@@ -120,6 +120,28 @@ type VersionPage struct {
 	RewrittenRawVIDMarker   string
 }
 
+// decodeWire 是"边界 A"：encoding_type_url=true 时服务端返回值在 wire 上是 URL
+// 编码态（%XX），出口统一解码为原始形态——此后工具内部（BFS 前缀、翻页 marker、
+// 逐条目的 key）恒为原始形态，文件编码统一交给 Output 层（边界 B）。
+// encoding_type_url=false 时服务端不编码，原样返回（对原始值做解码会破坏含
+// 字面 %XX/+ 序列的真实 key——解码仅发生在服务端确实编过码时，恰一次）。
+// 解码失败（非法 %XX——服务端 bug）：保留原值 + Warn，下游按字面量处理，
+// 走 list_failed 兜底。
+func (c *S3Client) decodeWire(bucket, prefix, raw string) string {
+	if !c.encodingTypeURL || raw == "" {
+		return raw
+	}
+	dec, err := url.QueryUnescape(raw)
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Warn("wire url decode failed",
+				"bucket", bucket, "prefix", prefix, "raw", raw, "err", err)
+		}
+		return raw
+	}
+	return dec
+}
+
 // ListVersionsPage 列举一页。recursive=true 不带 delimiter（所有 key 所有版本）；
 // recursive=false 带 / delimiter（直接子 key 的所有版本 + common prefix）。
 // keyMarker/versionIDMarker 非空 = 从该 marker 起续扫（retry 场景）。
@@ -154,9 +176,10 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 	}
 	// maxKeys 是必填字段（config 校验保证 1..1000），故总是显式设 MaxKeys。
 	input.MaxKeys = aws.Int32(c.maxKeys)
-	// encoding_type_url=true 时请求带 EncodingType=url——wire 上 key URL 编码，
-	// 避免 \x1f 等 XML 1.0 非法控制字符撕裂 XML 反序列化。SDK 不自动解码，
-	// delete_markers.txt 落盘的是 URL 编码 key；cleanup 工具读时按 url.QueryUnescape 解码。
+	// encoding_type_url=true 时请求带 EncodingType=url——wire 上 server 字段 URL 编码，
+	// 避免 \x1f 等 XML 1.0 非法控制字符撕裂 XML 反序列化。SDK 不自动解码，出口由
+	// decodeWire 统一解码（见其注释）。该配置只影响 wire 行为；记录文件的编码与
+	// 它无关（Output 层无条件 QueryEscape，读取侧无条件 QueryUnescape）。
 	if c.encodingTypeURL {
 		input.EncodingType = types.EncodingTypeUrl
 	}
@@ -192,29 +215,17 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 		NextVersionIDMarker: aws.ToString(out.NextVersionIdMarker),
 		IsTruncated:         aws.ToBool(out.IsTruncated),
 	}
-	// encoding_type_url=true 时 NextKeyMarker 是 wire 编码态（SDK 不自动解码），
-	// 在出口解码为原始 key：下一页请求的 key-marker 必须回传原始形态——服务端对
-	// key-marker 只做一次标准 query 解码后按原始 key 定位翻页位置，编码态回传会让
-	// 位置错位（minio 实测：边界 key 后续版本与字典序缺口内的 key 整段漏扫）。
-	// NextVersionIdMarker 不在 encoding-type=url 的编码字段列表（AWS 只编 KeyMarker/
-	// NextKeyMarker/Prefix/Key/Delimiter；minio 也不编 version-id），保持原样。
-	if c.encodingTypeURL && page.NextKeyMarker != "" {
-		if dec, err := url.QueryUnescape(page.NextKeyMarker); err != nil {
-			// 编码非法——服务端 bug。原样保留（下一页大概率错位，走 list_failed 兜底）；
-			// 同时打 Warn 便于定位。
-			if c.logger != nil {
-				c.logger.Warn("next-key-marker url decode failed",
-					"bucket", bucket, "prefix", prefix, "raw", page.NextKeyMarker, "err", err)
-			}
-		} else {
-			page.NextKeyMarker = dec
-		}
-	}
+	// 边界 A：NextKeyMarker 解码为原始 key——下一页请求的 key-marker 必须回传原始
+	// 形态（服务端对 key-marker 只做一次标准 query 解码后按原始 key 定位翻页位置，
+	// 编码态回传会让位置错位；minio 实测漏扫）。NextVersionIdMarker 不在
+	// encoding-type=url 的编码字段列表（AWS 只编 KeyMarker/NextKeyMarker/Prefix/
+	// Key/Delimiter；minio 也不编 version-id），保持原样。
+	page.NextKeyMarker = c.decodeWire(bucket, prefix, page.NextKeyMarker)
 	page.Versions = make([]VersionEntry, 0, len(out.Versions)+len(out.DeleteMarkers))
 	for i := range out.Versions {
 		v := out.Versions[i]
 		page.Versions = append(page.Versions, VersionEntry{
-			Key:            aws.ToString(v.Key),
+			Key:            c.decodeWire(bucket, prefix, aws.ToString(v.Key)),
 			VersionID:      aws.ToString(v.VersionId),
 			IsDeleteMarker: false,
 			LastModified:   aws.ToTime(v.LastModified),
@@ -223,7 +234,7 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 	for i := range out.DeleteMarkers {
 		v := out.DeleteMarkers[i]
 		page.Versions = append(page.Versions, VersionEntry{
-			Key:            aws.ToString(v.Key),
+			Key:            c.decodeWire(bucket, prefix, aws.ToString(v.Key)),
 			VersionID:      aws.ToString(v.VersionId),
 			IsDeleteMarker: true,
 			LastModified:   aws.ToTime(v.LastModified),
@@ -231,26 +242,10 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 	}
 	page.CommonPrefixes = make([]string, 0, len(out.CommonPrefixes))
 	for i := range out.CommonPrefixes {
-		cp := aws.ToString(out.CommonPrefixes[i].Prefix)
-		// encoding_type_url=true 时 CommonPrefix 是 URL 编码——list 工具内部 BFS 把它作为
-		// 下一轮 prefix 入队，发请求时 SDK 会再 URL 编码一次。若不解码：编码的 prefix 被 SDK
-		// 二次编码（photos%2F → photos%252F），服务端解一次得到 photos%2F，匹配不到真实目录，
-		// BFS 漏扫。所以 CommonPrefixes 在 s3client 出口解码为原始 prefix。
-		// 注意：delete_markers.txt 的 key 仍然保持 URL 编码（落盘不解码），与 CommonPrefixes
-		// 不同——key 是给下游 cleanup 工具消费的，CommonPrefixes 是 list 工具内部 BFS 状态。
-		if c.encodingTypeURL {
-			dec, err := url.QueryUnescape(cp)
-			if err != nil {
-				// CommonPrefix 编码非法——服务端 bug。原样保留（BFS 该路径大概率扫不到，
-				// 走 list_failed 兜底）；同时打 Warn 便于定位。
-				if c.logger != nil {
-					c.logger.Warn("common-prefix url decode failed",
-						"bucket", bucket, "prefix", prefix, "raw", cp, "err", err)
-				}
-			} else {
-				cp = dec
-			}
-		}
+		// CommonPrefix 与 Key 同规则解码：它是 BFS 内部状态（下一轮 prefix），SDK 发
+		// 请求时会再 URL 编码一次，不解码会二次编码（photos%2F → photos%252F），服务端
+		// 解一层得到 photos%2F 匹配不到真实目录，BFS 漏扫。
+		cp := c.decodeWire(bucket, prefix, aws.ToString(out.CommonPrefixes[i].Prefix))
 		page.CommonPrefixes = append(page.CommonPrefixes, cp)
 	}
 	// 短响应触发的 next-marker 修复（cfg.RepairNextVIDMarkerOnShortResponse=true 时启用）。
@@ -290,9 +285,10 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 // 倒序（新版本在前）。所以两尾 key 不同时取 key 大者；key 相同时取 LastModified 更小
 // （更旧版本）者。VersionId 不参与排序（S3 不保证 version-id 有任何序）。
 //
-// key 解码：encoding_type_url=true 时 SDK 不自动解码，page.Versions[].Key 是 wire 态
-// （%XX 编码），比较前 url.QueryUnescape。page.NextKeyMarker 已在 ListVersionsPage
-// 出口解码为原始 key，直接用（二次解码会破坏含字面 % 序列的真实 key）。
+// key 解码：encoding_type_url=true 时 SDK 不自动解码，本函数收到的 versions/
+// deleteMarkers（SDK 原始 slice，非 page.Versions）的 Key 是 wire 态（%XX 编码），
+// 比较前 url.QueryUnescape。page.NextKeyMarker 已在 ListVersionsPage 出口解码为
+// 原始 key，直接用（二次解码会破坏含字面 % 序列的真实 key）。
 // 服务端排序基于存储里的真实 key（解码态）——编码只是输出的表示层，排序在编码之前
 // 发生，故候选必须统一到解码态比，结果才反映服务端序。
 func repairNextVIDMarkerShortResponse(page *VersionPage, versions []types.ObjectVersion, deleteMarkers []types.DeleteMarkerEntry, encodingTypeURL bool) {

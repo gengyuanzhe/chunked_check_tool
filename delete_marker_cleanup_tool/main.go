@@ -17,7 +17,7 @@ import (
 func main() {
 	cfgPath := flag.String("c", "", "config yaml path")
 	mode := flag.String("mode", "", "check or delete")
-	inputPath := flag.String("input", "", "input file path (delete_markers.txt or invalid_keys.txt)")
+	inputPath := flag.String("input", "", "input file path (delete_markers.txt from the list tool; url-encoded fields are decoded on read)")
 	flag.Parse()
 
 	if *cfgPath == "" || *mode == "" || *inputPath == "" {
@@ -63,7 +63,7 @@ func run(cfgPath, mode, inputPath string) error {
 	// check 与 delete 都用 len(Endpoints) 个 client（每 endpoint 一个），worker 按
 	// idx % N 绑——预创好直接复用，RunWorkers 不再创建 client。check 也走多 endpoint
 	// 是为了单 endpoint 故障时剩余 worker 继续跑，避免 mode=check 全停。
-	firstBkt, ok := readFirstRowBucket(inputPath, cfg.EncodingTypeURL)
+	firstBkt, ok := readFirstRowBucket(inputPath)
 	if !ok {
 		return fmt.Errorf("preflight: first input row unparseable (torn or empty file)")
 	}
@@ -120,10 +120,10 @@ func run(cfgPath, mode, inputPath string) error {
 	return runErr
 }
 
-// readFirstRowBucket 读输入文件第一个非空行，按 \x1f 分隔解析三段
-// （basename == invalid_keys.txt 或 encoding_type_url=true 时 URL 解码 key），返回 bkt 字段。
+// readFirstRowBucket 读输入文件第一个非空行，按 \x1f 分隔解析（key/versionID
+// 按 文件格式契约 URL 解码），返回 bkt 字段。
 // 返回 ok=false 表示文件空或首行格式错误。
-func readFirstRowBucket(inputPath string, encodingTypeURL bool) (string, bool) {
+func readFirstRowBucket(inputPath string) (string, bool) {
 	f, err := os.Open(inputPath)
 	if err != nil {
 		return "", false
@@ -136,7 +136,7 @@ func readFirstRowBucket(inputPath string, encodingTypeURL bool) (string, bool) {
 		if line == "" {
 			continue
 		}
-		row, ok := ParseRow(line, filepath.Base(inputPath), encodingTypeURL)
+		row, ok := ParseRow(line)
 		if !ok {
 			return "", false
 		}
@@ -160,7 +160,6 @@ func printConfigSnapshot(w io.Writer, cfg *Config, mode, inputPath string) {
 	fmt.Fprintf(w, "progress_interval=%d\n", cfg.ProgressInterval)
 	fmt.Fprintf(w, "dial_timeout=%d\n", cfg.DialTimeout)
 	fmt.Fprintf(w, "response_header_timeout=%d\n", cfg.ResponseHeaderTimeout)
-	fmt.Fprintf(w, "encoding_type_url=%v\n", cfg.EncodingTypeURL)
 	fmt.Fprintf(w, "failure_threshold=%d\n", cfg.FailureThreshold)
 	fmt.Fprintf(w, "slow_mode_interval_sec=%d\n", cfg.SlowModeIntervalSec)
 	fmt.Fprintf(w, "debug_log=%v\n", cfg.DebugLog)

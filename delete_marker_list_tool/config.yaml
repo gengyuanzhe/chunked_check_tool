@@ -61,12 +61,12 @@ debug_log: false
 # "返回数 < max_keys && IsTruncated=true" 检测服务端翻页 quirk（异常 short response）。
 max_keys: 500
 
-# 列举请求是否带 encoding-type=url。
-# true=请求带 EncodingType=url，服务端返回的 key 在 wire 上做 URL 编码（\x1f→%1F、\n→%0A、
-# \r→%0D 等），避免 XML 1.0 非法控制字符撕裂反序列化；delete_markers.txt 落盘的是 URL
-# 编码 key（list 工具不在本地解码），cleanup 工具读时按同名配置决定是否 url.QueryUnescape。
-# false=不带，原行为（key 含 \x1f 会让整页 XML 反序列化失败进 list_failed；含 \n/\r 兜底进
-# invalid_keys.txt）。新桶推荐 true。
+# 列举请求是否带 encoding-type=url。只影响 wire 行为：
+# true=请求带 EncodingType=url，服务端返回的 server 字段在 wire 上做 URL 编码（\x1f→%1F、
+# \n→%0A、\r→%0D 等），避免 XML 1.0 非法控制字符撕裂反序列化；s3client 出口解码回原始形态。
+# false=不带（key 含 \x1f 会让整页 XML 反序列化失败进 list_failed）。
+# 记录文件（delete_markers.txt / list_failed.txt）的编码与此配置无关——写侧无条件
+# QueryEscape、读取侧无条件 QueryUnescape（文件格式契约）。新桶推荐 true。
 encoding_type_url: false
 
 # 短响应触发时修复 NextVersionIdMarker。触发条件：IsTruncated=true 且本页条目数

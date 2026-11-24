@@ -15,13 +15,14 @@ import (
 // main 解析 flag，调用 run。错误时 stderr + exit 1。
 // -prefix 和 -retry 互斥：-retry 从文件读 prefix 列表（一行一个），-prefix
 // 是单值的语法糖。两者都空 = 扫整个 bucket（root prefix）。
-// -retry 文件每行格式：prefix\x1fkeyMarker\x1fversionIdMarker
-// （空 marker = 从第一页扫；无 \x1f = 纯 prefix 向后兼容）。
+// -retry 文件每行格式（三字段均为 URL 编码态，读取时解码）：
+// prefix\x1fkeyMarker\x1fversionIdMarker（空 marker = 从第一页扫；无 \x1f =
+// 纯 prefix 向后兼容）。
 func main() {
 	cfgPath := flag.String("c", "", "config yaml path")
 	bucket := flag.String("bkt", "", "bucket name")
 	prefix := flag.String("prefix", "", "list prefix (default empty = whole bucket; mutually exclusive with -retry)")
-	retryPath := flag.String("retry", "", "retry prefix file (one entry per line: prefix\\x1fkeyMarker\\x1fversionIdMarker; mutually exclusive with -prefix)", )
+	retryPath := flag.String("retry", "", "retry prefix file (one entry per line: url-encoded prefix\\x1fkeyMarker\\x1fversionIdMarker; mutually exclusive with -prefix)")
 	flag.Parse()
 
 	if *cfgPath == "" || *bucket == "" {
@@ -149,25 +150,7 @@ func run(cfgPath, bucket string, entries []RetryEntry) error {
 
 	stats.PrintSummary(mwOut)
 
-	// encoding_type_url=true 时 invalid_keys.txt 应永远为空（key 已 URL 编码，
-	// containsRowSep 检查原始控制字节 → 永远 false）。若 stats 显示有 invalid_keys
-	// 命中，说明 containsRowSep 路径被异常触发——可能是 SDK 解码行为变化或服务端 quirk。
-	// 警告用户人工核对 invalid_keys.txt，cleanup 工具读它时会无条件 url.QueryUnescape 解码，
-	// 二次编码风险下可能删错对象。
-	warnInvalidKeysNonzeroUnderEncodingTypeURL(mwErr, cfg, &stats)
-
 	return listErr
-}
-
-// warnInvalidKeysNonzeroUnderEncodingTypeURL 在 encoding_type_url=true 且
-// stats.InvalidKeys > 0 时打 warning。单独抽函数便于单测。
-func warnInvalidKeysNonzeroUnderEncodingTypeURL(w io.Writer, cfg *Config, stats *Stats) {
-	if !cfg.EncodingTypeURL {
-		return
-	}
-	if n := stats.Snapshot().InvalidKeys; n > 0 {
-		fmt.Fprintf(w, "[warning] encoding_type_url=true but invalid_keys=%d (should be 0; check invalid_keys.txt manually)\n", n)
-	}
 }
 
 // printConfigSnapshot 打印配置快照。sk 掩码为 ***（对齐 chunked_check_tool/main.go:174-210）。

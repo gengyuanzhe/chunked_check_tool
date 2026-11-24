@@ -32,8 +32,9 @@ func TestWriteCheckResult_FourFieldRow(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("got %d lines, want 2: %q", len(lines), string(b))
 	}
-	want0 := "bkt\x1fphotos/a.jpg\x1fv1\x1f2026-11-13T15:30:00Z\x1fmarker"
-	want1 := "bkt\x1fphotos/b.jpg\x1fnull\x1f2026-11-13T15:31:00Z\x1fnot_marker"
+	// key/versionID 是 server 字段，QueryEscape 编码：'/'→%2F；"null" 恒等。
+	want0 := "bkt\x1fphotos%2Fa.jpg\x1fv1\x1f2026-11-13T15:30:00Z\x1fmarker"
+	want1 := "bkt\x1fphotos%2Fb.jpg\x1fnull\x1f2026-11-13T15:31:00Z\x1fnot_marker"
 	if lines[0] != want0 {
 		t.Errorf("line0=%q want %q", lines[0], want0)
 	}

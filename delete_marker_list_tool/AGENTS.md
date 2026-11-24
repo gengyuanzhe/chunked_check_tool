@@ -28,7 +28,7 @@
 | `s3client.go` | `S3Client`（s3.Client 包装）、`ListVersionsPage(ctx, bkt, prefix, recursive, keyMarker, versionIDMarker) (*VersionPage, error)`（page-at-a-time：每调一次返回一页 Version+DeleteMarker+CommonPrefixes）、`BucketExists`、`SetLogger`（cfg.DebugLog=true 时注入 Debug-level slog，打每次请求的 marker req/resp/err）。transport 调优对齐 chunked_check_tool |
 | `lister.go` | `Lister`：mode 1 单流 + mode 2 BFS 两种驱动；分页循环在 worker 内部（keyMarker/versionIDMarker 是局部变量，失败时即续传点）；不再有 `isCommonPrefix` 启发式（AWS SDK 按 XML 标签区分 Version/DeleteMarker/CommonPrefixes）；`recordListFailed` 从 `*awshttp.ResponseError` 提 StatusCode + reqID |
 | `queue.go` | 无界前缀队列（slice + mutex + cond），ctx-aware Pop，`SignalDone` 终止。对齐 chunked_check_tool/queue.go 形态，砍掉 Drain（无优雅退出） |
-| `output.go` | `Output`：三个 writer goroutine（delete_markers / invalid_keys / list_failed）+ slog listLogger；`\x1f` 行分隔符；key 含 `\x1f` 自动路由到 invalid_keys + URL 编码；list_failed.txt 惰性 open；3 秒定时 flush |
+| `output.go` | `Output`：两个 writer goroutine（delete_markers / list_failed）+ slog listLogger；`\x1f` 行分隔符；server 字段（key/versionID/markers）落盘前统一 `url.QueryEscape`（边界 B）；list_failed.txt 惰性 open；3 秒定时 flush |
 | `stats.go` | atomic.Int64 计数器 + `StatsSnapshot` + `PrintSummary` |
 | `progress.go` | `ProgressPrinter`（per-worker 本地计数 + 阈值打印）+ `QueueSnapshot`（mode 2 队列/inflight 快照） |
 
@@ -123,7 +123,10 @@ flowchart TD
 
 9. **run.log 第一个 open**：先于任何输出文件。`mwOut = io.MultiWriter(os.Stdout, runLog)`，`mwErr = io.MultiWriter(os.Stderr, runLog)`。sk 在配置快照里掩码为 `***`。对齐 chunked_check_tool/main.go:102-110。
 
-10. **`\x1f`-in-key 路由**：key 含 `\x1f` 的 marker 走 `invalid_keys.txt`，key 经 `url.QueryEscape` 编码。**不可**直接写入 `delete_markers.txt`（会撕裂行字段）。`output.go` 的 `WriteDeleteMarker` 自动检测 + 路由。
+10. **记录文件统一 URL 编码（双边界不变量）**：所有 `\x1f` 行文件（delete_markers.txt / list_failed.txt）的 server 字段（key、versionID、prefix、keyMarker、versionIdMarker）一律 `url.QueryEscape` 编码态落盘，**与 `encoding_type_url` 配置无关**；读取侧（`parseRetryLine`、下游 cleanup 工具）一律先 `url.QueryUnescape` 解码。两个固定边界保证编解码各恰一次：
+    - **边界 A（s3client 出口，`decodeWire`）**：`encoding_type_url=true`（服务端确实在 wire 上编码过）→ 解码恰一次；`false` → 不动。此后工具内部（BFS 前缀、翻页 marker、逐条目 key）恒为原始形态。
+    - **边界 B（Output 写文件）**：无条件 `QueryEscape` 恰一次——只见原始形态，不可能双重编码。
+    - **不可**在别处做编/解码（会双重编码或双重解码）；**不可**对原始值做 `QueryUnescape`（`encoding_type_url=false` 时 key 含字面 `%XX`/`+` 会被破坏）。invalid_keys.txt 路由已随本不变量移除（编码后行永不被撕裂）。
 
 11. **aws-sdk-go-v2 v1.114.10 ListObjectVersions**：响应 `Versions` / `DeleteMarkers` / `CommonPrefixes` 三个独立 slice，按 XML 标签区分。`ListVersionsPage` 把 Version + DeleteMarker 摊平到 `VersionEntry`（IsDeleteMarker 区分），CommonPrefixes 放到 `VersionPage.CommonPrefixes`。升级 aws-sdk-go-v2 需重验三 slice 是否仍按 XML 标签区分（spec §4.1）。
 
@@ -135,7 +138,7 @@ flowchart TD
 
 13. **`-retry <file>` 与 `-prefix` 互斥**：`-retry` 读文件每行一个 RetryEntry，初始 BFS 入队用该列表（去重保序，按 prefix+marker 三元组去重）。mode 1 + 多 entry 报错（`Lister.Run` 在 `list_type==1 && len(entries)>1` 时报错）；mode 1 + 单 entry retry 文件不报错——从该 entry 的 marker 续扫该 prefix。`-retry` 文件不存在 = 硬退出（`resolveEntries` 调 `readRetryEntries`，文件缺失在 BFS 启动前报出）。`-retry` 模式下 `list_failed.txt` 仍会记新失败，可多次 `-retry list_failed.txt` 续传；但 `output_dir_timestamp: true`（默认）时每次运行目录不同，retry 文件需指向上一轮的 `<output_dir>_<ts>/list_failed.txt`。
 
-14. **`-retry` 是 next-marker 页级续传**：每行格式 `prefix\x1fkeyMarker\x1fversionIdMarker`——失败 prefix 已扫完的最后一页的 next-marker 被写入 `list_failed.txt`，retry 时从该 marker 起续扫（不重扫已扫页）。无 `\x1f` 行向后兼容旧格式（纯 prefix，从第一页扫）。`list_failed.txt` 行格式：`prefix\x1fkeyMarker\x1fversionIdMarker\n`，三个 marker 都空 = 从第一页扫（含 root prefix）。**prefix 含 `\x1f` 不支持**——`\x1f` 是字段分隔符，无法在 3-field 格式里无歧义表示（与 `delete_markers.txt` 用 `\x1f` 分隔 key 同理的限制；S3 key/prefix 极少含 `\x1f`）。`ListVersionsPage` 是 page-at-a-time：worker 分页循环里 `keyMarker`/`versionIDMarker` 是局部变量，失败时它们的值就是这次失败请求用的 marker = 续传点，直接 `recordListFailed(prefix, keyMarker, versionIDMarker, err)`——无 channel、无时序依赖、不可能丢 marker。
+14. **`-retry` 是 next-marker 页级续传**：每行格式 `prefix\x1fkeyMarker\x1fversionIdMarker`（三字段均为 URL 编码态，读取时 `parseRetryLine` 解码）——失败 prefix 已扫完的最后一页的 next-marker 被写入 `list_failed.txt`，retry 时从该 marker 起续扫（不重扫已扫页）。无 `\x1f` 行向后兼容旧格式（纯 prefix，从第一页扫）。`list_failed.txt` 行格式：`<编码prefix>\x1f<编码keyMarker>\x1f<编码versionIdMarker>\n`，三个 marker 都空 = 从第一页扫（含 root prefix）。prefix/markers 含 `\x1f`/`\n` 等撕裂字符无碍——文件恒为编码态，行结构不会破。`ListVersionsPage` 是 page-at-a-time：worker 分页循环里 `keyMarker`/`versionIDMarker` 是局部变量，失败时它们的值就是这次失败请求用的 marker = 续传点，直接 `recordListFailed(prefix, keyMarker, versionIDMarker, err)`——无 channel、无时序依赖、不可能丢 marker。
 
 ## 6. 约束
 
@@ -148,13 +151,13 @@ flowchart TD
 
 ## 7. 遗留任务（已知未决/未来工作）
 
-1. **key 含 `\n` 的 marker 仍会撕裂行**：chunked_check_tool 同样不防护，S3 key 含换行极罕见。未来如需可加 `\n` 检测 + URL 编码路由（同 `\x1f` 路由模式）。
+1. ~~**key 含 `\n` 的 marker 仍会撕裂行**~~：已随"记录文件统一 URL 编码"不变量解决（`\n` 编码为 `%0A` 落盘，行永不撕裂）。
 
 2. **同秒内连续启动两次**（`output_dir_timestamp: true`）会撞目录并发 append 撕裂尾部行：靠下游解析时丢弃格式非法行兜底。如需严格保证可加"目录已存在即拒绝"——但需同时支持 `output_dir_timestamp: false` 的补齐追加语义，两者冲突。
 
 3. **无优雅退出**：Ctrl-C / kill -9 丢尾部整行，run.log 里 summary 不会打出来。未来如需可加 chunked_check_tool 的两段式 SIGINT handler + journal——但 spec §9 明确非目标，加之前需重新评估。
 
-4. **下游删除工具未实现**：需读 `delete_markers.txt` + `invalid_keys.txt`（后者 key 需 `url.QueryUnescape` 解码），逐条 `DeleteObject(bucket, key, VersionId)`。删除按 version-id 幂等——重复行无害。
+4. **下游删除工具已实现**：`../delete_marker_cleanup_tool/` 读 `delete_markers.txt`（按文件格式契约无条件 `url.QueryUnescape` 解码 key/versionID），逐条 HEAD/DELETE。删除按 version-id 幂等——重复行无害。
 
 5. **`queue.Pop` 空等时每次起临时 goroutine 桥接 ctx 到 cond**：`queue.go` 的 Pop 在队列空时，每次都 `make(chan struct{})` + 起一个 goroutine 监听 `ctx.Done()` 后广播 cond，`cond.Wait()` 醒来后 `close(stop)` 销毁。8 worker 突发间隙各自进 Pop 空等会反复起 goroutine。更优解是 queue 构造时起一个常驻 ctx-watcher goroutine，所有 Pop 共享——但稳态下队列持续有货（大桶），空等只在收尾，收益不抵改动风险，暂不修。
 

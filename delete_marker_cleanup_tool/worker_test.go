@@ -11,7 +11,7 @@ import (
 )
 
 func TestParseRow_ThreeFields(t *testing.T) {
-	r, ok := ParseRow("bkt\x1fkey/a\x1fv1", "delete_markers.txt", false)
+	r, ok := ParseRow("bkt\x1fkey/a\x1fv1")
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -20,8 +20,10 @@ func TestParseRow_ThreeFields(t *testing.T) {
 	}
 }
 
-func TestParseRow_InvalidKeysBasenameURLDecodesKey(t *testing.T) {
-	r, ok := ParseRow("bkt\x1fa%1Fb\x1fv1", "invalid_keys.txt", false)
+// TestParseRow_URLDecodesKey 文件格式契约：key 恒为编码态，读取无条件解码。
+// "a%1Fb" → "a\x1f b"（撕裂类控制字符恢复原始形态，发请求/再落盘都安全）。
+func TestParseRow_URLDecodesKey(t *testing.T) {
+	r, ok := ParseRow("bkt\x1fa%1Fb\x1fv1")
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -30,17 +32,29 @@ func TestParseRow_InvalidKeysBasenameURLDecodesKey(t *testing.T) {
 	}
 }
 
+// TestParseRow_URLDecodesVersionID versionID 同为 server 字段，无条件解码
+// （AWS 风格 version-id 含 '/'：文件态 "3%2FL4" → 原始 "3/L4"）。
+func TestParseRow_URLDecodesVersionID(t *testing.T) {
+	r, ok := ParseRow("bkt\x1fk\x1f3%2FL4")
+	if !ok {
+		t.Fatal("expected ok")
+	}
+	if r.VersionID != "3/L4" {
+		t.Errorf("VersionID=%q want %q", r.VersionID, "3/L4")
+	}
+}
+
 func TestParseRow_WrongFieldCount(t *testing.T) {
-	if _, ok := ParseRow("only\x1ftwo", "delete_markers.txt", false); ok {
+	if _, ok := ParseRow("only\x1ftwo"); ok {
 		t.Errorf("expected ok=false for 2-field line")
 	}
-	if _, ok := ParseRow("bkt\x1fk\x1fv\x1flm\x1fextra", "delete_markers.txt", false); ok {
+	if _, ok := ParseRow("bkt\x1fk\x1fv\x1flm\x1fextra"); ok {
 		t.Errorf("expected ok=false for 5-field line")
 	}
 }
 
 func TestParseRow_NullVersionIdPassesThrough(t *testing.T) {
-	r, ok := ParseRow("bkt\x1fk\x1fnull", "delete_markers.txt", false)
+	r, ok := ParseRow("bkt\x1fk\x1fnull")
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -52,7 +66,7 @@ func TestParseRow_NullVersionIdPassesThrough(t *testing.T) {
 // ParseRow 兼容 3 段（旧输入）和 4 段（新输入带 lastModified）。
 func TestParseRow_Accepts3And4Fields(t *testing.T) {
 	// 3 段：LastModified 为空
-	r3, ok := ParseRow("bkt\x1fk\x1fv1", "delete_markers.txt", false)
+	r3, ok := ParseRow("bkt\x1fk\x1fv1")
 	if !ok {
 		t.Fatal("expected ok for 3-field line")
 	}
@@ -60,7 +74,7 @@ func TestParseRow_Accepts3And4Fields(t *testing.T) {
 		t.Errorf("LastModified=%q want empty for 3-field line", r3.LastModified)
 	}
 	// 4 段：LastModified 透传
-	r4, ok := ParseRow("bkt\x1fk\x1fv1\x1f2026-11-13T15:30:00Z", "delete_markers.txt", false)
+	r4, ok := ParseRow("bkt\x1fk\x1fv1\x1f2026-11-13T15:30:00Z")
 	if !ok {
 		t.Fatal("expected ok for 4-field line")
 	}
@@ -69,42 +83,30 @@ func TestParseRow_Accepts3And4Fields(t *testing.T) {
 	}
 }
 
-// encoding_type_url=true 时，delete_markers.txt 的 key 是 URL 编码
-// （list 工具开了 EncodingType=url 但不在本地解码）。cleanup 读时需 url.QueryUnescape。
-func TestParseRow_EncodingTypeURLDecodesDeleteMarkersKey(t *testing.T) {
-	r, ok := ParseRow("bkt\x1fa%1Fb\x1fv1", "delete_markers.txt", true)
-	if !ok {
-		t.Fatal("expected ok")
-	}
-	if r.Key != "a\x1fb" {
-		t.Errorf("Key=%q want %q", r.Key, "a\x1fb")
-	}
-	if !r.KeyEncoded {
-		t.Errorf("KeyEncoded=false want true（outputKey 时需重新 QueryEscape）")
-	}
-}
-
-// encoding_type_url=true 时 URL 解码失败 → ok=false（scanner 走 torn line 路径，
+// URL 解码失败（非法 %XX）→ ok=false（scanner 走 torn line 路径，
 // 写 failed.txt + slog 详情，与 delete 失败一致）。
-func TestParseRow_EncodingTypeURLDecodeFailureReturnsFalse(t *testing.T) {
+func TestParseRow_DecodeFailureReturnsFalse(t *testing.T) {
 	// "%XX" 末尾不完整 → QueryUnescape 报错。
-	if _, ok := ParseRow("bkt\x1fa%\x1fv1", "delete_markers.txt", true); ok {
+	if _, ok := ParseRow("bkt\x1fa%\x1fv1"); ok {
 		t.Errorf("expected ok=false for invalid url-encoded key")
 	}
+	// versionID 解码失败同理。
+	if _, ok := ParseRow("bkt\x1fk\x1fv%"); ok {
+		t.Errorf("expected ok=false for invalid url-encoded versionID")
+	}
 }
 
-// encoding_type_url=false 时 delete_markers.txt 的 key 不解码（原样），
-// 哪怕 key 字面量含 %（合法 S3 key 字符）。
-func TestParseRow_EncodingTypeURLFalseNoDecode(t *testing.T) {
-	r, ok := ParseRow("bkt\x1fa%1Fb\x1fv1", "delete_markers.txt", false)
+// 字面量 % 不会被误解码为空格/加号之外的字段边界——'\x1f' 分隔后再解码，
+// 含合法 %XX 的原始 key 在文件侧必然是二次编码态（QueryEscape 后 %→%25），
+// 解码一次恰好恢复。
+func TestParseRow_EncodedPercentRoundTrip(t *testing.T) {
+	// 原始 key "100%done"（含字面 %）→ QueryEscape → "100%25done" → 解码恢复。
+	r, ok := ParseRow("bkt\x1f100%25done\x1fv1")
 	if !ok {
 		t.Fatal("expected ok")
 	}
-	if r.Key != "a%1Fb" {
-		t.Errorf("Key=%q want %q (no decode)", r.Key, "a%1Fb")
-	}
-	if r.KeyEncoded {
-		t.Errorf("KeyEncoded=true want false")
+	if r.Key != "100%done" {
+		t.Errorf("Key=%q want %q", r.Key, "100%done")
 	}
 }
 
@@ -299,7 +301,7 @@ func TestRunWorkers_TornLineSkippedAndLogged(t *testing.T) {
 	}
 }
 
-func TestRunWorkers_InvalidKeysInputURLDecodesKey(t *testing.T) {
+func TestRunWorkers_EncodedInputURLDecodesKey(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/")
 		parts := strings.SplitN(path, "/", 2)
@@ -323,7 +325,7 @@ func TestRunWorkers_InvalidKeysInputURLDecodesKey(t *testing.T) {
 	}))
 	defer srv.Close()
 	dir := t.TempDir()
-	inputPath := filepath.Join(dir, "invalid_keys.txt")
+	inputPath := filepath.Join(dir, "input.txt")
 	rows := []string{"testbucket\x1fa%1Fb\x1fv1"}
 	if err := os.WriteFile(inputPath, []byte(strings.Join(rows, "\n")+"\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -347,8 +349,8 @@ func TestRunWorkers_InvalidKeysInputURLDecodesKey(t *testing.T) {
 	out.FlushAndWait()
 	out.Close()
 	b, _ := os.ReadFile(filepath.Join(dir, "out", "check_results.txt"))
-	// key 来自 invalid_keys.txt（URL 编码过）；输出行重新 QueryEscape key，
-	// 保持 4 段行格式契约（解码后 key 含 \x1f，否则会撕裂成 5 段）。
+	// 输入 key 是编码态（文件格式契约）；读取解码得原始 key "a\x1fb"，
+	// 输出时 Output 层重新 QueryEscape——行内仍是 "a%1Fb"，不会撕裂行。
 	if !strings.Contains(string(b), "testbucket\x1fa%1Fb\x1fv1\x1f\x1fnot_marker") {
 		t.Errorf("missing re-encoded-key row: %q", string(b))
 	}

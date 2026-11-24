@@ -162,10 +162,10 @@ func TestIntegration_Mode2_RetryFromFailedList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(dm), bucket+"\x1fa/m.txt") {
+	if !strings.Contains(string(dm), bucket+"\x1fa%2Fm.txt") {
 		t.Errorf("missing a/m.txt marker: %q", dm)
 	}
-	if !strings.Contains(string(dm), bucket+"\x1fb/m.txt") {
+	if !strings.Contains(string(dm), bucket+"\x1fb%2Fm.txt") {
 		t.Errorf("missing b/m.txt marker: %q", dm)
 	}
 

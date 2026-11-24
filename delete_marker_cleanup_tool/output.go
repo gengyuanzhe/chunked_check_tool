@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -15,6 +16,10 @@ const outputFlushInterval = 3 * time.Second
 
 // rowSep 是结果行分隔符——ASCII Unit Separator (\x1f)。
 const rowSep = "\x1f"
+
+// 文件格式契约（边界 B）：server 字段（key/versionID，即行内 row[1]/row[2]）
+// 一律 url.QueryEscape 编码落盘，读取侧（ParseRow）一律先 url.QueryUnescape。
+// bkt/lastModified/state 是工具生成值（字符集安全），原样。
 
 // Output 写结果/失败文件。按 mode 切换打开哪些文件——mode check 开 check_results
 // + head_failed（lazy）；mode delete 开 deleted + delete_failed（lazy）。
@@ -194,22 +199,23 @@ func (o *Output) writeFailedLine(kind string, row [4]string) {
 	}
 	(*f).WriteString(row[0])
 	(*f).WriteString(rowSep)
-	(*f).WriteString(row[1])
+	(*f).WriteString(url.QueryEscape(row[1]))
 	(*f).WriteString(rowSep)
-	(*f).WriteString(row[2])
+	(*f).WriteString(url.QueryEscape(row[2]))
 	(*f).WriteString(rowSep)
 	(*f).WriteString(row[3])
 	(*f).WriteString("\n")
 }
 
 // writeCheckResultRow 写 bkt<sep>key<sep>versionID<sep>lastModified<sep>state\n 到 w。
+// key/versionID 是 server 字段，QueryEscape 编码（文件格式契约）。
 func writeCheckResultRow(w *bufio.Writer, row interface{}) {
 	r := row.([5]string)
 	w.WriteString(r[0])
 	w.WriteString(rowSep)
-	w.WriteString(r[1])
+	w.WriteString(url.QueryEscape(r[1]))
 	w.WriteString(rowSep)
-	w.WriteString(r[2])
+	w.WriteString(url.QueryEscape(r[2]))
 	w.WriteString(rowSep)
 	w.WriteString(r[3])
 	w.WriteString(rowSep)
@@ -218,13 +224,14 @@ func writeCheckResultRow(w *bufio.Writer, row interface{}) {
 }
 
 // writeDeletedRow 写 bkt<sep>key<sep>versionID<sep>lastModified\n 到 w。
+// key/versionID 是 server 字段，QueryEscape 编码（文件格式契约）。
 func writeDeletedRow(w *bufio.Writer, row interface{}) {
 	r := row.([4]string)
 	w.WriteString(r[0])
 	w.WriteString(rowSep)
-	w.WriteString(r[1])
+	w.WriteString(url.QueryEscape(r[1]))
 	w.WriteString(rowSep)
-	w.WriteString(r[2])
+	w.WriteString(url.QueryEscape(r[2]))
 	w.WriteString(rowSep)
 	w.WriteString(r[3])
 	w.WriteByte('\n')

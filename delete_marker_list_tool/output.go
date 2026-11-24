@@ -16,23 +16,27 @@ import (
 const outputFlushInterval = 3 * time.Second
 
 // rowSep 是结果行分隔符——ASCII Unit Separator (\x1f)。选 \x1f 而非 |：
-// S3 key 规范上允许 |，实务里也偶有出现；\x1f 是控制字符，key 中基本不出现，
-// 撞概率比 | 低一两个数量级。详见设计文档 §13。
+// S3 key 规范上允许 |，实务里也偶有出现；\x1f 是控制字符，key 中基本不出现。
+// 另有第二重保证：server 字段（key/versionID/markers）落盘前统一 url.QueryEscape
+// （\x1f→%1F、\n→%0A、\r→%0D），撕裂类字符根本进不了文件。详见设计文档 §13。
 const rowSep = "\x1f"
 
-// Output 写结果/失败文件。三个 writer goroutine + 一个 lazy list_failed.txt。
-// delete_markers.txt 和 invalid_keys.txt 在 NewOutput 时就 open；
-// list_failed.txt 惰性 open（首次 WriteListFailed 时），保证文件存在即有失败。
+// Output 写结果/失败文件。一个结果 writer goroutine + 一个 lazy list_failed.txt。
+// delete_markers.txt 在 NewOutput 时就 open；list_failed.txt 惰性 open（首次
+// WriteListFailed 时），保证文件存在即有失败。
+//
+// 文件格式契约（边界 B）：server 字段（key/versionID、prefix/keyMarker/
+// versionIdMarker）一律 url.QueryEscape 编码落盘，与 encoding_type_url 配置
+// 无关；读取侧（retry/下游工具）一律先 url.QueryUnescape。bucket/lastModified
+// 是工具生成值（字符集安全），原样落盘。
 type Output struct {
 	dir    string
 	bucket string
 
-	deleteMarkerCh  chan [3]string // {key, versionID, lastModified}
-	invalidKeysCh   chan [3]string // {key, versionID, lastModified}, key 已 URL 编码
-	listFailedCh    chan [3]string // [prefix, keyMarker, versionIDMarker]
+	deleteMarkerCh  chan [3]string // {key, versionID, lastModified}——原始形态，writeRow 处 escape
+	listFailedCh    chan [3]string // {prefix, keyMarker, versionIDMarker}——原始形态，写时 escape
 
 	deleteMarkerFile *os.File
-	invalidKeysFile   *os.File
 	listFailedFile     *os.File
 	listFailedMu       sync.Mutex // 保护 listFailedFile 的 lazy open
 
@@ -43,8 +47,8 @@ type Output struct {
 	closeOnce sync.Once
 }
 
-// NewOutput 创建输出目录 + 打开 delete_markers.txt + invalid_keys.txt +
-// list_failed.log，启动三个 writer goroutine。
+// NewOutput 创建输出目录 + 打开 delete_markers.txt + list_failed.log，
+// 启动 writer goroutine。
 func NewOutput(cfg *Config, bucket string) (*Output, error) {
 	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
 		return nil, fmt.Errorf("mkdir output: %w", err)
@@ -53,7 +57,6 @@ func NewOutput(cfg *Config, bucket string) (*Output, error) {
 		dir:            cfg.OutputDir,
 		bucket:         bucket,
 		deleteMarkerCh: make(chan [3]string, 1024),
-		invalidKeysCh:  make(chan [3]string, 1024),
 		listFailedCh:   make(chan [3]string, 256),
 	}
 
@@ -64,25 +67,16 @@ func NewOutput(cfg *Config, bucket string) (*Output, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open delete_markers.txt: %w", err)
 	}
-	// invalid_keys.txt: 兜底文件，启动即 open（正常桶该文件为空）。
-	o.invalidKeysFile, err = os.OpenFile(filepath.Join(o.dir, "invalid_keys.txt"),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		o.deleteMarkerFile.Close()
-		return nil, fmt.Errorf("open invalid_keys.txt: %w", err)
-	}
 	// list_failed.log: slog 详情文件，启动即 open。
 	o.listLogFile, err = os.OpenFile(filepath.Join(o.dir, "list_failed.log"),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		o.deleteMarkerFile.Close()
-		o.invalidKeysFile.Close()
 		return nil, fmt.Errorf("open list_failed.log: %w", err)
 	}
 	o.listLogger = slog.New(slog.NewTextHandler(o.listLogFile, nil))
 
 	o.startWriter(o.deleteMarkerFile, o.deleteMarkerCh, false)
-	o.startWriter(o.invalidKeysFile, o.invalidKeysCh, false)
 	o.startWriter(nil, nil, true) // list_failed writer 特殊处理
 	return o, nil
 }
@@ -131,7 +125,8 @@ func (o *Output) startWriter(file *os.File, ch chan [3]string, isListFailed bool
 }
 
 // writeListFailedLine 惰性 open list_failed.txt 并写入一行。
-// 行格式：prefix\x1fkeyMarker\x1fversionIdMarker（空 marker = 从第一页扫）。
+// 行格式：prefix\x1fkeyMarker\x1fversionIdMarker（三字段均 QueryEscape 编码，
+// 读取侧解码恢复原始形态）。空 marker = 从第一页扫。
 // 空前缀 + 空 marker = 空行 + \x1f + \x1f（root prefix 从第一页扫失败）。
 // 与"无失败"（文件不存在）明确可区分——文件存在即有失败。
 func (o *Output) writeListFailedLine(parts [3]string) {
@@ -147,42 +142,33 @@ func (o *Output) writeListFailedLine(parts [3]string) {
 		}
 		o.listFailedFile = f
 	}
-	o.listFailedFile.WriteString(parts[0])
+	o.listFailedFile.WriteString(url.QueryEscape(parts[0]))
 	o.listFailedFile.WriteString("\x1f")
-	o.listFailedFile.WriteString(parts[1])
+	o.listFailedFile.WriteString(url.QueryEscape(parts[1]))
 	o.listFailedFile.WriteString("\x1f")
-	o.listFailedFile.WriteString(parts[2])
+	o.listFailedFile.WriteString(url.QueryEscape(parts[2]))
 	o.listFailedFile.WriteString("\n")
 }
 
 // writeRow 写一行 bkt<sep>key<sep>versionID<sep>lastModified\n 到 w。
+// key/versionID 是 server 字段，QueryEscape 编码（边界 B，无条件）；
+// bkt/lastModified 工具生成，原样。
 func writeRow(w *bufio.Writer, bkt, key, versionID, lastModified string) {
 	w.WriteString(bkt)
 	w.WriteString(rowSep)
-	w.WriteString(key)
+	w.WriteString(url.QueryEscape(key))
 	w.WriteString(rowSep)
-	w.WriteString(versionID)
+	w.WriteString(url.QueryEscape(versionID))
 	w.WriteString(rowSep)
 	w.WriteString(lastModified)
 	w.WriteByte('\n')
 }
 
-// WriteDeleteMarker 把一条 marker 送进结果文件 writer。key 含 \x1f/\n/\r 时
-// 自动路由到 invalid_keys.txt，key 经 URL 编码。lastModified 是 RFC3339
+// WriteDeleteMarker 把一条 marker 送进结果文件 writer。key/versionID 为原始
+// 形态（s3client 出口已解码），writeRow 处 escape。lastModified 是 RFC3339
 // 形式的 UTC 时间字符串（从 AWS SDK time.Time 格式化）。
-// 返回 true 表示走了 invalid_keys 兜底路径（调用方据此 incr invalid_keys 统计）。
-func (o *Output) WriteDeleteMarker(key, versionID, lastModified string) bool {
-	if containsRowSep(key) {
-		o.invalidKeysCh <- [3]string{url.QueryEscape(key), versionID, lastModified}
-		return true
-	}
+func (o *Output) WriteDeleteMarker(key, versionID, lastModified string) {
 	o.deleteMarkerCh <- [3]string{key, versionID, lastModified}
-	return false
-}
-
-// WriteInvalidKey 显式路由到 invalid_keys.txt（key 已由调用方 URL 编码）。
-func (o *Output) WriteInvalidKey(key, versionID, lastModified string) {
-	o.invalidKeysCh <- [3]string{key, versionID, lastModified}
 }
 
 // WriteListFailed 写一行到 list_failed.txt（惰性 open）。
@@ -238,7 +224,6 @@ func (o *Output) WriteListFailedLog(prefix, keyMarker, versionIDMarker string, s
 // flush 底层 bufio。必须在 Close() 前调用（writer goroutine 还活着才能 drain）。
 func (o *Output) FlushAndWait() {
 	close(o.deleteMarkerCh)
-	close(o.invalidKeysCh)
 	close(o.listFailedCh)
 	o.wg.Wait()
 }
@@ -248,11 +233,6 @@ func (o *Output) Close() error {
 	var firstErr error
 	if o.deleteMarkerFile != nil {
 		if err := o.deleteMarkerFile.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	if o.invalidKeysFile != nil {
-		if err := o.invalidKeysFile.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -269,18 +249,4 @@ func (o *Output) Close() error {
 		}
 	}
 	return firstErr
-}
-
-// containsRowSep 检查 key 是否含行分隔符/换行符——\x1f（字段分隔符）或 \n/\r
-// （行分隔符）。含任一字符都会撕裂 delete_markers.txt 的行结构：
-// \x1f 撕裂字段、\n/\r 撕裂整行（下游解析一行当一条记录，多行变多条缺字段记录）。
-// 撕裂类 key 一律路由到 invalid_keys.txt（url.QueryEscape 把 \x1f→%1F、\n→%0A、\r→%0D）。
-func containsRowSep(s string) bool {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == 0x1f || c == '\n' || c == '\r' {
-			return true
-		}
-	}
-	return false
 }

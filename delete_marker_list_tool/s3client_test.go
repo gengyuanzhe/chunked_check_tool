@@ -490,7 +490,9 @@ func TestListVersionsPage_EncodingTypeURLPassedToRequest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// case 1: EncodingTypeURL=true → 请求带 encoding-type=url，key 不解码（保留 a%1Fb）
+	// case 1: EncodingTypeURL=true → 请求带 encoding-type=url，key 在出口被解码
+	// （decodeWire，边界 A）——fake server 返回的 wire 态 key 是 "a%1Fb"，出口解码后
+	// 调用方拿到原始形态 "a\x1fb"（SDK 本身不自动解码，解码是本工具出口做的）。
 	cfgOn := &Config{Endpoints: []string{srv.Listener.Addr().String()}, Scheme: "http", AK: "a", SK: "s", MaxKeys: 500, EncodingTypeURL: true}
 	cOn, err := NewS3Client(cfgOn, srv.Listener.Addr().String())
 	if err != nil {
@@ -507,8 +509,8 @@ func TestListVersionsPage_EncodingTypeURLPassedToRequest(t *testing.T) {
 	if len(page.Versions) != 1 {
 		t.Fatalf("got %d entries, want 1", len(page.Versions))
 	}
-	if page.Versions[0].Key != "a%1Fb" {
-		t.Errorf("SDK should NOT auto-decode, got key=%q want %q", page.Versions[0].Key, "a%1Fb")
+	if page.Versions[0].Key != "a\x1fb" {
+		t.Errorf("exit should decode wire key, got key=%q want %q", page.Versions[0].Key, "a\x1fb")
 	}
 
 	// case 2: EncodingTypeURL=false → 请求不带 encoding-type

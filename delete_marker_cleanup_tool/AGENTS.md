@@ -30,8 +30,8 @@
 | `config.go` | `Config` 结构体 + `LoadConfig`（YAML，带默认值 + 校验 + 时间戳后缀重写）。无 `list_type` / `list_concurrency`，新增 `op_concurrency` |
 | `s3client.go` | `S3Client`（s3.Client 包装）、`StatObject(ctx, bkt, key, vid) HeadResult`、`DeleteObject(ctx, bkt, key, vid) (statusCode, requestID, err)`、`BucketExists`。transport 调优对齐 lister |
 | `classifier.go` | `classifyHead(HeadResult) (state, ok)`——HEAD 响应到三态的映射；`HeadResult.IsDeleteMarker` 已由 `headResultFromErr` 从 405 + `x-amz-delete-marker: true` 推断；StatusCode==404 兜底判 absent（AWS SDK 对 HEAD 404 返回 code="NotFound"） |
-| `worker.go` | `Row{Bkt, Key, VersionID}`、`ParseRow(line, basename) (Row, bool)`（basename=`invalid_keys.txt` 时 URL 解码 key）、`RunWorkers` worker pool、`handleCheck` / `handleDelete` |
-| `output.go` | `Output`：mode check 四个 writer goroutine（check_results / head_failed / head_failed.log / 日志）+ mode delete 三个（deleted / delete_failed / delete_failed.log）；惰性 failed 文件；3 秒定时 flush |
+| `worker.go` | `Row{Bkt, Key, VersionID, LastModified}`、`ParseRow(line) (Row, bool)`（无条件 `url.QueryUnescape` 解码 key+versionID——文件恒编码态）、`RunWorkers` worker pool、`handleCheck` / `handleDelete` |
+| `output.go` | `Output`：mode check 四个 writer goroutine（check_results / head_failed / head_failed.log / 日志）+ mode delete 三个（deleted / delete_failed / delete_failed.log）；惰性 failed 文件；3 秒定时 flush；写侧 `url.QueryEscape`（key/versionID） |
 | `stats.go` | atomic.Int64 计数器 + `PrintSummary(w, mode)` 按模式切格式 |
 | `progress.go` | `ProgressPrinter`：`MaybePrintCheck` / `MaybePrintDelete` 按模式打不同字段 |
 
@@ -55,7 +55,7 @@ flowchart TD
 ```mermaid
 flowchart LR
     File[input.txt] --> Scan[bufio.Scanner]
-    Scan --> Parse[ParseRow<br/>3/4 段兼容<br/>invalid_keys.txt 走 URL 解码]
+    Scan --> Parse[ParseRow<br/>3/4 段兼容<br/>key/versionID 无条件 URL 解码]
     Parse -->|torn line| FailLog[head/delete_failed.log<br/>torn note]
     Parse --> RowCh["rowCh<br/>buf 1024"]
     RowCh -->|抢任务| W1["worker 1<br/>endpoint 0"]
@@ -137,7 +137,7 @@ flowchart TD
 
 12. **`op_concurrency` 默认 8（未设时）**：与 lister 的 `list_concurrency` 行为对齐——0 视为"未设"→8，负数报错。**不可**把 0 也报错——破坏"未设走默认"的隐式契约。
 
-13. **`\x1f`-in-key 输入兜底**：lister 把 key 含 `\x1f` 的 marker 路由到 `invalid_keys.txt`（key 经 `url.QueryEscape` 编码）。本工具按 `-input` 的 basename 判别：basename=`invalid_keys.txt` 时对 key 段做 `url.QueryUnescape` 用于 HEAD/DELETE 调用。**输出行重新 `url.QueryEscape` 编码 key**——解码后的 key 含 `\x1f`，直接写入会撕裂 3/4 段行格式。`Row.KeyEncoded` 字段记录来源，`Row.outputKey()` 决定输出形态。**不可**对所有输入都解码——只有 `invalid_keys.txt` 命名的文件才编码过。
+13. **记录文件统一 URL 编码（双边界不变量）**：输入/输出的 `\x1f` 行文件（delete_markers.txt、head_failed.txt、delete_failed.txt、check_results.txt、deleted.txt）的 server 字段（key、versionID）一律 `url.QueryEscape` 编码态，**与 list 工具的 `encoding_type_url` 配置无关**。读侧 `ParseRow` 无条件 `url.QueryUnescape`（解码恰一次，发请求用原始 key）；写侧 `output.go` 的三个 write 函数无条件 `QueryEscape`（编码恰一次）。**不可**按文件 basename/配置做门控解码——工具链文件格式是全局常量，门控会引入双重编解码错位。lister 侧对应不变量见 delete_marker_list_tool/AGENTS.md 第 10 条。
 
 14. **预检硬退出条件**：`readFirstRowBucket` 失败（空文件 / 首行格式错）或 `BucketExists` 传输错误 → 硬退出；`exists=false` → warning + 继续（多桶输入保护——只校验首行 bkt）。
 
@@ -152,7 +152,7 @@ flowchart TD
 
 ## 7. 遗留任务（已知未决/未来工作）
 
-1. **key 含 `\n` 仍会撕裂行**：lister 同样不防护，S3 key 含换行极罕见。未来如需可加 `\n` 检测 + URL 编码路由（同 `\x1f` 路由模式）。
+1. ~~**key 含 `\n` 仍会撕裂行**~~：已随"记录文件统一 URL 编码"不变量解决（`\n` 编码为 `%0A` 落盘）。
 
 2. **同秒内连续启动两次**（`output_dir_timestamp: true`）会撞目录并发 append 撕裂尾部行：靠下游解析时丢弃格式非法行兜底。
 

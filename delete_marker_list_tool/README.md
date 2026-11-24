@@ -98,7 +98,7 @@ response_header_timeout: 0           # 等服务端响应头超时秒数（0=不
 latency_window_sec: 60              # 请求时延统计窗口秒数（progress 的 latency_avg/max 每 N 秒重置）
 debug_log: false                   # true=打每次 ListObjectVersions 请求的 marker 诊断行到 run.log
 max_keys: 500                       # 每页 MaxKeys，必填 1..1000（用于检测服务端 short-response quirk）
-encoding_type_url: false            # true=请求带 EncodingType=url，wire 上 key URL 编码（防 \x1f 等撕裂 XML）；delete_markers.txt 落盘编码 key，cleanup 工具按同名配置解码
+encoding_type_url: false            # true=请求带 EncodingType=url（wire 防护，仅影响协议层）；记录文件与它无关，恒为 URL 编码态
 repair_next_vid_marker_on_short_response: false # true=短响应触发时按 a/b/c 规则修复 NextVersionIdMarker（兼容服务端翻页 quirk）
 ```
 
@@ -117,20 +117,23 @@ repair_next_vid_marker_on_short_response: false # true=短响应触发时按 a/b
 | `latency_window_sec` | int | `60` | 否 | 请求时延统计窗口秒数；progress 的 latency_avg_ms/max_ms 每该秒数重置 |
 | `debug_log` | bool | `false` | 否 | true=打每次请求的 marker 诊断行（req/resp/err）到 run.log，排翻页异常用；false 零成本静默 |
 | `max_keys` | int | — | 是 | 每页 MaxKeys，必填 1..1000（S3 上限 1000，超过服务端截断）；客户端用此值检测"截断了却没返回满"的服务端翻页 quirk |
-| `encoding_type_url` | bool | `false` | 否 | true=请求带 `EncodingType=url`，wire 上 key URL 编码（防 `\x1f` 等 XML 1.0 非法控制字符撕裂反序列化）；`delete_markers.txt` 落盘的是 URL 编码 key，cleanup 工具按同名配置决定是否 `url.QueryUnescape` 解码。false=原行为，含 `\x1f` 的 key 会让整页 XML 解析失败进 `list_failed.txt` |
+| `encoding_type_url` | bool | `false` | true=请求带 `EncodingType=url`，wire 上 server 字段 URL 编码（防 `\x1f` 等 XML 1.0 非法控制字符撕裂反序列化），s3client 出口解码回原始形态。**只影响协议层**——记录文件的编码与它无关（写侧无条件 `url.QueryEscape`，读取侧无条件 `url.QueryUnescape`）。false=wire 不编码，含 `\x1f` 的 key 会让整页 XML 解析失败进 `list_failed.txt` |
 | `repair_next_vid_marker_on_short_response` | bool | `false` | 否 | true=短响应触发时按 a/b/c 规则修复 `NextVersionIdMarker`。触发条件：`IsTruncated=true` 且本页条目数（Version+DeleteMarker+CommonPrefix）< `max_keys`——矛盾状态，常预示服务端翻页 quirk。三分支按 `NextVersionIdMarker` 内容分派：a. 非整数（`""` / `"null"` / 真实 version-id）不动；b. 整数 `0` 改写为 `"null"`（覆盖 CommonPrefix 作 NextKeyMarker 的情况——目录无版本概念，version-id 恒为 `0`/`null`）；c. 非 0 整数 → 用本页尾条目（解码态 key 最大者）的 VersionID 覆盖，前提是本页尾 key 与 `NextKeyMarker` 解码后一致，不一致不动。改写命中时 `list_failed.log` 打 Warn，`list_failed.txt` 记录的是改写后的值 |
 
 **可直接复用 chunked_check_tool 的 config.yaml**——本工具只读自己认识的字段，未识别字段（`is_check`、`multipart_*`、`backup_*`、`check_concurrency` 等）被 YAML 解析器忽略，不报错。
 
 ## 输出文件
 
+**文件格式契约**：所有 `\x1f` 行文件里，server 字段（key / version_id / prefix / keyMarker / versionIdMarker）一律 `url.QueryEscape` 编码态落盘，**与 `encoding_type_url` 配置无关**（编码恰一次，发生在 Output 写入层）；读取侧（本工具 `-retry`、下游 cleanup 工具）一律先 `url.QueryUnescape` 解码（恰一次）再使用。工具生成值（bkt / lastModified）字符集安全，原样落盘。
+
 | 文件 | 内容 | 行格式 |
 |---|---|---|
-| `delete_markers.txt` | **结果文件**，全桶 delete marker | `bkt\x1fkey\x1fversion_id`（`\x1f` 分隔，三段） |
-| `invalid_keys.txt` | key 含 `\x1f` / `\n` / `\r` 的 marker（撕裂行结构的字符；正常桶该文件为空） | `bkt\x1f<urlencoded-key>\x1fversion_id`（key 经 `url.QueryEscape` 编码） |
+| `delete_markers.txt` | **结果文件**，全桶 delete marker | `bkt\x1f<key>\x1f<version_id>\x1f<lastModified>`（`\x1f` 分隔，key/version_id 为 URL 编码态） |
 | `run.log` | 进程日志：stdout/stderr tee、配置快照（sk 掩码）、进度行、summary | 纯文本 |
-| `list_failed.txt` | 列举失败的前缀+页级 marker（惰性创建：文件不存在=无失败） | `prefix\x1fkeyMarker\x1fversionIdMarker`；空 marker=从第一页扫 |
+| `list_failed.txt` | 列举失败的前缀+页级 marker（惰性创建：文件不存在=无失败） | `<prefix>\x1f<keyMarker>\x1f<versionIdMarker>`（三字段均为 URL 编码态）；空 marker=从第一页扫 |
 | `list_failed.log` | 失败详情（slog text） | `bucket`/`prefix`/`http_code`/`s3_code`/`req_id`/`err` |
+
+**兼容性**：改动前的旧文件在 `encoding_type_url: false` 时代是原始态——不含 `+`/`%XX` 的值解码恒等无损；含字面 `+` 或合法 `%XX` 序列的旧值会被新读取器误解码。旧批次文件不要混入，整批重跑。
 
 ## 进度行格式
 
@@ -138,21 +141,21 @@ repair_next_vid_marker_on_short_response: false # true=短响应触发时按 a/b
 
 ```
 # mode 2（BFS）
-[progress] scanned=12345 markers=678 invalid_keys=0 list_failed=0 (q=42) latency_avg_ms=42.5 latency_max_ms=210.0 heap=128.5MiB
+[progress] scanned=12345 markers=678 list_failed=0 (q=42) latency_avg_ms=42.5 latency_max_ms=210.0 heap=128.5MiB
 
 # mode 1（单流）
-[progress] scanned=12345 markers=678 invalid_keys=0 list_failed=0 latency_avg_ms=42.5 latency_max_ms=210.0 heap=128.5MiB
+[progress] scanned=12345 markers=678 list_failed=0 latency_avg_ms=42.5 latency_max_ms=210.0 heap=128.5MiB
 ```
 
 字段说明：
 
-- `scanned` / `markers` / `invalid_keys` / `list_failed`：scanned_versions / delete_markers / invalid_keys / list_failed 的累计计数
+- `scanned` / `markers` / `list_failed`：scanned_versions / delete_markers / list_failed 的累计计数
 - `q`（mode 2）：BFS 队列长度——待扫的 prefix 数。宽桶百万级 common prefix 下会涨到几十万，是剩余工作量，不是并发请求数
 - `latency_avg_ms` / `latency_max_ms`：`ListObjectVersions` 在最近 `latency_window_sec` 秒窗口内的平均/最大时延（不是全局平均）
 - `heap`：`runtime.MemStats.HeapInuse`（当前堆已分配含碎片，单位 MiB）。BFS 队列堆积是驻留内存，GC 回收不了——`heap` 涨到接近 OS / `GOMEMLIMIT` 上限时考虑 Ctrl-C 后 `-retry list_failed.txt` 续传
 
 
-**行分隔符 `\x1f`**（ASCII Unit Separator，控制字符）：S3 key 规范上允许 `|`，实务里偶有出现；`\x1f` 是控制字符，key 中基本不出现，撞概率比 `|` 低一两个数量级。`\x1f` 在终端不可见，查看用：
+**行分隔符 `\x1f`**（ASCII Unit Separator，控制字符）：S3 key 规范上允许 `|`，实务里偶有出现；`\x1f` 是控制字符，key 中基本不出现，撞概率比 `|` 低一两个数量级。另有第二重保证：server 字段统一 URL 编码落盘，`\x1f`/`\n`/`\r` 编码为 `%1F`/`%0A`/`%0D`，撕裂类字符根本进不了文件。`\x1f` 在终端不可见，查看用：
 
 ```bash
 awk -F'\x1f' '{print $1, $2, $3}' delete_markers.txt
@@ -160,7 +163,7 @@ awk -F'\x1f' '{print $1, $2, $3}' delete_markers.txt
 less delete_markers.txt   # 看着字段黏在一起，但数据完整
 ```
 
-**version_id 可能是字面量 `"null"`**（旧版本对象，S3 开版本控制之前写入的）；下游删除工具必须**原样透传**，不要当空值处理。
+**version_id 可能是字面量 `"null"`**（旧版本对象，S3 开版本控制之前写入的）；下游删除工具必须**原样透传**，不要当空值处理（`"null"` URL 编码恒等，不需要特殊处理）。
 
 ## 两种 mode 详解
 
@@ -199,7 +202,7 @@ less delete_markers.txt   # 看着字段黏在一起，但数据完整
 
 ## 已知限制
 
-- **key 含 `\n` / `\r` / `\x1f`** 会被路由到 `invalid_keys.txt`（url 编码后落盘），不进 `delete_markers.txt`——撕裂行结构的字符走兜底文件，主结果文件保持一行一条
+- **key 含 `\n` / `\r` / `\x1f`** 直接统一编码进 `delete_markers.txt`（URL 编码后落盘，行结构不会被撕裂）
 - **kill -9** 丢尾部整行无提示（run.log 里 summary 不会打出来）；靠 `list_failed.txt` 为空 + 行数稳定来人工确认完整性
 - **mode 1 无并发**，大桶会慢——这正是该模式的语义
 - **同秒内连续启动两次**（`output_dir_timestamp: true`）会撞目录并发 append 撕裂尾部行；靠下游解析时丢弃格式非法行兜底

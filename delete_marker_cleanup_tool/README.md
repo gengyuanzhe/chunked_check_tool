@@ -37,10 +37,6 @@ GOOS=linux GOARCH=arm64 go build -o delete_marker_cleanup_arm64 .
 
 # 模式 2：按 version-id 删除
 ./delete_marker_cleanup_tool -c config.yaml -mode delete -input delete_markers.txt
-
-# input 也支持 invalid_keys.txt（key 含 \x1f 的兜底文件，
-# delete_marker_list_tool 产出，本工具按 basename 自动 URL 解码 key）
-./delete_marker_cleanup_tool -c config.yaml -mode check -input invalid_keys.txt
 ```
 
 ## 命令参数
@@ -49,7 +45,7 @@ GOOS=linux GOARCH=arm64 go build -o delete_marker_cleanup_arm64 .
 |---|---|---|
 | `-c` | 是 | 配置文件路径（YAML） |
 | `-mode` | 是 | `check` 或 `delete`（必填，无默认值——正确性关键） |
-| `-input` | 是 | 输入文件路径，行格式 `bkt\x1fkey\x1fversion_id`（三段，`\x1f` 分隔） |
+| `-input` | 是 | 输入文件路径，行格式 `bkt\x1f<key>\x1f<version_id>`（key/version_id 为 URL 编码态，读取时解码） |
 
 并发度**不在 flag 里**——从配置文件 `op_concurrency` 读，与其他参数同样强约束显式配置。
 
@@ -71,7 +67,6 @@ progress_interval: 5000             # 进度行间隔（处理条目数）
 dial_timeout: 10                    # TCP 建连超时秒数
 response_header_timeout: 0          # 等服务端响应头超时秒数（0=不限）
 latency_window_sec: 60              # 请求时延统计窗口秒数（progress 的 latency_avg/max 每 N 秒重置）
-encoding_type_url: false            # true=输入 key URL 编码，读行时 url.QueryUnescape 解码；与 list 工具同名配置配套
 ```
 
 | 字段 | 类型 | 默认 | 必填 | 说明 |
@@ -86,17 +81,17 @@ encoding_type_url: false            # true=输入 key URL 编码，读行时 url
 | `dial_timeout` | int64 | `10` | 否 | TCP 建连超时秒数 |
 | `response_header_timeout` | int64 | `0` | 否 | 等响应头超时秒数；0=不限 |
 | `latency_window_sec` | int | `60` | 否 | 请求时延统计窗口秒数；progress 的 latency_avg_ms/max_ms 每该秒数重置 |
-| `encoding_type_url` | bool | `false` | 否 | true=delete_markers.txt 的 key 是 URL 编码（与 list 工具的 `encoding_type_url=true` 配套），cleanup 读每行时 `url.QueryUnescape` 解码；解码失败走 torn line 路径（写 `delete_failed.txt` + slog，不进 `invalid_keys.txt`）。`invalid_keys.txt` 永远 URL 编码，无视此配置独立解码 |
 
-**可直接复用 `delete_marker_list_tool` / `chunked_check_tool` 的 config.yaml**——本工具只读自己认识的字段，未识别字段（`list_type`、`list_concurrency`、`is_check`、`multipart_*`、`backup_*` 等）被 YAML 解析器忽略，不报错。
+**可直接复用 `delete_marker_list_tool` / `chunked_check_tool` 的 config.yaml**——本工具只读自己认识的字段，未识别字段（`list_type`、`list_concurrency`、`is_check`、`multipart_*`、`backup_*`、`encoding_type_url` 等）被 YAML 解析器忽略，不报错。
 
 ## 输入文件
 
-行格式：`bkt\x1fkey\x1fversion_id`（三段，`\x1f` ASCII Unit Separator 分隔）。
+**文件格式契约**：输入文件（delete_markers.txt / head_failed.txt / delete_failed.txt 等 `\x1f` 行文件）的 key/version_id 字段恒为 URL 编码态（`url.QueryEscape`，写入侧约定），本工具读每行时无条件 `url.QueryUnescape` 解码——**与 list 工具的 `encoding_type_url` 配置无关**（该配置只影响 list 工具的 wire 行为）。解码失败（非法 `%XX`，文件损坏）走 torn line 路径（写 failed.txt + slog 详情）。bkt/lastModified 为工具生成值，原样。
 
 - 由 `delete_marker_list_tool` 产出的 `delete_markers.txt` 直接消费
-- 若输入 basename 是 `invalid_keys.txt`（key 含 `\x1f` 的兜底文件），本工具按 `url.QueryUnescape` 解码 key 段用于 HEAD/DELETE 调用；**输出行重新 `url.QueryEscape` 编码 key**，保持 3/4 段行格式契约（解码后 key 含 `\x1f` 会撕裂行字段）
-- `version_id` 字面量 `"null"` 原样透传（S3 开版本控制前的旧对象，合法值）
+- 本工具自己产出的 `head_failed.txt` / `delete_failed.txt` 也可直接喂回 `-input` 重跑（行格式同构，key 已编码）
+- `version_id` 字面量 `"null"` 解码恒等、原样透传（S3 开版本控制前的旧对象，合法值）
+- **兼容性**：改动前 `encoding_type_url: false` 时代的旧文件是原始态——不含 `+`/`%XX` 的值解码恒等无损；含字面 `+` 或合法 `%XX` 序列的旧值会被误解码。旧批次文件不要混入，整批重跑。
 
 ## 输出文件
 
@@ -104,8 +99,8 @@ encoding_type_url: false            # true=输入 key URL 编码，读行时 url
 
 | 文件 | 内容 | 行格式 |
 |---|---|---|
-| `check_results.txt` | **结果文件**，每行一个版本的三态分类 | `bkt\x1fkey\x1fversion_id\x1f<state>`（四段，state ∈ `marker`/`not_marker`/`absent`） |
-| `head_failed.txt` | HEAD 失败的行（惰性创建：文件不存在=无失败） | `bkt\x1fkey\x1fversion_id`（原样回写） |
+| `check_results.txt` | **结果文件**，每行一个版本的三态分类 | `bkt\x1f<key>\x1f<version_id>\x1flastModified\x1f<state>`（五段，state ∈ `marker`/`not_marker`/`absent`；key/version_id 为 URL 编码态） |
+| `head_failed.txt` | HEAD 失败的行（惰性创建：文件不存在=无失败） | `bkt\x1f<key>\x1f<version_id>\x1flastModified`（key/version_id 为 URL 编码态） |
 | `head_failed.log` | HEAD 失败详情（含 HTTP code / S3 code / req_id / err） | 纯文本多行 |
 | `run.log` | 进程日志：stdout/stderr tee、配置快照（sk 掩码）、进度行、summary | 纯文本 |
 
@@ -113,12 +108,14 @@ encoding_type_url: false            # true=输入 key URL 编码，读行时 url
 
 | 文件 | 内容 | 行格式 |
 |---|---|---|
-| `deleted.txt` | **结果文件**，成功删除的行 | `bkt\x1fkey\x1fversion_id`（原样回写） |
-| `delete_failed.txt` | DELETE 失败的行（惰性创建：文件不存在=无失败） | `bkt\x1fkey\x1fversion_id`（原样回写） |
+| `deleted.txt` | **结果文件**，成功删除的行 | `bkt\x1f<key>\x1f<version_id>\x1flastModified`（key/version_id 为 URL 编码态） |
+| `delete_failed.txt` | DELETE 失败的行（惰性创建：文件不存在=无失败） | `bkt\x1f<key>\x1f<version_id>\x1flastModified`（key/version_id 为 URL 编码态） |
 | `delete_failed.log` | DELETE 失败详情 | 纯文本多行 |
 | `run.log` | 同 mode check | 纯文本 |
 
-**行分隔符 `\x1f`**（ASCII Unit Separator）：与 `delete_marker_list_tool` 对齐，比 `|` 撞 key 中字符的概率低一两个数量级。终端不可见，查看用：
+**输出文件的 key/version_id 统一 `url.QueryEscape` 编码态**（与输入文件的格式契约一致）——失败文件（head_failed.txt / delete_failed.txt）可直接作为 `-input` 重跑，读侧解码恢复原始 key。
+
+**行分隔符 `\x1f`**（ASCII Unit Separator）：与 `delete_marker_list_tool` 对齐，比 `|` 撞 key 中字符的概率低一两个数量级；key/version_id 统一 URL 编码后撕裂类字符（`\x1f`/`\n`/`\r`）根本进不了文件。终端不可见，查看用：
 
 ```bash
 awk -F'\x1f' '{print $1, $2, $3, $4}' check_results.txt
