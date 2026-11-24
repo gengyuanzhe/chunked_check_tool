@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"strings"
 	"sync"
 )
 
@@ -70,11 +69,6 @@ func runRecursiveWalk(listCtx, hardCtx context.Context, s3 S3API, prefix string,
 			}
 			checkShortResponse(out, prefix, continuationToken, len(objs)+len(prefixes), next != "", cfg.MaxKeys)
 			for _, o := range objs {
-				if strings.Contains(o.Key, "|") {
-					out.WriteInvalidKey(o.Key)
-					stats.IncrInvalidKeys()
-					continue
-				}
 				if cfg.IsCheck {
 					task := resolveOffsets(o, cfg)
 					if task.IsMultipart {

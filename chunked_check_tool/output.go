@@ -76,7 +76,6 @@ type Output struct {
 	// root-level channels (global, no ownerID)
 	listFailedCh      chan string
 	parseFailedCh     chan string
-	invalidKeysCh     chan string
 	checkFailedCh     chan string
 	mpCheckFailedCh   chan string
 	listParseFailedCh chan string
@@ -183,7 +182,6 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 		successCh:                 make(chan ownerLine, chCap),
 		listFailedCh:              make(chan string, chCap),
 		parseFailedCh:             make(chan string, chCap),
-		invalidKeysCh:             make(chan string, chCap),
 		checkFailedCh:             make(chan string, chCap),
 		mpCheckFailedCh:           make(chan string, chCap),
 		listParseFailedCh:         make(chan string, chCap),
@@ -207,9 +205,6 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 		return nil, err
 	}
 	if err := o.openListParseFailedLog(); err != nil {
-		return nil, err
-	}
-	if err := o.openAndStartRoot("invalid_keys.txt", o.invalidKeysCh); err != nil {
 		return nil, err
 	}
 	if err := o.openListFailedLog(); err != nil {
@@ -294,7 +289,6 @@ func NewBackupOutput(cfg *Config, bucket string) (*Output, error) {
 		lineFmt:        lineFmt,
 		listFailedCh:   make(chan string, chCap),
 		parseFailedCh:  make(chan string, chCap),
-		invalidKeysCh:  make(chan string, chCap),
 		backupOkCh:     make(chan string, chCap),
 		backupFailedCh: make(chan string, chCap),
 		mismatchCh:     make(chan string, chCap),
@@ -304,9 +298,6 @@ func NewBackupOutput(cfg *Config, bucket string) (*Output, error) {
 		return nil, err
 	}
 	if err := o.openAndStartRoot("parse_failed.txt", o.parseFailedCh); err != nil {
-		return nil, err
-	}
-	if err := o.openAndStartRoot("invalid_keys.txt", o.invalidKeysCh); err != nil {
 		return nil, err
 	}
 	if err := o.openListFailedLog(); err != nil {
@@ -795,13 +786,6 @@ func (o *Output) WriteListParseFailed(key string) {
 	}
 }
 
-// WriteInvalidKey records a key or prefix that violates the "no '|'"
-// contract — the byte stream cannot be safely split into fields. Routed to
-// invalid_keys.txt for manual handling. Called from the lister when a LIST
-// response returns a key containing '|', and from WriteListFailed when the
-// failed prefix contains '|'.
-func (o *Output) WriteInvalidKey(key string) { o.invalidKeysCh <- key }
-
 // WriteCheckFailed records a failed RangeGet on a regular object. Line format
 // `bkt\x1fkey` (key QueryEscape'd) — aligned with -backup-file's regular-object
 // input, so the file can be fed straight back for backup retry. ETag/Size
@@ -991,13 +975,12 @@ func (o *Output) BackupChannelSnapshot() (listFailed, backupOk, backupFailed, mi
 }
 
 func (o *Output) Close() error {
-	// list_failed / parse_failed / invalid_keys always have consumers (opened
+	// list_failed / parse_failed always have consumers (opened
 	// unconditionally in both NewOutput and NewBackupOutput). The other
 	// channels only have a consumer when their file was opened. Closing a
 	// channel with no goroutine consuming it is safe.
 	close(o.listFailedCh)
 	close(o.parseFailedCh)
-	close(o.invalidKeysCh)
 	if o.corruptedEnabled {
 		close(o.corruptedCh)
 	}

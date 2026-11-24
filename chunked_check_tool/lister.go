@@ -178,21 +178,6 @@ func (l *Lister) processPrefix(listCtx, hardCtx context.Context, prefix, initial
 			}
 		}
 		for _, o := range objs {
-			// Reject keys containing '|' — they violate the field-separator
-			// contract and would corrupt corrupted_objects/corrupted_mp output
-			// lines. Such keys are not enumerable by -resume-list; route to
-			// invalid_keys.txt for manual handling and skip the object.
-			if strings.Contains(o.Key, "|") {
-				l.out.WriteInvalidKey(o.Key)
-				l.stats.IncrInvalidKeys()
-				if l.journal != nil {
-					// Short-circuited object: it never becomes a task, so
-					// the lister reports its terminal itself and the page
-					// can still complete.
-					l.journal.Terminal(prefix, pageSeq)
-				}
-				continue
-			}
 			if l.cfg.IsCheck {
 				// Check mode: lister bumps listed counters (moved from Checker.Handle).
 				// file-input sources do not go through this path, so their summary

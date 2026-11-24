@@ -26,7 +26,6 @@ type Stats struct {
 	corruptedMpCount      atomic.Int64
 	listFailedCount       atomic.Int64
 	parseFailedCount      atomic.Int64
-	invalidKeysCount      atomic.Int64
 	checkFailedCount      atomic.Int64
 	mpCheckFailedCount    atomic.Int64
 	listParseFailedCount  atomic.Int64
@@ -63,7 +62,6 @@ type StatsSnapshot struct {
 	CorruptedMp      int64
 	ListFailed       int64
 	ParseFailed      int64
-	InvalidKeys      int64
 	CheckFailed      int64
 	MpCheckFailed    int64
 	ListParseFailed  int64
@@ -92,7 +90,6 @@ func (s *Stats) IncrCorruptedObjects() { s.corruptedObjectsCount.Add(1) }
 func (s *Stats) IncrCorruptedMp()      { s.corruptedMpCount.Add(1) }
 func (s *Stats) IncrListFailed()       { s.listFailedCount.Add(1) }
 func (s *Stats) IncrParseFailed()      { s.parseFailedCount.Add(1) }
-func (s *Stats) IncrInvalidKeys()      { s.invalidKeysCount.Add(1) }
 func (s *Stats) IncrCheckFailed()      { s.checkFailedCount.Add(1) }
 func (s *Stats) IncrMpCheckFailed()    { s.mpCheckFailedCount.Add(1) }
 func (s *Stats) IncrListParseFailed()  { s.listParseFailedCount.Add(1) }
@@ -143,7 +140,6 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		CorruptedMp:      s.corruptedMpCount.Load(),
 		ListFailed:       s.listFailedCount.Load(),
 		ParseFailed:      s.parseFailedCount.Load(),
-		InvalidKeys:      s.invalidKeysCount.Load(),
 		CheckFailed:      s.checkFailedCount.Load(),
 		MpCheckFailed:    s.mpCheckFailedCount.Load(),
 		ListParseFailed:  s.listParseFailedCount.Load(),
@@ -179,15 +175,15 @@ func (s *Stats) PrintSummary(w io.Writer, mode RunMode) {
 			snap.GetCalls, snap.GetAvgLatencyMs, snap.GetTotalSec)
 		switch mode {
 		case ModeListFile:
-			fmt.Fprintf(w, "ok_mp: %d corrupt_mp: %d mp_check_failed: %d parse_failed: %d invalid_keys: %d\n",
-				snap.OkMp, snap.CorruptedMp, snap.MpCheckFailed, snap.ParseFailed, snap.InvalidKeys)
+			fmt.Fprintf(w, "ok_mp: %d corrupt_mp: %d mp_check_failed: %d parse_failed: %d\n",
+				snap.OkMp, snap.CorruptedMp, snap.MpCheckFailed, snap.ParseFailed)
 		case ModeCheckFile:
-			fmt.Fprintf(w, "ok_obj: %d corrupt_obj: %d ok_mp: %d corrupt_mp: %d check_failed: %d mp_check_failed: %d parse_failed: %d invalid_keys: %d\n",
+			fmt.Fprintf(w, "ok_obj: %d corrupt_obj: %d ok_mp: %d corrupt_mp: %d check_failed: %d mp_check_failed: %d parse_failed: %d\n",
 				snap.OkObjects, snap.CorruptedObjects, snap.OkMp, snap.CorruptedMp,
-				snap.CheckFailed, snap.MpCheckFailed, snap.ParseFailed, snap.InvalidKeys)
+				snap.CheckFailed, snap.MpCheckFailed, snap.ParseFailed)
 		default: // ModeBackup
-			fmt.Fprintf(w, "backup_ok: %d backup_failed: %d backup_mismatch: %d parse_failed: %d invalid_keys: %d\n",
-				snap.BackupOk, snap.BackupFailed, snap.BackupMismatch, snap.ParseFailed, snap.InvalidKeys)
+			fmt.Fprintf(w, "backup_ok: %d backup_failed: %d backup_mismatch: %d parse_failed: %d\n",
+				snap.BackupOk, snap.BackupFailed, snap.BackupMismatch, snap.ParseFailed)
 		}
 	case ModeListCheck:
 		fmt.Fprintf(w, "list_all: %d (list_obj: %d list_mp: %d) total_sec: %.2f\n",
@@ -196,14 +192,14 @@ func (s *Stats) PrintSummary(w io.Writer, mode RunMode) {
 			snap.ListCalls, snap.ListAvgLatencyMs, snap.ListTotalSec)
 		fmt.Fprintf(w, "get_calls: %d avg_latency_ms: %.2f get_total_sec: %.2f\n",
 			snap.GetCalls, snap.GetAvgLatencyMs, snap.GetTotalSec)
-		fmt.Fprintf(w, "ok_obj: %d corrupt_obj: %d ok_mp: %d corrupt_mp: %d list_failed: %d list_parse_failed: %d check_failed: %d mp_check_failed: %d invalid_keys: %d\n",
+		fmt.Fprintf(w, "ok_obj: %d corrupt_obj: %d ok_mp: %d corrupt_mp: %d list_failed: %d list_parse_failed: %d check_failed: %d mp_check_failed: %d\n",
 			snap.OkObjects, snap.CorruptedObjects, snap.OkMp, snap.CorruptedMp,
-			snap.ListFailed, snap.ListParseFailed, snap.CheckFailed, snap.MpCheckFailed, snap.InvalidKeys)
+			snap.ListFailed, snap.ListParseFailed, snap.CheckFailed, snap.MpCheckFailed)
 	default: // ModeListOnly
 		fmt.Fprintf(w, "list_all: %d (list_obj: %d list_mp: %d) total_sec: %.2f\n",
 			snap.ListedAll, snap.ListedObjects, snap.ListedMp, snap.TotalSec)
 		fmt.Fprintf(w, "list_calls: %d avg_latency_ms: %.2f list_total_sec: %.2f\n",
 			snap.ListCalls, snap.ListAvgLatencyMs, snap.ListTotalSec)
-		fmt.Fprintf(w, "list_failed: %d invalid_keys: %d\n", snap.ListFailed, snap.InvalidKeys)
+		fmt.Fprintf(w, "list_failed: %d\n", snap.ListFailed)
 	}
 }

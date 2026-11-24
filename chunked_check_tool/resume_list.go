@@ -74,9 +74,9 @@ func splitEscaped2(line string) (string, string, error) {
 }
 
 // readResumeList reads a -resume-list file line-by-line, parses each line as
-// a (prefix, token) pair, and returns the entries. Malformed lines (empty, or
-// prefix containing |) are written to parse_failed.txt + invalid_keys.txt
-// and bump the corresponding stats counter; processing continues.
+// a (prefix, token) pair, and returns the entries. Malformed lines
+// (whitespace-only, or an invalid %XX escape) are written to parse_failed.txt
+// and bump the parse-failed counter; processing continues.
 func readResumeList(path string, out *Output, stats *Stats) ([]resumeEntry, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -91,13 +91,9 @@ func readResumeList(path string, out *Output, stats *Stats) ([]resumeEntry, erro
 		line := scanner.Text()
 		e, perr := parseResumeListLine(line)
 		if perr != nil {
-			// Only "empty line" errors reach here in normal operation —
-			// list_failed.txt is written by WriteListFailed, which routes
-			// prefix-with-| lines to invalid_keys.txt at write time. If the
-			// file has been manually edited to contain a prefix with |,
-			// parseResumeListLine silently mis-splits (the | becomes the
-			// separator); that's a contract violation outside the tool's
-			// responsibility.
+			// Only mangled lines reach here in normal operation —
+			// list_failed.txt is machine-written with valid escapes; a
+			// parse failure means the file was hand-edited or truncated.
 			out.WriteParseFailed(line)
 			stats.IncrParseFailed()
 			continue

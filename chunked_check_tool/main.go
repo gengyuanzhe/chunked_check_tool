@@ -460,11 +460,6 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 			checkShortResponse(out, prefix, continuationToken, len(objs)+len(subprefixes), next != "", cfg.MaxKeys)
 			sa = "" // continuation tokens take over after the first page
 			for _, o := range objs {
-				if strings.Contains(o.Key, "|") {
-					out.WriteInvalidKey(o.Key)
-					stats.IncrInvalidKeys()
-					continue
-				}
 				if cfg.IsCheck {
 					select {
 					case objCh <- resolveOffsets(o, cfg):

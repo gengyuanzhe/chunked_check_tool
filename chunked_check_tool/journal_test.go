@@ -641,10 +641,11 @@ func TestListerJournalHardAbortFreezesPosition(t *testing.T) {
 	}
 }
 
-// TestListerJournalShortCircuitKeysTerminal — objects whose keys contain
-// "|" never become tasks; the lister reports their terminal itself so the
-// page can still complete.
-func TestListerJournalShortCircuitKeysTerminal(t *testing.T) {
+// TestListerJournalPipeKeyFlowsNormally — a key containing "|" is a normal
+// object now that every output path escapes server fields: it becomes a
+// task like any other key, and the page completes through the checker's
+// terminal reports (no lister-side short-circuit).
+func TestListerJournalPipeKeyFlowsNormally(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, ListType: 2, IsCheck: true}
 	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
@@ -665,21 +666,22 @@ func TestListerJournalShortCircuitKeysTerminal(t *testing.T) {
 		defer close(done)
 		l.processPrefix(context.Background(), context.Background(), "root/", "", objCh, fake, nil)
 	}()
-	select {
-	case task := <-objCh:
-		tr.Terminal(task.JournalPrefix, task.PageSeq)
-	case <-time.After(2 * time.Second):
-		t.Fatal("task never arrived")
+	got := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		select {
+		case task := <-objCh:
+			got[task.Key] = true
+			tr.Terminal(task.JournalPrefix, task.PageSeq)
+		case <-time.After(2 * time.Second):
+			t.Fatal("task never arrived")
+		}
 	}
 	<-done
-	out.FlushAndWait() // the invalid_keys line is still queued; put it on disk
-
-	if snap := tr.Snapshot(); !containsString(snap.Dones, "root/") {
-		t.Errorf("done = false with short-circuited key in page; snapshot: %+v", snap)
+	if !got["root/ok"] || !got["root/ba|d"] {
+		t.Errorf("objCh keys = %v, want both root/ok and root/ba|d as tasks", got)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "invalid_keys.txt"))
-	if err != nil || !strings.Contains(string(data), "root/ba|d") {
-		t.Errorf("invalid_keys.txt = %q err=%v, want the pipe key recorded", data, err)
+	if snap := tr.Snapshot(); !containsString(snap.Dones, "root/") {
+		t.Errorf("done = false with both keys terminal; snapshot: %+v", snap)
 	}
 }
 
