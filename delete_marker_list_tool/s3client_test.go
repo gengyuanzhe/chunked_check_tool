@@ -531,7 +531,8 @@ func TestListVersionsPage_EncodingTypeURLPassedToRequest(t *testing.T) {
 // TestListVersionsPage_EncodingTypeURL_DecodesCommonPrefix 验证 encoding_type_url=true 时
 // CommonPrefix 在 s3client 出口被 url.QueryUnescape 解码——list 工具 BFS 用 CommonPrefix
 // 作下一轮 prefix 入队，编码形式会让 SDK 二次编码（photos%2F → photos%252F），服务端解一次得到
-// photos%2F 匹配不到真实目录。delete_markers.txt 的 key 仍保持 URL 编码（与 CommonPrefix 不同）。
+// photos%2F 匹配不到真实目录。key 同样在出口解码（边界 A）；delete_markers.txt 的编码
+// 由 Output 层统一 QueryEscape（边界 B），与本配置无关。
 func TestListVersionsPage_EncodingTypeURL_DecodesCommonPrefix(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")

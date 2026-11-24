@@ -94,17 +94,19 @@ func TestWriteDeleteMarker_EscapesVersionID(t *testing.T) {
 
 func TestWriteListFailed_Contract(t *testing.T) {
 	o, dir := newTestOutput(t)
-	o.WriteListFailed("photos/", "", "") // non-empty prefix, no markers (from page 1)
-	o.WriteListFailed("", "", "")        // empty prefix + no markers → root prefix from page 1
+	o.WriteListFailed("photos/", "", "")    // non-empty prefix, no markers (from page 1)
+	o.WriteListFailed("", "", "")           // empty prefix + no markers → root prefix from page 1
 	o.WriteListFailed("photos/", "k1", "v1") // page-level resume: prefix + markers
+	// marker 含空格/斜杠/控制字符——QueryEscape 落盘（\x1f 字段分隔、空格→'+'、'/'→%2F）
+	o.WriteListFailed("photo x/", "k 1", "v/2")
 	o.FlushAndWait()
 	o.Close()
 	b, err := os.ReadFile(filepath.Join(dir, "list_failed.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Three lines, each `prefix\x1fkeyMarker\x1fversionIdMarker\n`（三字段均编码）
-	want := "photos%2F\x1f\x1f\n\x1f\x1f\nphotos%2F\x1fk1\x1fv1\n"
+	// 每行 `prefix\x1fkeyMarker\x1fversionIdMarker\n`（三字段均编码）
+	want := "photos%2F\x1f\x1f\n\x1f\x1f\nphotos%2F\x1fk1\x1fv1\nphoto+x%2F\x1fk+1\x1fv%2F2\n"
 	if string(b) != want {
 		t.Errorf("got %q want %q", string(b), want)
 	}

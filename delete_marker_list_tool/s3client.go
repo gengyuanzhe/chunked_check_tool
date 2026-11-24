@@ -125,8 +125,8 @@ type VersionPage struct {
 // 逐条目的 key）恒为原始形态，文件编码统一交给 Output 层（边界 B）。
 // encoding_type_url=false 时服务端不编码，原样返回（对原始值做解码会破坏含
 // 字面 %XX/+ 序列的真实 key——解码仅发生在服务端确实编过码时，恰一次）。
-// 解码失败（非法 %XX——服务端 bug）：保留原值 + Warn，下游按字面量处理，
-// 走 list_failed 兜底。
+// 解码失败（非法 %XX——服务端 bug）：保留原值 + Warn，best-effort——翻页 marker
+// 变形时页位置可能错位，Warn 是唯一信号（不会记 list_failed）。
 func (c *S3Client) decodeWire(bucket, prefix, raw string) string {
 	if !c.encodingTypeURL || raw == "" {
 		return raw

@@ -117,7 +117,7 @@ repair_next_vid_marker_on_short_response: false # true=短响应触发时按 a/b
 | `latency_window_sec` | int | `60` | 否 | 请求时延统计窗口秒数；progress 的 latency_avg_ms/max_ms 每该秒数重置 |
 | `debug_log` | bool | `false` | 否 | true=打每次请求的 marker 诊断行（req/resp/err）到 run.log，排翻页异常用；false 零成本静默 |
 | `max_keys` | int | — | 是 | 每页 MaxKeys，必填 1..1000（S3 上限 1000，超过服务端截断）；客户端用此值检测"截断了却没返回满"的服务端翻页 quirk |
-| `encoding_type_url` | bool | `false` | true=请求带 `EncodingType=url`，wire 上 server 字段 URL 编码（防 `\x1f` 等 XML 1.0 非法控制字符撕裂反序列化），s3client 出口解码回原始形态。**只影响协议层**——记录文件的编码与它无关（写侧无条件 `url.QueryEscape`，读取侧无条件 `url.QueryUnescape`）。false=wire 不编码，含 `\x1f` 的 key 会让整页 XML 解析失败进 `list_failed.txt` |
+| `encoding_type_url` | bool | `false` | 否 | true=请求带 `EncodingType=url`，wire 上 server 字段 URL 编码（防 `\x1f` 等 XML 1.0 非法控制字符撕裂反序列化），s3client 出口解码回原始形态。**只影响协议层**——记录文件的编码与它无关（写侧无条件 `url.QueryEscape`，读取侧无条件 `url.QueryUnescape`）。false=wire 不编码，含 `\x1f` 的 key 会让整页 XML 解析失败进 `list_failed.txt` |
 | `repair_next_vid_marker_on_short_response` | bool | `false` | 否 | true=短响应触发时按 a/b/c 规则修复 `NextVersionIdMarker`。触发条件：`IsTruncated=true` 且本页条目数（Version+DeleteMarker+CommonPrefix）< `max_keys`——矛盾状态，常预示服务端翻页 quirk。三分支按 `NextVersionIdMarker` 内容分派：a. 非整数（`""` / `"null"` / 真实 version-id）不动；b. 整数 `0` 改写为 `"null"`（覆盖 CommonPrefix 作 NextKeyMarker 的情况——目录无版本概念，version-id 恒为 `0`/`null`）；c. 非 0 整数 → 用本页尾条目（解码态 key 最大者）的 VersionID 覆盖，前提是本页尾 key 与 `NextKeyMarker` 解码后一致，不一致不动。改写命中时 `list_failed.log` 打 Warn，`list_failed.txt` 记录的是改写后的值 |
 
 **可直接复用 chunked_check_tool 的 config.yaml**——本工具只读自己认识的字段，未识别字段（`is_check`、`multipart_*`、`backup_*`、`check_concurrency` 等）被 YAML 解析器忽略，不报错。

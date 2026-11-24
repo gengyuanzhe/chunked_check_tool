@@ -80,6 +80,24 @@ func TestReadRetryEntries_WithMarkers(t *testing.T) {
 	}
 }
 
+// TestReadRetryEntries_MarkersWithEscapes 验证非恒等编码值的 marker 解码——
+// list_failed.txt 落盘的 keyMarker/versionIdMarker 是 QueryEscape 态（空格→'+'、
+// '/'→%2F、\x1f→%1F），重试读取时解码恢复原始形态（发请求用原始形态）。
+func TestReadRetryEntries_MarkersWithEscapes(t *testing.T) {
+	p := writeRetryFile(t, "\x1fp+2\x1fv%2F1\nsub+x%2F\x1fa%1Fb\x1fnull\n")
+	got, err := readRetryEntries(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []RetryEntry{
+		{Prefix: "", KeyMarker: "p 2", VersionIDMarker: "v/1"},
+		{Prefix: "sub x/", KeyMarker: "a\x1fb", VersionIDMarker: "null"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 // TestReadRetryEntries_LineWithUnitSeparatorInPrefix 验证 prefix 含 \x1f 时报错——
 // \x1f 是字段分隔符，prefix 含 \x1f 无法在 3-field 格式里无歧义表示。S3 key/prefix
 // 极少含 \x1f（与 delete_markers.txt 用 \x1f 分隔 key 同理的限制）。
