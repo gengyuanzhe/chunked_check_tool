@@ -85,6 +85,28 @@ node_recover_probe_interval: 60
 # stdout 进度打印阈值（约，性能优先，不要求精确）
 progress_interval: 5000
 
+# 每页 LIST 的 MaxKeys。必填，1..1000（S3 wire 上限，超过会被服务端截断）。
+# 必填不给默认：该值同时是"短响应检测"的基准——服务端返回 IsTruncated=true
+# 但本页条目数（对象+公共前缀）少于 max_keys 时打告警（矛盾状态，常预示
+# 服务端翻页 bug），客户端必须知道自己请求了多少才能判定"没给满"。
+max_keys: 1000
+
+# LIST 请求是否带 EncodingType=url（默认 false）。开启后服务端把 key/prefix/
+# marker 字段在 wire 上 URL 编码——含 \x1f 等 XML 1.0 非法控制字符的 key 不再
+# 撕裂整页 XML 反序列化（撕裂 = 整页进 list_failed）。SDK 不会自动解码：
+# s3client 出口统一解码回原始形态，工具内部与记录文件均与该配置无关。
+# 开启前先在目标服务端探测确认其正确实现了该参数。
+encoding_type_url: false
+
+# true=每次 LIST 请求打一行诊断（请求 marker / 响应计数与 next marker /
+# 错误）到 run.log，排翻页异常用；false 零成本静默。
+debug_log: false
+
+# LIST 时延统计窗口（秒），默认 60。进度行的 latency_avg_ms/latency_max_ms
+# 是该窗口内的均值/最大值而非全局均值——长跑中全局均值被早期毛刺稀释，
+# 看不出当前批次的服务端健康度。
+latency_window_sec: 60
+
 # lister→checker channel 容量；0 走默认 max(check_concurrency*4, 2000)
 obj_ch_capacity: 0
 

@@ -17,6 +17,7 @@ endpoints:
   - 10.0.0.2:9000
 ak: ACCESSKEY
 sk: SECRETKEY
+max_keys: 1000
 list_type: 2
 list_concurrency: 4
 check_concurrency: 8
@@ -63,6 +64,7 @@ endpoints:
   - 10.0.0.1:9000
 ak: ak
 sk: sk
+max_keys: 1000
 bucket: b
 `)
 	if err := os.WriteFile(path, content, 0644); err != nil {
@@ -97,7 +99,7 @@ func TestLoadConfig_MissingEndpoints(t *testing.T) {
 func TestLoadConfig_SchemeHttps(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
-	content := []byte("endpoints:\n  - 1.2.3.4:9000\nscheme: https\nak: x\nsk: y\n")
+	content := []byte("endpoints:\n  - 1.2.3.4:9000\nscheme: https\nak: x\nsk: y\nmax_keys: 1000\n")
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +120,7 @@ endpoints:
   - 10.0.0.1:9000
 ak: x
 sk: y
+max_keys: 1000
 multipart_check_mode: 2
 multipart_segment_size: 5242880
 `)
@@ -142,7 +145,7 @@ multipart_segment_size: 5242880
 func TestLoadConfig_MultipartCheckModeDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
-	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\n")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 1000\n")
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +178,7 @@ func TestLoadConfig_MultipartCheckModeInvalid(t *testing.T) {
 func TestLoadConfig_NodeIsolateThreshold(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
-	if err := os.WriteFile(path, []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\n"), 0644); err != nil {
+	if err := os.WriteFile(path, []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 1000\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfig(path)
@@ -187,7 +190,7 @@ func TestLoadConfig_NodeIsolateThreshold(t *testing.T) {
 	}
 
 	path2 := filepath.Join(dir, "cfg1.yaml")
-	if err := os.WriteFile(path2, []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nnode_isolate_threshold: 1\n"), 0644); err != nil {
+	if err := os.WriteFile(path2, []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 1000\nnode_isolate_threshold: 1\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err = LoadConfig(path2)
@@ -199,7 +202,7 @@ func TestLoadConfig_NodeIsolateThreshold(t *testing.T) {
 	}
 
 	path3 := filepath.Join(dir, "cfg2.yaml")
-	if err := os.WriteFile(path3, []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nnode_isolate_threshold: -1\n"), 0644); err != nil {
+	if err := os.WriteFile(path3, []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 1000\nnode_isolate_threshold: -1\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadConfig(path3); err == nil {
@@ -219,6 +222,7 @@ endpoints:
   - 10.0.0.1:9000
 ak: x
 sk: y
+max_keys: 1000
 is_multipart_segment_check: true
 multipart_segment_size: 5242880
 `)
@@ -242,6 +246,7 @@ endpoints:
   - 10.0.0.1:9000
 ak: x
 sk: y
+max_keys: 1000
 backup_bucket: backup-target
 `)
 	if err := os.WriteFile(path, content, 0644); err != nil {
@@ -262,7 +267,7 @@ backup_bucket: backup-target
 func TestLoadConfig_BackupBucketDefaultEmpty(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
-	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\n")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 1000\n")
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +302,7 @@ func assertStampedOutputDir(t *testing.T, cfg *Config, base string) {
 func TestLoadConfig_OutputDirTimestampDefaultOn(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
-	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\noutput_dir: ./out\n")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 1000\noutput_dir: ./out\n")
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +322,7 @@ func TestLoadConfig_OutputDirTimestampDefaultOn(t *testing.T) {
 func TestLoadConfig_OutputDirTimestampExplicitFalse(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
-	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\noutput_dir: ./out\noutput_dir_timestamp: false\n")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 1000\noutput_dir: ./out\noutput_dir_timestamp: false\n")
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +344,7 @@ func TestLoadConfig_OutputDirTimestampExplicitFalse(t *testing.T) {
 func TestLoadConfig_OutputDirTimestampTrailingSlash(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
-	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\noutput_dir: ./out/\n")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 1000\noutput_dir: ./out/\n")
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +360,7 @@ func TestLoadConfig_OutputDirTimestampTrailingSlash(t *testing.T) {
 func TestLoadConfig_OutputDirTimestampEmptyDir(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
-	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\n")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 1000\n")
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +376,7 @@ func TestLoadConfig_OutputDirTimestampEmptyDir(t *testing.T) {
 func TestLoadConfig_OutputDirTimestampExplicitTrue(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
-	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\noutput_dir: /tmp/e2e_out\noutput_dir_timestamp: true\n")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 1000\noutput_dir: /tmp/e2e_out\noutput_dir_timestamp: true\n")
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -397,6 +402,7 @@ endpoints:
   - 10.0.0.1:9000
 ak: x
 sk: y
+max_keys: 1000
 output_dir: ./out
 backup_output_dir: ./backup_out
 `)
@@ -430,6 +436,7 @@ endpoints:
   - 10.0.0.1:9000
 ak: x
 sk: y
+max_keys: 1000
 output_dir: ./out
 backup_output_dir: ./backup_out
 output_dir_timestamp: false
@@ -456,7 +463,7 @@ output_dir_timestamp: false
 func TestLoadConfig_BackupOutputDirDefaultEmpty(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
-	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\n")
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 1000\n")
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -481,6 +488,7 @@ endpoints:
   - 10.0.0.1:9000
 ak: x
 sk: y
+max_keys: 1000
 multipart_check_mode: 2
 multipart_segment_size: 0
 `)
@@ -490,5 +498,140 @@ multipart_segment_size: 0
 	_, err := LoadConfig(path)
 	if err == nil {
 		t.Fatal("expected error when multipart_check_mode=2 but multipart_segment_size=0")
+	}
+}
+
+// TestLoadConfig_MaxKeysRequired — max_keys must be set explicitly (1..1000).
+// It is both the LIST page size and the threshold for the short-response
+// quirk detection ("IsTruncated but fewer entries than requested"), so a
+// silent default would let a mis-sized page go unnoticed.
+func TestLoadConfig_MaxKeysRequired(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte(`
+endpoints:
+  - 10.0.0.1:9000
+ak: x
+sk: y
+`)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "max_keys") {
+		t.Fatalf("expected max_keys required error, got %v", err)
+	}
+}
+
+func TestLoadConfig_MaxKeysRange(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		v    string
+		want string
+	}{
+		{"ok_min", "1", ""},
+		{"ok_max", "1000", ""},
+		{"over", "1001", "max_keys"},
+		{"negative", "-5", "max_keys"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "cfg.yaml")
+			content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: " + tc.v + "\n")
+			if err := os.WriteFile(path, content, 0644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfig(path)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("expected %q error, got %v", tc.want, err)
+				}
+				return
+			}
+			if cfg.MaxKeys < 1 || cfg.MaxKeys > 1000 {
+				t.Errorf("MaxKeys = %d, want 1..1000", cfg.MaxKeys)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_LatencyWindowSec — absent falls back to 60s (windowed
+// latency stats window); a positive explicit value is kept; negative is
+// rejected (a negative window is meaningless).
+func TestLoadConfig_LatencyWindowSec(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+		want int
+		err  string
+	}{
+		{"default", "", 60, ""},
+		{"explicit", "latency_window_sec: 120\n", 120, ""},
+		{"negative", "latency_window_sec: -1\n", 0, "latency_window_sec"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "cfg.yaml")
+			content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 500\n" + tc.yaml)
+			if err := os.WriteFile(path, content, 0644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfig(path)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("expected %q error, got %v", tc.err, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LatencyWindowSec != tc.want {
+				t.Errorf("LatencyWindowSec = %d, want %d", cfg.LatencyWindowSec, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadConfig_EncodingTypeURLAndDebugLog — both are plain opt-in booleans
+// (default false, no validation).
+func TestLoadConfig_EncodingTypeURLAndDebugLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	content := []byte(`
+endpoints:
+  - 10.0.0.1:9000
+ak: x
+sk: y
+max_keys: 500
+encoding_type_url: true
+debug_log: true
+`)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.EncodingTypeURL || !cfg.DebugLog {
+		t.Errorf("EncodingTypeURL/DebugLog not parsed: %+v", cfg)
+	}
+
+	path2 := filepath.Join(dir, "cfg2.yaml")
+	content2 := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 500\n")
+	if err := os.WriteFile(path2, content2, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := LoadConfig(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.EncodingTypeURL || cfg2.DebugLog {
+		t.Errorf("EncodingTypeURL/DebugLog should default false: %+v", cfg2)
 	}
 }

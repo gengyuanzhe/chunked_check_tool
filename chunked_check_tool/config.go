@@ -27,44 +27,70 @@ const (
 )
 
 type Config struct {
-	Endpoints               []string `yaml:"endpoints"`
-	Scheme                  string   `yaml:"scheme"`
-	AK                      string   `yaml:"ak"`
-	SK                      string   `yaml:"sk"`
-	ListType                int      `yaml:"list_type"`
-	ListAPIVersion          int      `yaml:"list_api_version"`
-	ListConcurrency         int      `yaml:"list_concurrency"`
-	CheckConcurrency        int      `yaml:"check_concurrency"`
-	OutputDir               string   `yaml:"output_dir"`
-	OutputDirTimestamp      bool     `yaml:"output_dir_timestamp"`
+	Endpoints          []string `yaml:"endpoints"`
+	Scheme             string   `yaml:"scheme"`
+	AK                 string   `yaml:"ak"`
+	SK                 string   `yaml:"sk"`
+	ListType           int      `yaml:"list_type"`
+	ListAPIVersion     int      `yaml:"list_api_version"`
+	ListConcurrency    int      `yaml:"list_concurrency"`
+	CheckConcurrency   int      `yaml:"check_concurrency"`
+	OutputDir          string   `yaml:"output_dir"`
+	OutputDirTimestamp bool     `yaml:"output_dir_timestamp"`
 	// BackupOutputDir is the output directory for -backup-file mode. Kept
 	// separate from OutputDir so a single config can drive both list/check
 	// runs and backup runs without their result files mixing. Required when
 	// running in backup mode (main.go enforces); ignored by list/check modes.
 	// When OutputDirTimestamp is true, a sibling-suffix stamp is applied to
 	// BackupOutputDir the same way it is to OutputDir.
-	BackupOutputDir         string `yaml:"backup_output_dir"`
-	IsCheck                 bool   `yaml:"is_check"`
-	IsSuccessLog            bool   `yaml:"is_success_log"`
-	MultipartCheckMode      int    `yaml:"multipart_check_mode"`
-	MultipartSegmentSize   int64  `yaml:"multipart_segment_size"`
-	IsMultipartSuccessLog  bool   `yaml:"is_multipart_success_log"`
+	BackupOutputDir       string `yaml:"backup_output_dir"`
+	IsCheck               bool   `yaml:"is_check"`
+	IsSuccessLog          bool   `yaml:"is_success_log"`
+	MultipartCheckMode    int    `yaml:"multipart_check_mode"`
+	MultipartSegmentSize  int64  `yaml:"multipart_segment_size"`
+	IsMultipartSuccessLog bool   `yaml:"is_multipart_success_log"`
 	// WholeObjectProbeThreshold is the byte cutoff for the small-object
 	// fast-path: when 0 < task.Size <= threshold, verify() issues one
 	// RangeGetAt(0, threshold) reading the whole object and matches both
 	// chunkSigRe and trailerRe against that single body. Objects larger
 	// than threshold fall back to the multi-probe matrix (head + boundary
 	// + tail). 0 disables the fast-path entirely (always multi-probe).
-	WholeObjectProbeThreshold int  `yaml:"whole_object_probe_threshold"`
-	NodeIsolateThreshold     int64  `yaml:"node_isolate_threshold"`
-	NodeRecoverProbeInterval int64  `yaml:"node_recover_probe_interval"`
-	DialTimeout              int64  `yaml:"dial_timeout"`
-	ResponseHeaderTimeout    int64  `yaml:"response_header_timeout"`
-	ProgressInterval         int    `yaml:"progress_interval"`
-	ObjChCapacity           int    `yaml:"obj_ch_capacity"`
-	OutputChCapacity        int    `yaml:"output_ch_capacity"`
-	ResultLineFormat        string `yaml:"result_line_format"`
-	BackupBucket            string `yaml:"backup_bucket"`
+	WholeObjectProbeThreshold int    `yaml:"whole_object_probe_threshold"`
+	NodeIsolateThreshold      int64  `yaml:"node_isolate_threshold"`
+	NodeRecoverProbeInterval  int64  `yaml:"node_recover_probe_interval"`
+	DialTimeout               int64  `yaml:"dial_timeout"`
+	ResponseHeaderTimeout     int64  `yaml:"response_header_timeout"`
+	ProgressInterval          int    `yaml:"progress_interval"`
+	ObjChCapacity             int    `yaml:"obj_ch_capacity"`
+	OutputChCapacity          int    `yaml:"output_ch_capacity"`
+	ResultLineFormat          string `yaml:"result_line_format"`
+	BackupBucket              string `yaml:"backup_bucket"`
+	// MaxKeys is the LIST page size AND the threshold for the
+	// short-response quirk detection (IsTruncated but fewer entries than
+	// requested — a server pagination quirk signal). Required, 1..1000
+	// (the S3 wire max; anything above is silently truncated server-side,
+	// which would skew the detection). No default: an explicit page size
+	// is what makes "returned < requested" meaningful.
+	MaxKeys int32 `yaml:"max_keys"`
+	// EncodingTypeURL adds EncodingType=url to LIST requests: the server
+	// then URL-encodes key/prefix/marker fields on the wire, which keeps
+	// XML 1.0-illegal control bytes (\x1f etc.) in keys from tearing the
+	// page's XML deserialization. The SDK does NOT auto-decode; the
+	// s3client egress (boundary A) decodes everything back to raw form,
+	// so the rest of the tool always sees decoded keys. Probe the server
+	// first — a server that ignores the parameter is fine, one that
+	// mis-handles it is not.
+	EncodingTypeURL bool `yaml:"encoding_type_url"`
+	// DebugLog turns on one diagnostic line per LIST request (request
+	// marker, response counts/next marker, error) at Debug level into
+	// run.log. Off by default: zero cost when silent.
+	DebugLog bool `yaml:"debug_log"`
+	// LatencyWindowSec is the window length of the windowed LIST latency
+	// stats (latency_avg_ms/latency_max_ms on progress lines). Windowed,
+	// not global: a long run's global average gets diluted by early spikes
+	// and hides current-batch health. Default 60s; 0 (absent) = default,
+	// negative rejected.
+	LatencyWindowSec int `yaml:"latency_window_sec"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -181,6 +207,18 @@ func LoadConfig(path string) (*Config, error) {
 	// default. Users with hung-acceptor symptoms can opt in explicitly.
 	if cfg.ResponseHeaderTimeout < 0 {
 		return nil, fmt.Errorf("response_header_timeout must be >= 0 seconds (got %d)", cfg.ResponseHeaderTimeout)
+	}
+	// max_keys: required (no default), 1..1000. See the field comment.
+	if cfg.MaxKeys < 1 || cfg.MaxKeys > 1000 {
+		return nil, fmt.Errorf("max_keys is required and must be 1..1000 (got %d)", cfg.MaxKeys)
+	}
+	// Windowed latency stats window. Absent (0) = 60s default; negative is
+	// meaningless and rejected.
+	if cfg.LatencyWindowSec == 0 {
+		cfg.LatencyWindowSec = 60
+	}
+	if cfg.LatencyWindowSec < 0 {
+		return nil, fmt.Errorf("latency_window_sec must be >= 1 seconds (got %d)", cfg.LatencyWindowSec)
 	}
 	return &cfg, nil
 }
