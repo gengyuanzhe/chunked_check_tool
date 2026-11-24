@@ -139,18 +139,20 @@ repair_next_vid_marker_on_short_response: false # true=短响应触发时按 a/b
 
 ```
 # mode 2（BFS）
-[progress] scanned=12345 markers=678 list_failed=0 (q=42) latency_avg_ms=42.5 latency_max_ms=210.0 heap=128.5MiB
+[progress] scanned=12345 versions=12000 markers=678 list_failed=0 (q=42) latency_avg_ms=42.5 latency_max_ms=210.0 heap=128.5MiB
 
 # mode 1（单流）
-[progress] scanned=12345 markers=678 list_failed=0 latency_avg_ms=42.5 latency_max_ms=210.0 heap=128.5MiB
+[progress] scanned=12345 versions=12000 markers=678 list_failed=0 latency_avg_ms=42.5 latency_max_ms=210.0 heap=128.5MiB
 ```
 
 字段说明：
 
-- `scanned` / `markers` / `list_failed`：scanned_versions / delete_markers / list_failed 的累计计数
+- `scanned` / `versions` / `markers` / `list_failed`：累计计数。`scanned = versions + common_prefixes`（mode 2 下行期主要是 common_prefix，叶子层主要是 version）；`versions` 是实际列举到的 version 条目（含普通对象 + delete marker）；`markers` 是 delete marker（versions 的子集）
 - `q`（mode 2）：BFS 队列长度——待扫的 prefix 数。宽桶百万级 common prefix 下会涨到几十万，是剩余工作量，不是并发请求数
 - `latency_avg_ms` / `latency_max_ms`：`ListObjectVersions` 在最近 `latency_window_sec` 秒窗口内的平均/最大时延（不是全局平均）
 - `heap`：`runtime.MemStats.HeapInuse`（当前堆已分配含碎片，单位 MiB）。BFS 队列堆积是驻留内存，GC 回收不了——`heap` 涨到接近 OS / `GOMEMLIMIT` 上限时考虑 Ctrl-C 后 `-retry list_failed.txt` 续传
+
+**进度打印阈值**：worker 本地累积条目数（common_prefix + version 合计）每达到 `progress_interval` 时打一行。早期版本只算 version，10 层目录 + 1 个对象的桶在下行期长达数小时无 progress，现在把 common_prefix 也算进去避免静默。
 
 
 **行分隔符 `\x1f`**（ASCII Unit Separator，控制字符）：S3 key 规范上允许 `|`，实务里偶有出现；`\x1f` 是控制字符，key 中基本不出现，撞概率比 `|` 低一两个数量级。另有第二重保证：server 字段统一 URL 编码落盘，`\x1f`/`\n`/`\r` 编码为 `%1F`/`%0A`/`%0D`，撕裂类字符根本进不了文件。`\x1f` 在终端不可见，查看用：
@@ -205,8 +207,8 @@ less delete_markers.txt   # 看着字段黏在一起，但数据完整
 - **mode 1 无并发**，大桶会慢——这正是该模式的语义
 - **同秒内连续启动两次**（`output_dir_timestamp: true`）会撞目录并发 append 撕裂尾部行；靠下游解析时丢弃格式非法行兜底
 - **version_id 可能是字面量 `"null"`**（旧版本对象）；下游透传不要当空值
-- **`scanned_versions` 在 mode 2 对"以 / 结尾的目录 key"少统计**——已知偏差，不修。自研 S3 有 quirk：`delimiter=/` 列举时以 / 结尾的 key（如 `97-abc-0/`）被折叠到 CommonPrefixes，但 `prefix=97-abc-0/` + `delimiter=/` 再列举时不返回该 key 本身作为 Version。mode 2 的 BFS re-list 踩在这个 quirk 上，目录 key 本身的 Version 计数被丢；mode 1 走 recursive 不分 shard，无此问题。
-  - **delete_markers.txt 完整正确**，不受影响——`<DeleteMarker>` 是独立 XML 标签，不走 CommonPrefix 路径。`scanned_versions` 只是诊断指标，不是产出。
+- **`versions` 在 mode 2 对"以 / 结尾的目录 key"少统计**——已知偏差，不修。自研 S3 有 quirk：`delimiter=/` 列举时以 / 结尾的 key（如 `97-abc-0/`）被折叠到 CommonPrefixes，但 `prefix=97-abc-0/` + `delimiter=/` 再列举时不返回该 key 本身作为 Version。mode 2 的 BFS re-list 踩在这个 quirk 上，目录 key 本身的 Version 计数被丢；mode 1 走 recursive 不分 shard，无此问题。`scanned = versions + common_prefixes` 也因此有同向偏差。
+  - **delete_markers.txt 完整正确**，不受影响——`<DeleteMarker>` 是独立 XML 标签，不走 CommonPrefix 路径。`versions` 只是诊断指标，不是产出。
   - **不修的原因**：修复需 CommonPrefix re-list 改用 recursive，会失去 shard 内部多级细分（并发度下降）。诊断指标偏差不值得牺牲并发。两个模式统计值有差异时以 mode 1 为准，或只看 delete_markers.txt 完整性。
 
 ## 约束

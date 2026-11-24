@@ -9,7 +9,10 @@ import (
 func TestStatsSnapshot(t *testing.T) {
 	var s Stats
 	for i := 0; i < 100; i++ {
-		s.IncrScannedVersions()
+		s.IncrVersions()
+	}
+	for i := 0; i < 30; i++ {
+		s.IncrCommonPrefixes()
 	}
 	for i := 0; i < 7; i++ {
 		s.IncrDeleteMarkers()
@@ -18,8 +21,14 @@ func TestStatsSnapshot(t *testing.T) {
 		s.IncrListFailed()
 	}
 	snap := s.Snapshot()
-	if snap.ScannedVersions != 100 {
-		t.Errorf("ScannedVersions=%d want 100", snap.ScannedVersions)
+	if snap.Versions != 100 {
+		t.Errorf("Versions=%d want 100", snap.Versions)
+	}
+	if snap.CommonPrefixes != 30 {
+		t.Errorf("CommonPrefixes=%d want 30", snap.CommonPrefixes)
+	}
+	if snap.Scanned != 130 {
+		t.Errorf("Scanned=%d want 130 (versions+common_prefixes)", snap.Scanned)
 	}
 	if snap.DeleteMarkers != 7 {
 		t.Errorf("DeleteMarkers=%d want 7", snap.DeleteMarkers)
@@ -36,13 +45,14 @@ func TestPrintSummaryContainsAllFields(t *testing.T) {
 		s.IncrDeleteMarkers()
 	}
 	for i := 0; i < 1000; i++ {
-		s.IncrScannedVersions()
+		s.IncrVersions()
 	}
+	s.IncrCommonPrefixes()
 	s.IncrListFailed()
 	var buf bytes.Buffer
 	s.PrintSummary(&buf)
 	out := buf.String()
-	for _, want := range []string{"delete_markers", "scanned_versions", "list_failed", "total_sec"} {
+	for _, want := range []string{"scanned", "versions", "common_prefixes", "delete_markers", "list_failed", "total_sec"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary missing %q: %s", want, out)
 		}
@@ -71,7 +81,7 @@ func TestProgressPrinterWithQueueSnapshot(t *testing.T) {
 		return QueueSnapshot{Prefix: 3, Inflight: 2}
 	})
 	var s Stats
-	s.IncrScannedVersions()
+	s.IncrVersions()
 	p.MaybePrint(&s, "scanned", 5000)
 	out := buf.String()
 	if !strings.Contains(out, "q=3") {
@@ -82,6 +92,9 @@ func TestProgressPrinterWithQueueSnapshot(t *testing.T) {
 	}
 	if !strings.Contains(out, "heap=") {
 		t.Errorf("missing heap= field: %q", out)
+	}
+	if !strings.Contains(out, "versions=") {
+		t.Errorf("missing versions= field: %q", out)
 	}
 }
 

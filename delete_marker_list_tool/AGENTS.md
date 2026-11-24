@@ -60,7 +60,7 @@ flowchart TD
     LV --> Err{err?}
     Err -->|有| Failed["recordListFailed(prefix, keyMarker, versionIDMarker, err)<br/>返回 err"]
     Err -->|无| Iter[遍历 page.Versions]
-    Iter --> Count[IncrScannedVersions + localCount++]
+    Iter --> Count[IncrVersions + localCount++]
     Count --> IsDM{IsDeleteMarker?}
     IsDM -->|是| Write[WriteDeleteMarker<br/>key/vid/lastModified]
     IsDM -->|否| Thresh
@@ -86,11 +86,16 @@ flowchart TD
     Pop1 --> LV1["ListVersionsPage<br/>recursive=false<br/>keyMarker/versionIDMarker"]
     Pop2 --> LV2["ListVersionsPage"]
     PopN --> LVN["ListVersionsPage"]
-    LV1 -->|Version+DeleteMarker| Consume["遍历 page.Versions<br/>markers→delete_markers.txt<br/>scanned++"]
-    LV1 -->|CommonPrefix| Enq["inflight.Add(1)<br/>queue.Push(prefix)"]
+    LV1 -->|Version+DeleteMarker| Consume["遍历 page.Versions<br/>markers→delete_markers.txt<br/>IncrVersions + lc.count++"]
+    LV1 -->|CommonPrefix| Enq["inflight.Add(1)<br/>queue.Push(prefix)<br/>IncrCommonPrefixes + lc.count++"]
     Enq --> Q[(无界 queue)]
     Q -->|Pop| Pop1
-    Consume --> Dec["defer inflight.Add(-1)"]
+    Consume --> Thresh{"lc.count >= interval?"}
+    Enq --> Thresh
+    Thresh -->|是| Print["MaybePrint + lc.count=0"]
+    Print --> Dec
+    Thresh -->|否| Dec
+    Dec["defer inflight.Add(-1)"]
     Dec --> Check{inflight == 0?}
     Check -->|是| Done["SignalDone + worker 退出<br/>唤醒其他阻塞 Pop 的 worker"]
     Check -->|否| NextPage{IsTruncated?}
@@ -130,9 +135,9 @@ flowchart TD
 
 11. **aws-sdk-go-v2 v1.114.10 ListObjectVersions**：响应 `Versions` / `DeleteMarkers` / `CommonPrefixes` 三个独立 slice，按 XML 标签区分。`ListVersionsPage` 把 Version + DeleteMarker 摊平到 `VersionEntry`（IsDeleteMarker 区分），CommonPrefixes 放到 `VersionPage.CommonPrefixes`。升级 aws-sdk-go-v2 需重验三 slice 是否仍按 XML 标签区分（spec §4.1）。
 
-12. **已知偏差——scanned_versions 在 mode 2 对"以 / 结尾的目录 key"少统计，不修**：自研 S3 有 quirk——`delimiter=/` 列举时以 / 结尾的 key（如 `97-abc-0/`）被折叠到 `<CommonPrefixes>`，但用 `prefix=97-abc-0/` + `delimiter=/` 再列举时**不返回 `97-abc-0/` 本身**作为 Version（目录标记 quirk）。mode 2 的 BFS re-list 踩在这个 quirk 上，目录 key 本身作为 Version（vid 通常是 `"null"`）被静默丢失，导致 `scanned_versions` 比 mode 1 少。
+12. **已知偏差——versions 在 mode 2 对"以 / 结尾的目录 key"少统计，不修**：自研 S3 有 quirk——`delimiter=/` 列举时以 / 结尾的 key（如 `97-abc-0/`）被折叠到 `<CommonPrefixes>`，但用 `prefix=97-abc-0/` + `delimiter=/` 再列举时**不返回 `97-abc-0/` 本身**作为 Version（目录标记 quirk）。mode 2 的 BFS re-list 踩在这个 quirk 上，目录 key 本身作为 Version（vid 通常是 `"null"`）被静默丢失，导致 `versions` 比 mode 1 少。`scanned = versions + common_prefixes` 也因此有同向偏差。
    - **delete_markers.txt 完整正确**——`<DeleteMarker>` 是独立 XML 标签，不走 CommonPrefix 路径，所有 delete marker 都会被列出。这是工具的真正产出，不受 quirk 影响。
-   - **不修的原因**：scanned_versions 是诊断指标，不是产出。修复需要 CommonPrefix re-list 改用 recursive（无 delimiter），会失去 shard 内部多级细分（并发度下降）。诊断指标的 cosmetic 偏差不值得牺牲并发。
+   - **不修的原因**：versions 是诊断指标，不是产出。修复需要 CommonPrefix re-list 改用 recursive（无 delimiter），会失去 shard 内部多级细分（并发度下降）。诊断指标的 cosmetic 偏差不值得牺牲并发。
    - **`version_id == "null"` 不是判断标志**：`"null"` 是版本控制前旧对象的合法 VersionId（AWS 标准），不是目录标记标识。过滤 vid=null 会误伤所有版本控制前的旧对象，偏差更大。
    - **mode 1 无此问题**：recursive 列举不分 shard，目录 key 本身作为 Version 直接返回。
 

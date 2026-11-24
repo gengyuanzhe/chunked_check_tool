@@ -77,7 +77,7 @@ func (l *Lister) runMode1(ctx context.Context, bucket string, entry RetryEntry) 
 		l.checkNextVIDMarkerRewrite(entry.Prefix, keyMarker, page)
 		l.checkWireDecodeFailed(entry.Prefix, keyMarker, page)
 		for _, obj := range page.Versions {
-			l.stats.IncrScannedVersions()
+			l.stats.IncrVersions()
 			localCount++
 			if obj.IsDeleteMarker {
 				l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified))
@@ -227,9 +227,15 @@ func (l *Lister) processPrefixWithClient(ctx context.Context, wc *S3Client, buck
 			inflight.Add(1)
 			// 新发现的 common prefix 从第一页扫（markers 空）。
 			q.Push(RetryEntry{Prefix: p})
+			l.stats.IncrCommonPrefixes()
+			lc.count++
+			if lc.count >= interval {
+				l.progress.MaybePrint(l.stats, "scanned", lc.count)
+				lc.count = 0
+			}
 		}
 		for _, obj := range page.Versions {
-			l.stats.IncrScannedVersions()
+			l.stats.IncrVersions()
 			lc.count++
 			if obj.IsDeleteMarker {
 				l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified))
