@@ -191,6 +191,22 @@ func (o *Output) WriteNextVIDMarkerZeroRewriteLog(prefix, keyMarker, rawVIDMarke
 		"raw_version_id_marker", rawVIDMarker)
 }
 
+// WriteWireDecodeFailedLog 写一条 slog 警告到 list_failed.log。
+// 触发条件：encoding_type_url=true 时服务端返回值含非法 %XX（服务端 bug），s3client
+// 出口 decodeWire 解码失败。best-effort 保留原值继续走——页请求本身 HTTP 200 成功，
+// 非失败，不写 list_failed.txt。但翻页 marker / BFS prefix 用了未解码的 wire 值，
+// 下一页/下一轮会位置错位导致静默漏扫——Warn 是兜底信号让运维定位。
+// raw 是首个失败字段的原始 wire 值（一页可能多字段失败，只记首个避免刷屏）。
+// 与 short-response / next-vid-rewrite 同级，不依赖 cfg.DebugLog——生产环境通常
+// 不开 DebugLog，否则这条信号会被吞掉。
+func (o *Output) WriteWireDecodeFailedLog(prefix, keyMarker, raw string) {
+	o.listLogger.Warn("wire url decode failed",
+		"bucket", o.bucket,
+		"prefix", prefix,
+		"key_marker", keyMarker,
+		"raw", raw)
+}
+
 // WriteShortResponseWarning 写一条 slog 警告到 list_failed.log。
 // 触发条件：服务端返回 IsTruncated=true 但本页条目数（Version+DeleteMarker+
 // CommonPrefix）< 请求的 maxKeys——矛盾状态（说还有更多却又没返回满），

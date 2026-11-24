@@ -75,6 +75,7 @@ func (l *Lister) runMode1(ctx context.Context, bucket string, entry RetryEntry) 
 		}
 		l.checkShortResponse(entry.Prefix, keyMarker, versionIDMarker, page)
 		l.checkNextVIDMarkerRewrite(entry.Prefix, keyMarker, page)
+		l.checkWireDecodeFailed(entry.Prefix, keyMarker, page)
 		for _, obj := range page.Versions {
 			l.stats.IncrScannedVersions()
 			localCount++
@@ -221,6 +222,7 @@ func (l *Lister) processPrefixWithClient(ctx context.Context, wc *S3Client, buck
 		}
 		l.checkShortResponse(entry.Prefix, keyMarker, versionIDMarker, page)
 		l.checkNextVIDMarkerRewrite(entry.Prefix, keyMarker, page)
+		l.checkWireDecodeFailed(entry.Prefix, keyMarker, page)
 		for _, p := range page.CommonPrefixes {
 			inflight.Add(1)
 			// 新发现的 common prefix 从第一页扫（markers 空）。
@@ -252,6 +254,16 @@ func (l *Lister) processPrefixWithClient(ctx context.Context, wc *S3Client, buck
 func (l *Lister) checkNextVIDMarkerRewrite(prefix, keyMarker string, page *VersionPage) {
 	if page.NextVIDMarkerRewritten {
 		l.out.WriteNextVIDMarkerZeroRewriteLog(prefix, keyMarker, page.RewrittenRawVIDMarker)
+	}
+}
+
+// checkWireDecodeFailed 在 s3client 出口 decodeWire 解码服务端返回值遇到非法 %XX
+// （服务端 bug）时打 Warn 日志到 list_failed.log。非失败不写 list_failed.txt——
+// 页请求本身 HTTP 200 成功，best-effort 保留原值继续走；但翻页 marker / BFS prefix
+// 错位会导致后续静默漏扫，Warn 是兜底信号让运维定位。
+func (l *Lister) checkWireDecodeFailed(prefix, keyMarker string, page *VersionPage) {
+	if page.WireDecodeFailed {
+		l.out.WriteWireDecodeFailedLog(prefix, keyMarker, page.WireDecodeFailedRaw)
 	}
 }
 

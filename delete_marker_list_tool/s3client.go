@@ -118,6 +118,14 @@ type VersionPage struct {
 	IsTruncated             bool
 	NextVIDMarkerRewritten  bool
 	RewrittenRawVIDMarker   string
+	// WireDecodeFailed=true 表示本页 decodeWire 解码过服务端返回值时遇到非法 %XX
+	// （服务端 bug）。WireDecodeFailedRaw 是首个失败字段的原始 wire 值。best-effort：
+	// 解码失败保留原值继续走，但翻页 marker / BFS prefix 可能错位导致后续漏扫——
+	// lister 据此写 Warn 到 list_failed.log（不写 list_failed.txt：页请求本身 HTTP 200，
+	// 非失败；retry 重试同一服务端会再失败一次）。Warn 不依赖 cfg.DebugLog——生产环境
+	// 通常不开 DebugLog，否则这条信号会被吞掉。
+	WireDecodeFailed       bool
+	WireDecodeFailedRaw    string
 }
 
 // decodeWire 是"边界 A"：encoding_type_url=true 时服务端返回值在 wire 上是 URL
@@ -125,11 +133,13 @@ type VersionPage struct {
 // 逐条目的 key）恒为原始形态，文件编码统一交给 Output 层（边界 B）。
 // encoding_type_url=false 时服务端不编码，原样返回（对原始值做解码会破坏含
 // 字面 %XX/+ 序列的真实 key——解码仅发生在服务端确实编过码时，恰一次）。
-// 解码失败（非法 %XX——服务端 bug）：保留原值 + Warn，best-effort——翻页 marker
-// 变形时页位置可能错位，Warn 是唯一信号（不会记 list_failed）。
-func (c *S3Client) decodeWire(bucket, prefix, raw string) string {
+// 解码失败（非法 %XX——服务端 bug）：保留原值 + 返回 error，调用方据此设
+// VersionPage.WireDecodeFailed 让 lister 写 Warn 到 list_failed.log。Warn 不依赖
+// cfg.DebugLog（此处仍打一条 DebugLog 便于本地调试，但 list_failed.log 的 Warn
+// 才是生产环境的兜底信号）。
+func (c *S3Client) decodeWire(bucket, prefix, raw string) (string, error) {
 	if !c.encodingTypeURL || raw == "" {
-		return raw
+		return raw, nil
 	}
 	dec, err := url.QueryUnescape(raw)
 	if err != nil {
@@ -137,9 +147,9 @@ func (c *S3Client) decodeWire(bucket, prefix, raw string) string {
 			c.logger.Warn("wire url decode failed",
 				"bucket", bucket, "prefix", prefix, "raw", raw, "err", err)
 		}
-		return raw
+		return raw, err
 	}
-	return dec
+	return dec, nil
 }
 
 // ListVersionsPage 列举一页。recursive=true 不带 delimiter（所有 key 所有版本）；
@@ -220,12 +230,24 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 	// 编码态回传会让位置错位；minio 实测漏扫）。NextVersionIdMarker 不在
 	// encoding-type=url 的编码字段列表（AWS 只编 KeyMarker/NextKeyMarker/Prefix/
 	// Key/Delimiter；minio 也不编 version-id），保持原样。
-	page.NextKeyMarker = c.decodeWire(bucket, prefix, page.NextKeyMarker)
+	//
+	// decode 是 decodeWire 的薄包装：解码失败时把首个失败的 wire 原值记到 page 上，
+	// 供 lister 写 Warn 到 list_failed.log。best-effort 继续用原值——翻页 marker / BFS
+	// prefix 可能错位漏扫，Warn 是兜底信号。只记首个失败避免日志被刷屏。
+	decode := func(raw string) string {
+		dec, err := c.decodeWire(bucket, prefix, raw)
+		if err != nil && !page.WireDecodeFailed {
+			page.WireDecodeFailed = true
+			page.WireDecodeFailedRaw = raw
+		}
+		return dec
+	}
+	page.NextKeyMarker = decode(page.NextKeyMarker)
 	page.Versions = make([]VersionEntry, 0, len(out.Versions)+len(out.DeleteMarkers))
 	for i := range out.Versions {
 		v := out.Versions[i]
 		page.Versions = append(page.Versions, VersionEntry{
-			Key:            c.decodeWire(bucket, prefix, aws.ToString(v.Key)),
+			Key:            decode(aws.ToString(v.Key)),
 			VersionID:      aws.ToString(v.VersionId),
 			IsDeleteMarker: false,
 			LastModified:   aws.ToTime(v.LastModified),
@@ -234,7 +256,7 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 	for i := range out.DeleteMarkers {
 		v := out.DeleteMarkers[i]
 		page.Versions = append(page.Versions, VersionEntry{
-			Key:            c.decodeWire(bucket, prefix, aws.ToString(v.Key)),
+			Key:            decode(aws.ToString(v.Key)),
 			VersionID:      aws.ToString(v.VersionId),
 			IsDeleteMarker: true,
 			LastModified:   aws.ToTime(v.LastModified),
@@ -245,8 +267,7 @@ func (c *S3Client) ListVersionsPage(ctx context.Context, bucket, prefix string, 
 		// CommonPrefix 与 Key 同规则解码：它是 BFS 内部状态（下一轮 prefix），SDK 发
 		// 请求时会再 URL 编码一次，不解码会二次编码（photos%2F → photos%252F），服务端
 		// 解一层得到 photos%2F 匹配不到真实目录，BFS 漏扫。
-		cp := c.decodeWire(bucket, prefix, aws.ToString(out.CommonPrefixes[i].Prefix))
-		page.CommonPrefixes = append(page.CommonPrefixes, cp)
+		page.CommonPrefixes = append(page.CommonPrefixes, decode(aws.ToString(out.CommonPrefixes[i].Prefix)))
 	}
 	// 短响应触发的 next-marker 修复（cfg.RepairNextVIDMarkerOnShortResponse=true 时启用）。
 	// 触发条件：IsTruncated=true 且本页条目数（Version+DeleteMarker+CommonPrefix）< maxKeys

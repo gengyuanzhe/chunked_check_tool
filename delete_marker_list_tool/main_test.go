@@ -242,6 +242,74 @@ func TestRun_ShortResponseWarning(t *testing.T) {
 		t.Errorf("delete_markers.txt missing a.txt marker: %q", dm)
 	}
 }
+// TestRun_WireDecodeFailedWarning 验证 encoding_type_url=true 时服务端返回
+// 非法 %XX（如 %ZZ——非 hex pair，服务端 bug 场景）在 s3client 出口 decodeWire
+// 解码失败后，Warn 行被写入 list_failed.log。这是 best-effort 路径——页请求本身
+// HTTP 200 成功，list_failed.txt 不写；但翻页 marker 错位会导致后续漏扫，故需要
+// 在 list_failed.log 留信号让运维定位。Warn 与 short-response/next-vid-rewrite 同级，
+// 不依赖 cfg.DebugLog（生产环境通常不开 DebugLog，否则这条信号会被吞掉）。
+func TestRun_WireDecodeFailedWarning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		q := r.URL.Query()
+		if !q.Has("versions") {
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`))
+			return
+		}
+		// 单页：1 个 delete marker + 非法 %ZZ 的 NextKeyMarker（%ZZ 不是合法 hex pair，
+		// url.QueryUnescape 必失败）。IsTruncated=false 让流程正常收尾。
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+<Name>testbucket</Name><Prefix></Prefix><EncodingType>url</EncodingType>
+<IsTruncated>false</IsTruncated>
+<NextKeyMarker>bad%ZZkey</NextKeyMarker>
+<DeleteMarker><Key>a.txt</Key><VersionId>dm-a</VersionId><IsLatest>true</IsLatest><LastModified>2026-01-02T15:04:05.000Z</LastModified></DeleteMarker>
+</ListVersionsResult>`))
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgBody := strings.Join([]string{
+		"endpoints:",
+		"  - " + srv.Listener.Addr().String(),
+		"scheme: http",
+		"ak: a",
+		"sk: s",
+		"list_type: 1",
+		"max_keys: 500",
+		"list_concurrency: 1",
+		"encoding_type_url: true",
+		"output_dir: " + filepath.Join(dir, "out"),
+		"output_dir_timestamp: false",
+		"",
+	}, "\n")
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(cfgPath, "testbucket", []RetryEntry{{Prefix: ""}}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	logBytes, err := os.ReadFile(filepath.Join(dir, "out", "list_failed.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logStr := string(logBytes)
+	if !strings.Contains(logStr, "wire url decode failed") {
+		t.Errorf("list_failed.log missing wire-decode-failed warning: %q", logStr)
+	}
+	if !strings.Contains(logStr, "raw=bad%ZZkey") {
+		t.Errorf("warning missing raw value: %q", logStr)
+	}
+	// list_failed.txt 不应被创建——这是警告不是失败。
+	if _, err := os.Stat(filepath.Join(dir, "out", "list_failed.txt")); !os.IsNotExist(err) {
+		t.Errorf("list_failed.txt should not exist for a warning: %v", err)
+	}
+}
+
 // TestRun_Mode2_StartupEndpointFailureExits 验证 mode 2 启动期 fail-fast：
 // 配置含一个 dead endpoint，启动期对它做 BucketExists 预检失败 → run 直接 return err。
 // 这取代了旧的"运行中 endpoint 故障 worker 继续"测试——新架构下 client 在启动期
