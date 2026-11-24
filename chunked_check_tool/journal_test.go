@@ -913,7 +913,7 @@ func TestJournalEnabledOnlyMode2S3List(t *testing.T) {
 		t.Helper()
 		dir := t.TempDir()
 		cfgPath := filepath.Join(dir, "cfg.yaml")
-		if err := os.WriteFile(cfgPath, []byte(cfgYAML+"output_dir: "+dir+"\n"), 0644); err != nil {
+		if err := os.WriteFile(cfgPath, []byte(cfgYAML+"max_keys: 1000\noutput_dir: "+dir+"\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
 		cfg, err := LoadConfig(cfgPath)
@@ -940,7 +940,7 @@ func TestJournalEnabledOnlyMode2S3List(t *testing.T) {
 	// -check-file: file input, no journal even though list_type=2.
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "cfg.yaml")
-	cfgContent := "endpoints:\n  - 127.0.0.1:1\nscheme: http\nak: test\nsk: test\n" +
+	cfgContent := "endpoints:\n  - 127.0.0.1:1\nscheme: http\nak: test\nsk: test\nmax_keys: 1000\n" +
 		"list_type: 2\nlist_concurrency: 2\ncheck_concurrency: 2\noutput_dir: " + dir + "\n" +
 		"is_check: true\nprogress_interval: 1000\n"
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {

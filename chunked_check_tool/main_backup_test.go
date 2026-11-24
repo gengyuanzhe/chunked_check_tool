@@ -261,7 +261,7 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 		"scheme: http\nak: test\nsk: test\n" +
 		"list_api_version: 2\nlist_concurrency: 2\ncheck_concurrency: 2\n" +
 		"output_dir: " + dir + "\nbackup_output_dir: " + dir + "\nprogress_interval: 1000\n" +
-		"backup_bucket: dstbucket\n"
+		"backup_bucket: dstbucket\nmax_keys: 1000\n"
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
 		t.Fatal(err)
 	}

@@ -278,7 +278,7 @@ func TestRunInterruptedDrainsQueue(t *testing.T) {
 		"scheme: http\nak: test\nsk: test\n" +
 		"list_type: 2\nlist_api_version: 2\n" +
 		"list_concurrency: 2\ncheck_concurrency: 2\n" +
-		"output_dir: " + dir + "\nis_check: true\nprogress_interval: 1000\n"
+		"output_dir: " + dir + "\nis_check: true\nprogress_interval: 1000\nmax_keys: 1000\n"
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
 		t.Fatal(err)
 	}
