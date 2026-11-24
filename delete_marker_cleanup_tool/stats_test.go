@@ -62,13 +62,16 @@ func TestProgressPrinterCheck(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		s.IncrMarker()
 	}
-	p.MaybePrintCheck(&s, 10)
+	p.MaybePrintCheck(&s, 10, 0)
 	out := buf.String()
 	if !strings.Contains(out, "marker=5") {
 		t.Errorf("missing marker=5: %q", out)
 	}
 	if !strings.Contains(out, "not_marker=0") {
 		t.Errorf("missing not_marker=0: %q", out)
+	}
+	if !strings.Contains(out, "worker=0") {
+		t.Errorf("missing worker=0: %q", out)
 	}
 }
 
@@ -80,9 +83,12 @@ func TestProgressPrinterDelete(t *testing.T) {
 	for i := 0; i < 7; i++ {
 		s.IncrDeleted()
 	}
-	p.MaybePrintDelete(&s, 10)
+	p.MaybePrintDelete(&s, 10, 0)
 	out := buf.String()
 	if !strings.Contains(out, "deleted=7") {
 		t.Errorf("missing deleted=7: %q", out)
+	}
+	if !strings.Contains(out, "worker=0") {
+		t.Errorf("missing worker=0: %q", out)
 	}
 }

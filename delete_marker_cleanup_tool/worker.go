@@ -112,9 +112,9 @@ func RunWorkers(ctx context.Context, cfg *Config, mode, inputPath string, client
 				local++
 				if local >= interval {
 					if mode == "check" {
-						progress.MaybePrintCheck(stats, local)
+						progress.MaybePrintCheck(stats, local, idx)
 					} else {
-						progress.MaybePrintDelete(stats, local)
+						progress.MaybePrintDelete(stats, local, idx)
 					}
 					local = 0
 				}

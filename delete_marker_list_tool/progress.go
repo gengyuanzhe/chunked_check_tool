@@ -50,11 +50,13 @@ func (p *ProgressPrinter) SetQueueSnapshotProvider(fn func() QueueSnapshot) {
 
 // MaybePrint 在 count >= interval 时打印一行进度。label 是字段名
 // （"scanned"），count 是 worker 自上次打印以来的本地累积值。
+// workerID 是调用 worker 的编号（mode 1 单 worker 传 0），打在 progress 行里
+// 让用户在多 worker 并发下看 progress 节奏时能定位到具体 worker。
 // latency 是 1min 窗口的 ListObjectVersions 时延（avg/max），非全局平均。
 // heap 是 runtime.MemStats.HeapInuse（当前堆已分配含碎片，单位 MiB）——
 // 让用户看到 BFS 队列堆积对应的内存压力。ReadMemStats 会 STW，但 progress
 // 每 interval 条打一次（默认 5000），开销可忽略。
-func (p *ProgressPrinter) MaybePrint(s *Stats, label string, count int) {
+func (p *ProgressPrinter) MaybePrint(s *Stats, label string, count, workerID int) {
 	if count < p.interval {
 		return
 	}
@@ -71,13 +73,13 @@ func (p *ProgressPrinter) MaybePrint(s *Stats, label string, count int) {
 	defer p.mu.Unlock()
 	if p.queueSnapshot != nil {
 		fmt.Fprintf(p.w,
-			"[progress] scanned=%d versions=%d markers=%d list_failed=%d (q=%d) latency_avg_ms=%.2f latency_max_ms=%.2f heap=%.1fMiB\n",
-			snap.Scanned, snap.Versions, snap.DeleteMarkers, snap.ListFailed,
+			"[progress] worker=%d scanned=%d versions=%d markers=%d list_failed=%d (q=%d) latency_avg_ms=%.2f latency_max_ms=%.2f heap=%.1fMiB\n",
+			workerID, snap.Scanned, snap.Versions, snap.DeleteMarkers, snap.ListFailed,
 			qs.Prefix, lat.AvgMs, lat.MaxMs, heapMiB)
 	} else {
 		fmt.Fprintf(p.w,
-			"[progress] scanned=%d versions=%d markers=%d list_failed=%d latency_avg_ms=%.2f latency_max_ms=%.2f heap=%.1fMiB\n",
-			snap.Scanned, snap.Versions, snap.DeleteMarkers, snap.ListFailed, lat.AvgMs, lat.MaxMs, heapMiB)
+			"[progress] worker=%d scanned=%d versions=%d markers=%d list_failed=%d latency_avg_ms=%.2f latency_max_ms=%.2f heap=%.1fMiB\n",
+			workerID, snap.Scanned, snap.Versions, snap.DeleteMarkers, snap.ListFailed, lat.AvgMs, lat.MaxMs, heapMiB)
 	}
 }
 

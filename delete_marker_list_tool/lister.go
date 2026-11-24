@@ -85,7 +85,7 @@ func (l *Lister) runMode1(ctx context.Context, bucket string, entry RetryEntry) 
 			}
 			localCount++
 			if localCount >= interval {
-				l.progress.MaybePrint(l.stats, "scanned", localCount)
+				l.progress.MaybePrint(l.stats, "scanned", localCount, 0)
 				localCount = 0
 			}
 		}
@@ -94,7 +94,7 @@ func (l *Lister) runMode1(ctx context.Context, bucket string, entry RetryEntry) 
 		}
 		keyMarker, versionIDMarker = page.NextKeyMarker, page.NextVersionIDMarker
 	}
-	l.progress.MaybePrint(l.stats, "scanned", localCount)
+	l.progress.MaybePrint(l.stats, "scanned", localCount, 0)
 	return nil
 }
 
@@ -179,7 +179,7 @@ func (l *Lister) runMode2(ctx context.Context, bucket string, entries []RetryEnt
 				if !ok {
 					return
 				}
-				failed := l.processPrefixWithClient(ctx, wc, bucket, e, q, &inflight, lc)
+				failed := l.processPrefixWithClient(ctx, wc, bucket, e, q, &inflight, lc, idx)
 				if failed {
 					consecFails++
 				} else {
@@ -209,7 +209,7 @@ func (l *Lister) runMode2(ctx context.Context, bucket string, entries []RetryEnt
 //
 // inflight.Add(-1) 在 defer 里——无论失败/成功都把"在处理"计数减掉。
 // 第一页和后续页用同一个 processPage helper，避免逻辑重复。
-func (l *Lister) processPrefixWithClient(ctx context.Context, wc *S3Client, bucket string, entry RetryEntry, q *queue, inflight *atomic.Int64, lc *localCounter) (failed bool) {
+func (l *Lister) processPrefixWithClient(ctx context.Context, wc *S3Client, bucket string, entry RetryEntry, q *queue, inflight *atomic.Int64, lc *localCounter, workerID int) (failed bool) {
 	defer inflight.Add(-1)
 	interval := l.progress.Interval()
 	keyMarker, versionIDMarker := entry.KeyMarker, entry.VersionIDMarker
@@ -231,7 +231,7 @@ func (l *Lister) processPrefixWithClient(ctx context.Context, wc *S3Client, buck
 			l.stats.IncrCommonPrefixes()
 			lc.count++
 			if lc.count >= interval {
-				l.progress.MaybePrint(l.stats, "scanned", lc.count)
+				l.progress.MaybePrint(l.stats, "scanned", lc.count, workerID)
 				lc.count = 0
 			}
 		}
@@ -244,7 +244,7 @@ func (l *Lister) processPrefixWithClient(ctx context.Context, wc *S3Client, buck
 			}
 			lc.count++
 			if lc.count >= interval {
-				l.progress.MaybePrint(l.stats, "scanned", lc.count)
+				l.progress.MaybePrint(l.stats, "scanned", lc.count, workerID)
 				lc.count = 0
 			}
 		}

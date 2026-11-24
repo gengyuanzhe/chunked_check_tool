@@ -64,11 +64,11 @@ func TestProgressPrinterMaybePrintThreshold(t *testing.T) {
 	p := NewProgressPrinter(&buf)
 	var s Stats
 	// First call at count=1 with default interval 5000 should NOT print.
-	p.MaybePrint(&s, "scanned", 1)
+	p.MaybePrint(&s, "scanned", 1, 0)
 	if buf.Len() != 0 {
 		t.Errorf("expected no print below threshold, got %q", buf.String())
 	}
-	p.MaybePrint(&s, "scanned", 5000)
+	p.MaybePrint(&s, "scanned", 5000, 0)
 	if buf.Len() == 0 {
 		t.Errorf("expected progress line at threshold")
 	}
@@ -82,7 +82,7 @@ func TestProgressPrinterWithQueueSnapshot(t *testing.T) {
 	})
 	var s Stats
 	s.IncrVersions()
-	p.MaybePrint(&s, "scanned", 5000)
+	p.MaybePrint(&s, "scanned", 5000, 0)
 	out := buf.String()
 	if !strings.Contains(out, "q=3") {
 		t.Errorf("missing q=3: %q", out)
@@ -96,6 +96,9 @@ func TestProgressPrinterWithQueueSnapshot(t *testing.T) {
 	if !strings.Contains(out, "versions=") {
 		t.Errorf("missing versions= field: %q", out)
 	}
+	if !strings.Contains(out, "worker=0") {
+		t.Errorf("missing worker=0 field: %q", out)
+	}
 }
 
 func TestProgressPrinterCustomInterval(t *testing.T) {
@@ -103,11 +106,11 @@ func TestProgressPrinterCustomInterval(t *testing.T) {
 	p := NewProgressPrinter(&buf)
 	p.SetInterval(10)
 	var s Stats
-	p.MaybePrint(&s, "scanned", 9)
+	p.MaybePrint(&s, "scanned", 9, 0)
 	if buf.Len() != 0 {
 		t.Errorf("expected no print at 9 with interval 10")
 	}
-	p.MaybePrint(&s, "scanned", 10)
+	p.MaybePrint(&s, "scanned", 10, 0)
 	if buf.Len() == 0 {
 		t.Errorf("expected print at 10 with interval 10")
 	}
