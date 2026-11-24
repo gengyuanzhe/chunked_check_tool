@@ -33,6 +33,11 @@ type Stats struct {
 	listLatencySumNs      atomic.Int64
 	getCalls              atomic.Int64
 	getLatencySumNs       atomic.Int64
+
+	// listLatency is the windowed LIST latency gauge for progress lines
+	// (latency_avg_ms/latency_max_ms) — distinct from the global
+	// listLatencySumNs/listCalls averages the summary reports.
+	listLatency *LatencyTracker
 	backupOkCount         atomic.Int64
 	backupFailedCount     atomic.Int64
 	backupMismatchCount   atomic.Int64
@@ -67,6 +72,8 @@ type StatsSnapshot struct {
 	ListParseFailed  int64
 	ListCalls        int64
 	ListAvgLatencyMs float64
+	ListLatencyAvgMs float64
+	ListLatencyMaxMs float64
 	ListTotalSec     float64
 	GetCalls         int64
 	GetAvgLatencyMs  float64
@@ -79,7 +86,13 @@ type StatsSnapshot struct {
 }
 
 func NewStats() *Stats {
-	return &Stats{}
+	return &Stats{listLatency: &LatencyTracker{}}
+}
+
+// SetListLatencyWindow sets the windowed LIST latency gauge's window (main
+// passes cfg.latency_window_sec through).
+func (s *Stats) SetListLatencyWindow(d time.Duration) {
+	s.listLatency.SetWindow(d)
 }
 
 func (s *Stats) IncrListedObject()     { s.listedObjectsCount.Add(1) }
@@ -101,6 +114,7 @@ func (s *Stats) IncrReadLine()         { s.readLines.Add(1) }
 func (s *Stats) AddListCall(latency time.Duration) {
 	s.listCalls.Add(1)
 	s.listLatencySumNs.Add(int64(latency))
+	s.listLatency.Record(latency)
 }
 
 // AddGetCall records one RangeGet invocation's latency. Called once per
@@ -130,6 +144,7 @@ func (s *Stats) Snapshot() StatsSnapshot {
 	}
 	listedObj := s.listedObjectsCount.Load()
 	listedMp := s.listedMpCount.Load()
+	latSnap := s.listLatency.Snapshot()
 	return StatsSnapshot{
 		ListedObjects:    listedObj,
 		ListedMp:         listedMp,
@@ -145,6 +160,8 @@ func (s *Stats) Snapshot() StatsSnapshot {
 		ListParseFailed:  s.listParseFailedCount.Load(),
 		ListCalls:        calls,
 		ListAvgLatencyMs: avgMs,
+		ListLatencyAvgMs: latSnap.AvgMs,
+		ListLatencyMaxMs: latSnap.MaxMs,
 		ListTotalSec:     time.Duration(s.listTotalDurationNs.Load()).Seconds(),
 		GetCalls:         getCalls,
 		GetAvgLatencyMs:  getAvgMs,

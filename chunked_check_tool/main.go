@@ -300,6 +300,7 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 		return fmt.Errorf("output: %w", err)
 	}
 	stats := NewStats()
+	stats.SetListLatencyWindow(time.Duration(cfg.LatencyWindowSec) * time.Second)
 	mode := ModeListCheck
 	switch {
 	case fileInput == FileInputCheckFile:

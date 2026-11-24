@@ -87,14 +87,19 @@ func (p *ProgressPrinter) MaybePrint(stats *Stats, label string, count int) {
 			snap.BackupMismatch,
 			snap.GetCalls, snap.GetAvgLatencyMs, label, count)
 	default:
+		// latency_avg_ms/latency_max_ms are WINDOWED (default 60s,
+		// cfg.latency_window_sec): the current batch's LIST latency, not
+		// the global list_avg_ms — early spikes dilute a global average
+		// until it hides current-batch server health.
 		fmt.Fprintf(p.w,
-			"[progress] list_all=%d list_obj=%d list_mp=%d ok_obj=%d corrupt_obj=%d ok_mp=%d corrupt_mp=%d list_failed=%d list_parse_failed=%d check_failed=%d mp_check_failed=%d list_calls=%d list_avg_ms=%.2f get_calls=%d get_avg_ms=%.2f (%s=%d)",
+			"[progress] list_all=%d list_obj=%d list_mp=%d ok_obj=%d corrupt_obj=%d ok_mp=%d corrupt_mp=%d list_failed=%d list_parse_failed=%d check_failed=%d mp_check_failed=%d list_calls=%d list_avg_ms=%.2f latency_avg_ms=%.2f latency_max_ms=%.2f get_calls=%d get_avg_ms=%.2f (%s=%d)",
 			snap.ListedAll, snap.ListedObjects, snap.ListedMp,
 			snap.OkObjects, snap.CorruptedObjects,
 			snap.OkMp, snap.CorruptedMp,
 			snap.ListFailed, snap.ListParseFailed, snap.CheckFailed,
 			snap.MpCheckFailed,
 			snap.ListCalls, snap.ListAvgLatencyMs,
+			snap.ListLatencyAvgMs, snap.ListLatencyMaxMs,
 			snap.GetCalls, snap.GetAvgLatencyMs,
 			label, count,
 		)
