@@ -57,9 +57,10 @@ func TestLister_Mode1_HappyPath(t *testing.T) {
 	out.FlushAndWait()
 	out.Close()
 
-	// mode 1 流里 3 个版本（dm-a, reg-a, dm-c），无 common prefix。
-	if got := stats.Snapshot().Versions; got != 3 {
-		t.Errorf("Versions=%d, want 3", got)
+	// mode 1 流里 3 个版本条目：dm-a（marker）+ reg-a（普通 version）+ dm-c（marker）。
+	// versions 仅算普通版本（reg-a），delete_markers 算 marker，无 common prefix。
+	if got := stats.Snapshot().Versions; got != 1 {
+		t.Errorf("Versions=%d, want 1 (only regular versions)", got)
 	}
 
 	b := readFile(t, filepath.Join(dir, "delete_markers.txt"))
@@ -144,8 +145,9 @@ func TestLister_Mode2_RetryMultiplePrefixes(t *testing.T) {
 	out.FlushAndWait()
 	out.Close()
 
-	if got, want := stats.Snapshot().Versions, int64(2); got != want {
-		t.Errorf("Versions=%d, want %d", got, want)
+	// 两个 prefix 各 1 个 delete marker，无普通 version。
+	if got, want := stats.Snapshot().Versions, int64(0); got != want {
+		t.Errorf("Versions=%d, want %d (no regular versions, all delete markers)", got, want)
 	}
 	if got, want := stats.Snapshot().DeleteMarkers, int64(2); got != want {
 		t.Errorf("DeleteMarkers=%d, want %d", got, want)
@@ -219,10 +221,9 @@ func TestLister_Mode2_KeyEndingInSlashWithNullVersion(t *testing.T) {
 	out.FlushAndWait()
 	out.Close()
 
-	// 期望：1 个真实版本（key 以 / 结尾但 VersionId=null，不是 common prefix stub），
-	// 1 个 delete marker。
-	if got, want := stats.Snapshot().Versions, int64(1); got != want {
-		t.Errorf("Versions=%d, want %d (key ending in / with VersionId=null is a real version, not a common prefix stub)", got, want)
+	// 期望：1 个 delete marker（key 以 / 结尾、VersionId=null，不是 common prefix stub）。
+	if got, want := stats.Snapshot().Versions, int64(0); got != want {
+		t.Errorf("Versions=%d, want %d (entry is a delete marker, not a regular version)", got, want)
 	}
 	if got, want := stats.Snapshot().DeleteMarkers, int64(1); got != want {
 		t.Errorf("DeleteMarkers=%d, want %d", got, want)
@@ -288,7 +289,8 @@ func TestLister_Mode2_KeyEndingInSlashAsVersion(t *testing.T) {
 	out.FlushAndWait()
 	out.Close()
 
-	// 期望：1 个真实版本被统计。bug：isCommonPrefix 误判 → 死循环，versions=0。
+	// 期望：1 个普通版本被统计（<Version> 标签，非 delete marker）。
+	// bug：isCommonPrefix 误判 → 死循环，versions=0。
 	if got, want := stats.Snapshot().Versions, int64(1); got != want {
 		t.Errorf("Versions=%d, want %d (key ending in / as <Version> is a real version, not a common prefix stub)", got, want)
 	}
@@ -371,10 +373,10 @@ func TestLister_Mode2_BFSWithCommonPrefix(t *testing.T) {
 	out.FlushAndWait()
 	out.Close()
 
-	// versions 必须统计所有版本（dm-a, reg-a, dm-c = 3），不含
-	// common-prefix stub（sub/）。delete_markers 只统计 delete marker（2）。
-	if got, want := stats.Snapshot().Versions, int64(3); got != want {
-		t.Errorf("Versions=%d, want %d (markers + regular versions, no common-prefix stubs)", got, want)
+	// versions 仅算普通版本（reg-a = 1），不含 delete marker（dm-a, dm-c）也不含
+	// common-prefix stub（sub/）。delete_markers 算 marker（2）。
+	if got, want := stats.Snapshot().Versions, int64(1); got != want {
+		t.Errorf("Versions=%d, want %d (only regular versions, no markers, no common-prefix stubs)", got, want)
 	}
 	if got, want := stats.Snapshot().DeleteMarkers, int64(2); got != want {
 		t.Errorf("DeleteMarkers=%d, want %d", got, want)

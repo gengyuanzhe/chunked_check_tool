@@ -77,12 +77,13 @@ func (l *Lister) runMode1(ctx context.Context, bucket string, entry RetryEntry) 
 		l.checkNextVIDMarkerRewrite(entry.Prefix, keyMarker, page)
 		l.checkWireDecodeFailed(entry.Prefix, keyMarker, page)
 		for _, obj := range page.Versions {
-			l.stats.IncrVersions()
-			localCount++
 			if obj.IsDeleteMarker {
 				l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified))
 				l.stats.IncrDeleteMarkers()
+			} else {
+				l.stats.IncrVersions()
 			}
+			localCount++
 			if localCount >= interval {
 				l.progress.MaybePrint(l.stats, "scanned", localCount)
 				localCount = 0
@@ -235,12 +236,13 @@ func (l *Lister) processPrefixWithClient(ctx context.Context, wc *S3Client, buck
 			}
 		}
 		for _, obj := range page.Versions {
-			l.stats.IncrVersions()
-			lc.count++
 			if obj.IsDeleteMarker {
 				l.out.WriteDeleteMarker(obj.Key, obj.VersionID, formatLastModified(obj.LastModified))
 				l.stats.IncrDeleteMarkers()
+			} else {
+				l.stats.IncrVersions()
 			}
+			lc.count++
 			if lc.count >= interval {
 				l.progress.MaybePrint(l.stats, "scanned", lc.count)
 				lc.count = 0

@@ -173,10 +173,10 @@ func TestIntegration_Mode2_RetryFromFailedList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 每个 prefix 下有 2 个版本（1 put + 1 delete marker），共 4 个 versions
-	// + 2 个 delete_markers。versions 包含所有版本（含 put），不是只算 marker。
-	if !strings.Contains(string(rl), "versions=4") {
-		t.Errorf("run.log missing versions=4: %q", rl)
+	// 每个 prefix 下有 2 个版本条目（1 put → versions + 1 delete marker → delete_markers）。
+	// 共 2 个普通 versions + 2 个 delete_markers。
+	if !strings.Contains(string(rl), "versions=2") {
+		t.Errorf("run.log missing versions=2: %q", rl)
 	}
 	if !strings.Contains(string(rl), "delete_markers=2") {
 		t.Errorf("run.log missing delete_markers=2: %q", rl)
@@ -263,10 +263,10 @@ func TestIntegration_Mode2_PageLevelMarkerResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 第 1 页扫了 2 个版本（m1.txt 的 put+delete），retry 从 marker 起只扫剩下 4 个版本
-	// （m2.txt 和 m3.txt 各 put+delete）。
-	if !strings.Contains(string(rl), "versions=4") {
-		t.Errorf("run.log missing versions=4 (marker resume): %q", rl)
+	// 第 1 页扫了 2 个版本条目（m1.txt 的 put+delete），retry 从 marker 起只扫剩下 4 个版本条目
+	// （m2.txt 和 m3.txt 各 put+delete）。其中 2 个是普通 version（put），2 个是 delete marker。
+	if !strings.Contains(string(rl), "versions=2") {
+		t.Errorf("run.log missing versions=2 (marker resume): %q", rl)
 	}
 	if !strings.Contains(string(rl), "delete_markers=2") {
 		t.Errorf("run.log missing delete_markers=2: %q", rl)

@@ -11,13 +11,14 @@ import (
 // Latency 是 1min 窗口的 ListObjectVersions 时延统计——progress 打印窗口
 // avg/max，非全局平均（长跑中全局平均被早期毛刺稀释，看不出当前批的健康度）。
 //
-// 字段语义：
-//   versions       — 实际列举到的 version 条目数（含普通对象 + delete marker）
-//   commonPrefixes — delimiter=/ 列举到的子目录数（mode 1 用 recursive 不带 delimiter，恒为 0）
-//   deleteMarkers  — versions 子集，仅 delete marker
-//   listFailed     — ListVersionsPage 失败次数
+// 字段语义（严格按 S3 XML 标签划分，互斥）：
 //
-// Scanned = versions + commonPrefixes，用作 progress 打印阈值与 summary 展示，
+//	versions       — 仅 <Version>（普通版本，有数据），不含 delete marker
+//	deleteMarkers  — 仅 <DeleteMarker>
+//	commonPrefixes — delimiter=/ 列举到的子目录数（mode 1 用 recursive 不带 delimiter，恒为 0）
+//	listFailed     — ListVersionsPage 失败次数
+//
+// Scanned = versions + deleteMarkers + commonPrefixes，用作 progress 打印阈值与 summary 展示，
 // 让 mode 2 下行期（大量 common prefix、几乎无 version）也能稳定推进打印。
 type Stats struct {
 	versions        atomic.Int64
@@ -30,8 +31,8 @@ type Stats struct {
 
 // StatsSnapshot 是 Stats 的值快照。
 type StatsSnapshot struct {
-	Scanned        int64 // Versions + CommonPrefixes
-	Versions       int64
+	Scanned        int64 // Versions + DeleteMarkers + CommonPrefixes
+	Versions       int64 // 仅普通版本
 	CommonPrefixes int64
 	DeleteMarkers  int64
 	ListFailed     int64
@@ -41,7 +42,7 @@ type StatsSnapshot struct {
 func (s *Stats) IncrVersions()       { s.versions.Add(1) }
 func (s *Stats) IncrCommonPrefixes() { s.commonPrefixes.Add(1) }
 func (s *Stats) IncrDeleteMarkers()  { s.deleteMarkers.Add(1) }
-func (s *Stats) IncrListFailed()      { s.listFailed.Add(1) }
+func (s *Stats) IncrListFailed()     { s.listFailed.Add(1) }
 
 func (s *Stats) SetTotalDuration(d time.Duration) {
 	s.totalDurationNs.Store(int64(d))
@@ -49,14 +50,15 @@ func (s *Stats) SetTotalDuration(d time.Duration) {
 
 func (s *Stats) Snapshot() StatsSnapshot {
 	v := s.versions.Load()
+	dm := s.deleteMarkers.Load()
 	cp := s.commonPrefixes.Load()
 	return StatsSnapshot{
-		Scanned:         v + cp,
-		Versions:        v,
-		CommonPrefixes:  cp,
-		DeleteMarkers:   s.deleteMarkers.Load(),
-		ListFailed:      s.listFailed.Load(),
-		TotalSec:        float64(s.totalDurationNs.Load()) / 1e9,
+		Scanned:        v + dm + cp,
+		Versions:       v,
+		CommonPrefixes: cp,
+		DeleteMarkers:  dm,
+		ListFailed:     s.listFailed.Load(),
+		TotalSec:       float64(s.totalDurationNs.Load()) / 1e9,
 	}
 }
 

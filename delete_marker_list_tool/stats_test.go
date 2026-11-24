@@ -27,11 +27,11 @@ func TestStatsSnapshot(t *testing.T) {
 	if snap.CommonPrefixes != 30 {
 		t.Errorf("CommonPrefixes=%d want 30", snap.CommonPrefixes)
 	}
-	if snap.Scanned != 130 {
-		t.Errorf("Scanned=%d want 130 (versions+common_prefixes)", snap.Scanned)
-	}
 	if snap.DeleteMarkers != 7 {
 		t.Errorf("DeleteMarkers=%d want 7", snap.DeleteMarkers)
+	}
+	if snap.Scanned != 137 {
+		t.Errorf("Scanned=%d want 137 (versions + delete_markers + common_prefixes)", snap.Scanned)
 	}
 	if snap.ListFailed != 2 {
 		t.Errorf("ListFailed=%d want 2", snap.ListFailed)
