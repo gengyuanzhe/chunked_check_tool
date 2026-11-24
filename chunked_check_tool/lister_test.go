@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -135,7 +138,9 @@ type pageResult struct {
 type scriptedS3 struct {
 	pages map[string][]pageResult
 	calls int
-	mu    sync.Mutex
+	// lastMaxKeys records the maxKeys of the most recent ListPage call.
+	lastMaxKeys int
+	mu          sync.Mutex
 	// errOn, when non-nil, makes ListPage return the mapped error for the
 	// given prefix instead of consulting pages. Used to exercise subtree
 	// failure isolation in walker tests.
@@ -157,6 +162,7 @@ func (s *scriptedS3) ListPage(ctx context.Context, prefix, startAfter, continuat
 	}
 	p := pages[0]
 	s.pages[prefix] = pages[1:]
+	s.lastMaxKeys = maxKeys
 	return p.objs, p.prefixes, p.nextToken, nil
 }
 
@@ -201,3 +207,147 @@ func (s *scriptedS3) AbortMultipart(ctx context.Context, bucket, key, uploadID s
 }
 
 var _ S3API = (*scriptedS3)(nil)
+
+// TestListerShortResponseWarns — a truncated page that returns fewer entries
+// (objects + common prefixes) than the requested max_keys is a contradictory
+// server state and a classic pagination-quirk signal. It must Warn into
+// list_failed.log (not list_failed.txt — the page itself succeeded) and not
+// count as a failure. maxKeys=0 (unconfigured, direct Config construction)
+// disables the detection.
+func TestListerShortResponseWarns(t *testing.T) {
+	fake := &scriptedS3{
+		pages: map[string][]pageResult{
+			"root/": {
+				{objs: []ObjectInfo{{Key: "root/a", ETag: "0123456789abcdef0123456789abcdef"}}, prefixes: []string{"root/sub/"}, nextToken: "cursor-1"},
+			},
+			"root/sub/": {
+				{objs: []ObjectInfo{{Key: "root/sub/b", ETag: "0123456789abcdef0123456789abcdef"}}, nextToken: ""},
+			},
+		},
+	}
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, ListType: 2, ListConcurrency: 2, CheckConcurrency: 2, IsCheck: true, MaxKeys: 1000}
+	out, err := NewOutput(cfg, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatalf("NewOutput: %v", err)
+	}
+	stats := NewStats()
+	q := NewQueue()
+	lister := NewLister(q, out, stats, cfg)
+	objCh := make(chan VerifyTask, 8)
+	lister.Seed("root/")
+	var wg sync.WaitGroup
+	for i := 0; i < cfg.ListConcurrency; i++ {
+		wg.Add(1)
+		go lister.Run(context.Background(), context.Background(), &wg, objCh, i, fake, nil)
+	}
+	go func() {
+		wg.Wait()
+		close(objCh)
+	}()
+	for range objCh {
+	}
+	if err := out.Close(); err != nil {
+		t.Fatalf("out.Close: %v", err)
+	}
+	logBytes, err := os.ReadFile(filepath.Join(dir, "list_failed.log"))
+	if err != nil {
+		t.Fatalf("read list_failed.log: %v", err)
+	}
+	logStr := string(logBytes)
+	if !strings.Contains(logStr, "short response while truncated") {
+		t.Errorf("no short-response warn in list_failed.log:\n%s", logStr)
+	}
+	if !strings.Contains(logStr, "returned=2") || !strings.Contains(logStr, "max_keys=1000") {
+		t.Errorf("warn missing counts (returned=2 max_keys=1000):\n%s", logStr)
+	}
+	if got := stats.Snapshot().ListFailed; got != 0 {
+		t.Errorf("ListFailed = %d, want 0 (a warn is not a failure)", got)
+	}
+}
+
+// TestListerShortResponseDisabledWhenUnconfigured — MaxKeys=0 (direct Config
+// construction without LoadConfig) must not fire the detection: the client
+// does not know the effective page size, so "fewer than requested" is
+// undecidable.
+func TestListerShortResponseDisabledWhenUnconfigured(t *testing.T) {
+	fake := &scriptedS3{
+		pages: map[string][]pageResult{
+			"root/": {
+				{objs: []ObjectInfo{{Key: "root/a", ETag: "0123456789abcdef0123456789abcdef"}}, prefixes: []string{"root/sub/"}, nextToken: "cursor-1"},
+			},
+			"root/sub/": {
+				{objs: []ObjectInfo{{Key: "root/sub/b", ETag: "0123456789abcdef0123456789abcdef"}}, nextToken: ""},
+			},
+		},
+	}
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, ListType: 2, ListConcurrency: 2, CheckConcurrency: 2, IsCheck: true}
+	out, err := NewOutput(cfg, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatalf("NewOutput: %v", err)
+	}
+	stats := NewStats()
+	q := NewQueue()
+	lister := NewLister(q, out, stats, cfg)
+	objCh := make(chan VerifyTask, 8)
+	lister.Seed("root/")
+	var wg sync.WaitGroup
+	for i := 0; i < cfg.ListConcurrency; i++ {
+		wg.Add(1)
+		go lister.Run(context.Background(), context.Background(), &wg, objCh, i, fake, nil)
+	}
+	go func() {
+		wg.Wait()
+		close(objCh)
+	}()
+	for range objCh {
+	}
+	if err := out.Close(); err != nil {
+		t.Fatalf("out.Close: %v", err)
+	}
+	logBytes, err := os.ReadFile(filepath.Join(dir, "list_failed.log"))
+	if err != nil {
+		t.Fatalf("read list_failed.log: %v", err)
+	}
+	if strings.Contains(string(logBytes), "short response") {
+		t.Errorf("short-response warn fired with MaxKeys=0:\n%s", logBytes)
+	}
+}
+
+// TestListerPassesConfiguredMaxKeys — the ListPage call must carry the
+// configured max_keys (both the request size and the detection baseline).
+func TestListerPassesConfiguredMaxKeys(t *testing.T) {
+	fake := &scriptedS3{
+		pages: map[string][]pageResult{
+			"root/": {
+				{objs: []ObjectInfo{{Key: "root/a", ETag: "0123456789abcdef0123456789abcdef"}}, nextToken: ""},
+			},
+		},
+	}
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, ListType: 1, ListConcurrency: 2, CheckConcurrency: 2, IsCheck: true, MaxKeys: 500}
+	out, err := NewOutput(cfg, "test-bkt", FileInputNone)
+	if err != nil {
+		t.Fatalf("NewOutput: %v", err)
+	}
+	stats := NewStats()
+	q := NewQueue()
+	lister := NewLister(q, out, stats, cfg)
+	objCh := make(chan VerifyTask, 8)
+	lister.Seed("root/")
+	var wg sync.WaitGroup
+	for i := 0; i < cfg.ListConcurrency; i++ {
+		wg.Add(1)
+		go lister.Run(context.Background(), context.Background(), &wg, objCh, i, fake, nil)
+	}
+	go func() {
+		wg.Wait()
+		close(objCh)
+	}()
+	for range objCh {
+	}
+	if fake.lastMaxKeys != 500 {
+		t.Errorf("ListPage maxKeys = %d, want 500 (cfg.MaxKeys)", fake.lastMaxKeys)
+	}
+}

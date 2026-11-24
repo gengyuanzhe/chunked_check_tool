@@ -518,6 +518,24 @@ func (o *Output) FlushAndWait() {
 // debug_log, so they are visible in production runs.
 func (o *Output) ListLogger() *slog.Logger { return o.listLogger }
 
+// WriteShortResponseWarning records a contradictory server state: the page
+// said IsTruncated=true yet returned fewer entries (objects + common
+// prefixes) than the requested max_keys. That combination usually precedes
+// a server pagination quirk (e.g. a bogus next marker). The page itself
+// succeeded, so this is a Warn in list_failed.log — NOT a list_failed.txt
+// entry and NOT a failure count.
+func (o *Output) WriteShortResponseWarning(prefix, token string, returned, maxKeys int) {
+	if o.listLogger == nil {
+		return
+	}
+	o.listLogger.Warn("short response while truncated",
+		slog.String("bucket", orDash(o.bucket)),
+		slog.String("prefix", prefix),
+		slog.String("token", token),
+		slog.Int("returned", returned),
+		slog.Int("max_keys", maxKeys))
+}
+
 // renderLineFmt renders via the configured result_line_format.
 func (o *Output) renderLineFmt(w io.Writer, bucket string, ol ownerLine) {
 	o.lineFmt.writeTo(w, bucket, ol.ownerID, ol.key)

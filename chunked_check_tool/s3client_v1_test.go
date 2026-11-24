@@ -243,7 +243,7 @@ type bytesBufferLike struct {
 }
 
 func (w *bytesBufferLike) Write(p []byte) (int, error) { return w.b.Write(p) }
-func (w *bytesBufferLike) String() string             { return w.b.String() }
+func (w *bytesBufferLike) String() string              { return w.b.String() }
 
 func newCaptureLogger() *captureLogger {
 	w := &bytesBufferLike{}
@@ -330,8 +330,8 @@ func TestListPage_V1FallbackKeyDecoded(t *testing.T) {
 func TestListPage_V2TokenVerbatim(t *testing.T) {
 	core := &fakeCore{
 		v2Result: &s3.ListObjectsV2Output{
-			Contents:           []types.Object{v2Obj("a")},
-			IsTruncated:        aws.Bool(true),
+			Contents:              []types.Object{v2Obj("a")},
+			IsTruncated:           aws.Bool(true),
 			NextContinuationToken: aws.String("cHJlZml4L3h+W21pbmlv"),
 		},
 	}
@@ -375,8 +375,8 @@ func TestListPage_DecodesKeysAndPrefixes(t *testing.T) {
 func TestListPage_NoDecodeWithoutEncoding(t *testing.T) {
 	core := &fakeCore{
 		v2Result: &s3.ListObjectsV2Output{
-			Contents:       []types.Object{v2Obj("literal%2Bplus.txt")},
-			IsTruncated:    aws.Bool(true),
+			Contents:              []types.Object{v2Obj("literal%2Bplus.txt")},
+			IsTruncated:           aws.Bool(true),
 			NextContinuationToken: aws.String("tok"),
 		},
 	}

@@ -63,11 +63,12 @@ func runRecursiveWalk(listCtx, hardCtx context.Context, s3 S3API, prefix string,
 
 		continuationToken := ""
 		for {
-			objs, prefixes, next, err := s3.ListPage(listCtx, prefix, "", continuationToken, true, 1000)
+			objs, prefixes, next, err := s3.ListPage(listCtx, prefix, "", continuationToken, true, int(cfg.MaxKeys))
 			if err != nil {
 				recordFailure(prefix, continuationToken, err)
 				return
 			}
+			checkShortResponse(out, prefix, continuationToken, len(objs)+len(prefixes), next != "", cfg.MaxKeys)
 			for _, o := range objs {
 				if strings.Contains(o.Key, "|") {
 					out.WriteInvalidKey(o.Key)

@@ -155,11 +155,12 @@ func (l *Lister) recordListFailure(prefix, token string, err error) {
 func (l *Lister) processPrefix(listCtx, hardCtx context.Context, prefix, initialToken string, objCh chan<- VerifyTask, s3 S3API, onObject func()) {
 	continuationToken := initialToken
 	for {
-		objs, prefixes, next, err := s3.ListPage(listCtx, prefix, "", continuationToken, l.delim(), 1000)
+		objs, prefixes, next, err := s3.ListPage(listCtx, prefix, "", continuationToken, l.delim(), int(l.cfg.MaxKeys))
 		if err != nil {
 			l.recordListFailure(prefix, continuationToken, err)
 			return
 		}
+		checkShortResponse(l.out, prefix, continuationToken, len(objs)+len(prefixes), next != "", l.cfg.MaxKeys)
 		// Register the page's FULL object count and record this page's
 		// discoveries BEFORE any object of the page can reach a terminal
 		// state (the first objCh send). Two load-bearing orderings:
@@ -256,4 +257,18 @@ func (l *Lister) processPrefix(listCtx, hardCtx context.Context, prefix, initial
 // Mode 2 (BFS): true — CommonPrefixes are returned and enqueued.
 func (l *Lister) delim() bool {
 	return l.cfg.ListType == 2
+}
+
+// checkShortResponse warns when a truncated page returned fewer entries
+// (objects + common prefixes) than the requested max_keys — a contradictory
+// state that usually precedes a server pagination quirk. maxKeys <= 0
+// (config constructed without LoadConfig, e.g. tests) disables the check:
+// without knowing the requested page size, "fewer than requested" is
+// undecidable. Shared by the lister, the walker, and Mode 1's root loop —
+// every ListPage call site.
+func checkShortResponse(out *Output, prefix, token string, entries int, truncated bool, maxKeys int32) {
+	if maxKeys <= 0 || !truncated || entries >= int(maxKeys) {
+		return
+	}
+	out.WriteShortResponseWarning(prefix, token, entries, int(maxKeys))
 }

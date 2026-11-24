@@ -450,13 +450,14 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 		continuationToken := ""
 		abort := false
 		for !abort {
-			objs, subprefixes, next, err := seedWorker.ListPage(listCtx, prefix, sa, continuationToken, true, 1000)
+			objs, subprefixes, next, err := seedWorker.ListPage(listCtx, prefix, sa, continuationToken, true, int(cfg.MaxKeys))
 			if err != nil {
 				out.WriteListFailed(prefix, continuationToken)
 				out.WriteListFailedLog(prefix, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
 				stats.IncrListFailed()
 				break
 			}
+			checkShortResponse(out, prefix, continuationToken, len(objs)+len(subprefixes), next != "", cfg.MaxKeys)
 			sa = "" // continuation tokens take over after the first page
 			for _, o := range objs {
 				if strings.Contains(o.Key, "|") {
