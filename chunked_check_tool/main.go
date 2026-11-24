@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -311,6 +312,17 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 	printer := NewProgressPrinter(stdout, mode)
 	start := time.Now()
 
+	// Diagnostic loggers for the s3 clients: debugLogger carries the
+	// per-LIST-request marker diagnostics (debug_log gated, run.log via the
+	// stdout tee); listLogger is the list_failed.log slog — the production
+	// Warn sink for wire decode failures and short-response quirks, never
+	// gated on debug_log.
+	var debugLogger *slog.Logger
+	if cfg.DebugLog {
+		debugLogger = slog.New(slog.NewTextHandler(stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
+	listLogger := out.ListLogger()
+
 	objChCap := cfg.ObjChCapacity
 	if objChCap <= 0 {
 		// default: 4× check workers, floored at 2000
@@ -359,7 +371,7 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 	if cfg.IsCheck {
 		for i := 0; i < cfg.CheckConcurrency; i++ {
 			checkWg.Add(1)
-			workerS3 := newWorker(pool, i+cfg.ListConcurrency, cfg, bucket, stats)
+			workerS3 := newWorker(pool, i+cfg.ListConcurrency, cfg, bucket, stats, debugLogger, listLogger)
 			lc := &localCounter{interval: cfg.ProgressInterval, printer: printer}
 			go func(w S3API, lc *localCounter) {
 				defer checkWg.Done()
@@ -417,7 +429,7 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 	if cfg.ListType != 3 {
 		for i := 0; i < cfg.ListConcurrency; i++ {
 			listWg.Add(1)
-			workerS3 := newWorker(pool, i, cfg, bucket, stats)
+			workerS3 := newWorker(pool, i, cfg, bucket, stats, debugLogger, listLogger)
 			lc := &localCounter{interval: cfg.ProgressInterval, printer: printer}
 			onObject := func() { lc.incr(stats, "listed") }
 			go lister.Run(listCtx, hardCtx, &listWg, objCh, i, workerS3, onObject)
@@ -433,7 +445,7 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 	if cfg.ListType == 1 {
 		// Mode 1: root pagination with delimiter. Use a worker index past
 		// the list+check ranges so node assignment does not collide.
-		seedWorker := newWorker(pool, cfg.ListConcurrency+cfg.CheckConcurrency, cfg, bucket, stats)
+		seedWorker := newWorker(pool, cfg.ListConcurrency+cfg.CheckConcurrency, cfg, bucket, stats, debugLogger, listLogger)
 		sa := startAfter
 		continuationToken := ""
 		abort := false
@@ -496,7 +508,7 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 		// Mode 3: recursive semaphore-bounded walk from the root. No queue,
 		// no list worker pool — one goroutine drives the walk and closes
 		// objCh when done. -nextmarker is ignored (same limitation as Mode 2).
-		walkS3 := newWorker(pool, cfg.ListConcurrency, cfg, bucket, stats)
+		walkS3 := newWorker(pool, cfg.ListConcurrency, cfg, bucket, stats, debugLogger, listLogger)
 		go func() {
 			runRecursiveWalk(listCtx, hardCtx, walkS3, prefix, objCh, out, stats, cfg, nil)
 			close(objCh)
@@ -594,7 +606,7 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 // newWorker builds a per-worker S3API bound to a single node via NodePool
 // round-robin assignment. If every node is failed, Assign returns -1 and we
 // fatal — the tool cannot run without at least one reachable endpoint.
-func newWorker(pool *NodePool, workerIdx int, cfg *Config, bucket string, stats *Stats) S3API {
+func newWorker(pool *NodePool, workerIdx int, cfg *Config, bucket string, stats *Stats, debugLogger, listLogger *slog.Logger) S3API {
 	nodeIdx := pool.Assign(workerIdx)
 	if nodeIdx < 0 {
 		log.Fatalf("no available nodes for worker %d", workerIdx)
@@ -604,7 +616,9 @@ func newWorker(pool *NodePool, workerIdx int, cfg *Config, bucket string, stats 
 	if err != nil {
 		log.Fatalf("s3 client (worker %d): %v", workerIdx, err)
 	}
-	return NewS3Client(client, bucket, stats, pool, nodeIdx, cfg)
+	w := NewS3Client(client, bucket, stats, pool, nodeIdx, cfg)
+	w.SetLoggers(debugLogger, listLogger)
+	return w
 }
 
 // runBackup drives the -backup-file pipeline: upload the input list to the
@@ -654,7 +668,7 @@ func runBackup(listCtx, hardCtx context.Context, cfg *Config, bucket, backupFile
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.CheckConcurrency; i++ {
 		wg.Add(1)
-		workerS3 := newWorker(pool, i, cfg, bucket, stats)
+		workerS3 := newWorker(pool, i, cfg, bucket, stats, nil, out.ListLogger())
 		lc := &localCounter{interval: cfg.ProgressInterval, printer: printer}
 		go func(w S3API, lc *localCounter) {
 			defer wg.Done()
@@ -697,7 +711,7 @@ func runBackup(listCtx, hardCtx context.Context, cfg *Config, bucket, backupFile
 func uploadBackupList(ctx context.Context, pool *NodePool, cfg *Config, bucket, backupFile string) error {
 	// Worker index past the backup worker pool (0..check_concurrency-1) so
 	// node assignment does not collide.
-	w := newWorker(pool, cfg.CheckConcurrency, cfg, bucket, NewStats())
+	w := newWorker(pool, cfg.CheckConcurrency, cfg, bucket, NewStats(), nil, nil)
 	base := strings.TrimSuffix(filepath.Base(backupFile), ".txt")
 	listKey := fmt.Sprintf(".backup_lists/%s_%s.txt", base, time.Now().Format("20060102_150405"))
 	if _, err := w.PutObjectLocal(ctx, cfg.BackupBucket, listKey, backupFile); err != nil {

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -213,6 +215,21 @@ type S3Client struct {
 	pool    *NodePool
 	nodeIdx int
 	cfg     *Config
+	// debugLogger receives per-LIST-request diagnostic lines (marker
+	// req/resp/err) at Debug level when cfg.debug_log is on; nil = silent.
+	debugLogger *slog.Logger
+	// listLogger receives production Warn signals (wire decode failures,
+	// short-response quirks) — it is the list_failed.log logger, NOT gated
+	// on debug_log; nil = silent (tests).
+	listLogger *slog.Logger
+}
+
+// SetLoggers wires the diagnostic loggers. debug receives per-request LIST
+// diagnostics (run.log, cfg.debug_log gated); list receives the Warn-level
+// production signals that belong in list_failed.log. Both are nil-safe.
+func (c *S3Client) SetLoggers(debug, list *slog.Logger) {
+	c.debugLogger = debug
+	c.listLogger = list
 }
 
 // NewS3Client builds an S3Client from an existing s3.Client and a bucket.
@@ -230,6 +247,63 @@ func NewS3Client(client *s3.Client, bucket string, stats *Stats, pool *NodePool,
 	}
 }
 
+// encodingTypeURL reports whether LIST requests carry EncodingType=url (and
+// therefore whether the response's key/prefix/marker fields arrive
+// URL-encoded on the wire).
+func (c *S3Client) encodingTypeURL() bool {
+	return c.cfg != nil && c.cfg.EncodingTypeURL
+}
+
+// wireDecoder is the "boundary A" egress decoder: when encoding_type_url is
+// on, the server URL-encodes key/prefix/marker fields on the wire (probe-
+// verified minio semantics: space→'+', '|'→%7C, literal '+'→%2B, '%'→%25,
+// '/' literal) and the SDK does NOT decode them. Everything crossing this
+// boundary is decoded to raw form exactly once, so the rest of the tool
+// (BFS prefixes, pagination markers, per-object keys) only ever sees raw
+// keys. With encoding off the decoder is a passthrough — unescaping raw
+// values would corrupt keys containing literal %XX/'+' sequences.
+//
+// The V2 continuation token is deliberately NOT decoded anywhere: it is
+// opaque base64 that may contain a literal '+' (probe-verified) —
+// QueryUnescape would turn it into a space and break pagination.
+//
+// A decode failure (stray %XX — server bug) keeps the raw value
+// (best-effort: the page request itself succeeded) and Warns exactly once
+// per page into listLogger / list_failed.log. The warn is not gated on
+// debug_log — production runs need the signal. A mis-decoded marker/prefix
+// can skew pagination, so the warn is the operator's cue to stop and probe.
+type wireDecoder struct {
+	c      *S3Client
+	bucket string
+	prefix string
+	warned bool
+}
+
+func (c *S3Client) newWireDecoder(prefix string) *wireDecoder {
+	return &wireDecoder{c: c, bucket: c.bucket, prefix: prefix}
+}
+
+func (d *wireDecoder) decode(raw string) string {
+	if !d.c.encodingTypeURL() || raw == "" {
+		return raw
+	}
+	dec, err := url.QueryUnescape(raw)
+	if err != nil {
+		if !d.warned {
+			d.warned = true
+			if d.c.listLogger != nil {
+				d.c.listLogger.Warn("wire url decode failed",
+					slog.String("bucket", d.bucket),
+					slog.String("prefix", d.prefix),
+					slog.String("raw", raw),
+					slog.Any("err", err))
+			}
+		}
+		return raw
+	}
+	return dec
+}
+
 // ListPage lists one page of objects under prefix.
 func (c *S3Client) ListPage(ctx context.Context, prefix, startAfter, continuationToken string, delim bool, maxKeys int) ([]ObjectInfo, []string, string, error) {
 	delimiter := ""
@@ -245,6 +319,7 @@ func (c *S3Client) ListPage(ctx context.Context, prefix, startAfter, continuatio
 	if err != nil {
 		return nil, nil, "", err
 	}
+	dec := c.newWireDecoder(prefix)
 	objs := make([]ObjectInfo, 0, len(result.contents))
 	for _, o := range result.contents {
 		var ownerID string
@@ -252,7 +327,7 @@ func (c *S3Client) ListPage(ctx context.Context, prefix, startAfter, continuatio
 			ownerID = aws.ToString(o.Owner.ID)
 		}
 		objs = append(objs, ObjectInfo{
-			Key:     aws.ToString(o.Key),
+			Key:     dec.decode(aws.ToString(o.Key)),
 			ETag:    trimETagQuotes(aws.ToString(o.ETag)),
 			Size:    aws.ToInt64(o.Size),
 			OwnerID: ownerID,
@@ -260,7 +335,7 @@ func (c *S3Client) ListPage(ctx context.Context, prefix, startAfter, continuatio
 	}
 	prefixes := make([]string, 0, len(result.commonPrefixes))
 	for _, cp := range result.commonPrefixes {
-		prefixes = append(prefixes, aws.ToString(cp.Prefix))
+		prefixes = append(prefixes, dec.decode(aws.ToString(cp.Prefix)))
 	}
 	return objs, prefixes, result.next, nil
 }
@@ -314,6 +389,9 @@ func (c *S3Client) listPageOnce(ctx context.Context, prefix, startAfter, continu
 		if maxKeys > 0 {
 			input.MaxKeys = aws.Int32(int32(maxKeys))
 		}
+		if c.encodingTypeURL() {
+			input.EncodingType = types.EncodingTypeUrl
+		}
 		r, err := c.api.ListObjects(ctx, input, opts...)
 		if c.stats != nil {
 			c.stats.AddListCall(time.Since(start))
@@ -336,6 +414,14 @@ func (c *S3Client) listPageOnce(ctx context.Context, prefix, startAfter, continu
 				next = aws.ToString(r.Contents[len(r.Contents)-1].Key)
 			}
 		}
+		// Both next sources (NextMarker and the last Contents key) are real
+		// keys and arrive wire-encoded when encoding_type_url is on. Decode
+		// at this egress so the caller feeds the raw form back as the next
+		// request's marker — an encoded marker round-trip skews the
+		// pagination position (probe-verified minio semantics). The next
+		// request then carries the raw marker, which the SDK query-encodes
+		// per normal HTTP rules.
+		next = c.newWireDecoder(prefix).decode(next)
 		return listResult{
 			contents:       r.Contents,
 			commonPrefixes: r.CommonPrefixes,
@@ -359,6 +445,9 @@ func (c *S3Client) listPageOnce(ctx context.Context, prefix, startAfter, continu
 	if maxKeys > 0 {
 		input.MaxKeys = aws.Int32(int32(maxKeys))
 	}
+	if c.encodingTypeURL() {
+		input.EncodingType = types.EncodingTypeUrl
+	}
 	r, err := c.api.ListObjectsV2(ctx, input, opts...)
 	if c.stats != nil {
 		c.stats.AddListCall(time.Since(start))
@@ -368,6 +457,10 @@ func (c *S3Client) listPageOnce(ctx context.Context, prefix, startAfter, continu
 	}
 	next := ""
 	if aws.ToBool(r.IsTruncated) {
+		// The V2 continuation token is opaque base64 and is NOT url-encoded
+		// by the server (probe-verified: a literal '+' passes through raw);
+		// never decode it here — verbatim round-trip is the correct
+		// semantics.
 		next = aws.ToString(r.NextContinuationToken)
 	}
 	return listResult{

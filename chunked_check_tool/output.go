@@ -512,6 +512,12 @@ func (o *Output) FlushAndWait() {
 	}
 }
 
+// ListLogger exposes the list_failed.log slog logger. The S3Client uses it
+// as the Warn-level sink for production signals (wire decode failures,
+// short-response quirks) — those belong in list_failed.log regardless of
+// debug_log, so they are visible in production runs.
+func (o *Output) ListLogger() *slog.Logger { return o.listLogger }
+
 // renderLineFmt renders via the configured result_line_format.
 func (o *Output) renderLineFmt(w io.Writer, bucket string, ol ownerLine) {
 	o.lineFmt.writeTo(w, bucket, ol.ownerID, ol.key)
