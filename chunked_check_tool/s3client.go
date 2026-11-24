@@ -376,6 +376,12 @@ func (c *S3Client) listPageOnce(ctx context.Context, prefix, startAfter, continu
 		if continuationToken != "" {
 			marker = continuationToken
 		}
+		if c.debugLogger != nil {
+			c.debugLogger.Debug("list-page req",
+				"api", "v1",
+				"bucket", c.bucket, "prefix", prefix,
+				"marker", marker, "delim", delimiter, "maxKeys", maxKeys)
+		}
 		input := &s3.ListObjectsInput{
 			Bucket: aws.String(c.bucket),
 			Prefix: aws.String(prefix),
@@ -397,6 +403,13 @@ func (c *S3Client) listPageOnce(ctx context.Context, prefix, startAfter, continu
 			c.stats.AddListCall(time.Since(start))
 		}
 		if err != nil {
+			if c.debugLogger != nil {
+				c.debugLogger.Debug("list-page err",
+					"api", "v1",
+					"bucket", c.bucket, "prefix", prefix,
+					"marker", marker, "delim", delimiter, "maxKeys", maxKeys,
+					"req_id", extractRequestID(err), "err", err)
+			}
 			return listResult{}, err
 		}
 		next := ""
@@ -422,6 +435,13 @@ func (c *S3Client) listPageOnce(ctx context.Context, prefix, startAfter, continu
 		// request then carries the raw marker, which the SDK query-encodes
 		// per normal HTTP rules.
 		next = c.newWireDecoder(prefix).decode(next)
+		if c.debugLogger != nil {
+			c.debugLogger.Debug("list-page resp",
+				"api", "v1",
+				"bucket", c.bucket, "prefix", prefix,
+				"next", next, "truncated", aws.ToBool(r.IsTruncated),
+				"nContents", len(r.Contents), "nCP", len(r.CommonPrefixes))
+		}
 		return listResult{
 			contents:       r.Contents,
 			commonPrefixes: r.CommonPrefixes,
@@ -448,11 +468,25 @@ func (c *S3Client) listPageOnce(ctx context.Context, prefix, startAfter, continu
 	if c.encodingTypeURL() {
 		input.EncodingType = types.EncodingTypeUrl
 	}
+	if c.debugLogger != nil {
+		c.debugLogger.Debug("list-page req",
+			"api", "v2",
+			"bucket", c.bucket, "prefix", prefix,
+			"startAfter", startAfter, "token", continuationToken,
+			"delim", delimiter, "maxKeys", maxKeys)
+	}
 	r, err := c.api.ListObjectsV2(ctx, input, opts...)
 	if c.stats != nil {
 		c.stats.AddListCall(time.Since(start))
 	}
 	if err != nil {
+		if c.debugLogger != nil {
+			c.debugLogger.Debug("list-page err",
+				"api", "v2",
+				"bucket", c.bucket, "prefix", prefix,
+				"token", continuationToken, "delim", delimiter, "maxKeys", maxKeys,
+				"req_id", extractRequestID(err), "err", err)
+		}
 		return listResult{}, err
 	}
 	next := ""
@@ -462,6 +496,13 @@ func (c *S3Client) listPageOnce(ctx context.Context, prefix, startAfter, continu
 		// never decode it here — verbatim round-trip is the correct
 		// semantics.
 		next = aws.ToString(r.NextContinuationToken)
+	}
+	if c.debugLogger != nil {
+		c.debugLogger.Debug("list-page resp",
+			"api", "v2",
+			"bucket", c.bucket, "prefix", prefix,
+			"next", next, "truncated", aws.ToBool(r.IsTruncated),
+			"nContents", len(r.Contents), "nCP", len(r.CommonPrefixes))
 	}
 	return listResult{
 		contents:       r.Contents,

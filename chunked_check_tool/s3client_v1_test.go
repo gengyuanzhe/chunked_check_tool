@@ -424,3 +424,96 @@ func TestListPage_WireDecodeFailureWarns(t *testing.T) {
 		t.Errorf("warn does not carry the first raw field: %q", out)
 	}
 }
+
+// TestListPage_DebugLogEmitsReqRespLines — when a debugLogger is wired,
+// every successful LIST page emits exactly one `list-page req` and one
+// `list-page resp` line, with the resp's `next` matching the DECODED cursor
+// (V1) or the raw opaque token (V2). Pins the debug-log contract.
+func TestListPage_DebugLogEmitsReqRespLines(t *testing.T) {
+	// V1: NextMarker is a real key, decoded at egress. Set encoding_type_url
+	// on so the decoder path runs and the resp log shows the raw key back.
+	core := &fakeCore{
+		v1Result: &s3.ListObjectsOutput{
+			Contents:    []types.Object{v1Obj("path%2Fa")},
+			NextMarker:  aws.String("path%2Fa"),
+			IsTruncated: aws.Bool(true),
+		},
+	}
+	w := &bytesBufferLike{}
+	c := &S3Client{
+		api:    core,
+		bucket: "bk",
+		stats:  NewStats(),
+		cfg:    wireCfg(1, true),
+		debugLogger: slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	if _, _, _, err := c.ListPage(context.Background(), "p/", "", "mk", true, 1000); err != nil {
+		t.Fatal(err)
+	}
+	out := w.String()
+	if !strings.Contains(out, "msg=\"list-page req\"") || !strings.Contains(out, "api=v1") || !strings.Contains(out, "marker=mk") {
+		t.Errorf("V1 req line missing/malformed: %q", out)
+	}
+	if !strings.Contains(out, "msg=\"list-page resp\"") || !strings.Contains(out, "next=path/a") {
+		t.Errorf("V1 resp line missing or next not decoded: %q", out)
+	}
+	if strings.Contains(out, "list-page err") {
+		t.Errorf("V1 err line should not fire on success: %q", out)
+	}
+
+	// V2: NextContinuationToken is opaque base64, NOT decoded. A literal '+'
+	// in the token must pass through raw.
+	core2 := &fakeCore{
+		v2Result: &s3.ListObjectsV2Output{
+			Contents:             []types.Object{v2Obj("k")},
+			NextContinuationToken: aws.String("tok+with+plus"),
+			IsTruncated:           aws.Bool(true),
+		},
+	}
+	w2 := &bytesBufferLike{}
+	c2 := &S3Client{
+		api:    core2,
+		bucket: "bk",
+		stats:  NewStats(),
+		cfg:    wireCfg(2, true),
+		debugLogger: slog.New(slog.NewTextHandler(w2, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	if _, _, _, err := c2.ListPage(context.Background(), "p/", "", "ct", true, 1000); err != nil {
+		t.Fatal(err)
+	}
+	out2 := w2.String()
+	if !strings.Contains(out2, "msg=\"list-page req\"") || !strings.Contains(out2, "api=v2") || !strings.Contains(out2, "token=ct") {
+		t.Errorf("V2 req line missing/malformed: %q", out2)
+	}
+	if !strings.Contains(out2, "msg=\"list-page resp\"") || !strings.Contains(out2, "next=tok+with+plus") {
+		t.Errorf("V2 resp line missing or token modified: %q", out2)
+	}
+}
+
+// TestListPage_DebugLogEmitsErrLine — on a LIST error the err line fires
+// with req_id (empty when the fake error carries no ResponseError) and the
+// resp line does NOT fire.
+func TestListPage_DebugLogEmitsErrLine(t *testing.T) {
+	core := &fakeCore{
+		v2Result: nil,
+		err:      context.Canceled,
+	}
+	w := &bytesBufferLike{}
+	c := &S3Client{
+		api:    core,
+		bucket: "bk",
+		stats:  NewStats(),
+		cfg:    wireCfg(2, false),
+		debugLogger: slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	if _, _, _, err := c.ListPage(context.Background(), "p/", "", "ct", true, 1000); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	out := w.String()
+	if !strings.Contains(out, "msg=\"list-page err\"") || !strings.Contains(out, "api=v2") {
+		t.Errorf("V2 err line missing/malformed: %q", out)
+	}
+	if strings.Contains(out, "list-page resp") {
+		t.Errorf("V2 resp line should not fire on error: %q", out)
+	}
+}
