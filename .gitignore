@@ -12,3 +12,5 @@
 /delete_marker_cleanup_tool/delete_marker_cleanup_tool
 /delete_marker_cleanup_tool/delete_marker_cleanup_tool.exe
 /delete_marker_cleanup_tool/._*/
+.claude/
+.cac/
