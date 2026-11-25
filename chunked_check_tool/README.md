@@ -47,7 +47,7 @@ GOOS=linux GOARCH=arm64 go build -o chunked_check_tool-linux-arm64 .
 | `-backup-file` | 否 | 备份列表文件路径（mixed 格式）；HEAD 判型 + 中转 + ETag 终验，**不探测损坏**；需配置 `backup_bucket`（见 `## backup-file 模式`） |
 | `-resume-list` | 否 | 断点续跑文件路径（通常是上一轮的 `list_failed.txt`）；与其他文件 flag 互斥，仅 `list_type=2` 生效。每行格式 `prefix\x1ftoken`（第一页失败时为单字段 `prefix`），工具按 `(prefix, token)` 重新 seed 进 BFS 队列，从失败页的 continuation token 续页，避免重复枚举已成功的前几页 |
 
-> **行分隔符**：工具内所有 `bkt|key|partcnt|off...` 形式的行格式都改用 ASCII Unit Separator `\x1f`（`<US>`）作字段分隔——S3 key 可合法包含 `|`，旧 pipe 分隔会把含 `|` 的 key 静默错切。Server 字段（key/prefix/token/owner）写入文件时按 `url.QueryEscape` 转义，读取侧 `QueryUnescape`，含 `\x1f`、`%`、`+`、`/` 的 key 都能逐字节往返。
+> **行分隔符**：工具内所有 `bkt|key|partcnt|off...` 形式的行格式都改用 ASCII Unit Separator `\x1f`（`<US>`）作字段分隔——S3 key 可合法包含 `|`，旧 pipe 分隔会把含 `|` 的 key 静默错切。Server 字段（key/prefix/token）写入文件时按 `url.QueryEscape` 转义，读取侧 `QueryUnescape`，含 `\x1f`、`%`、`+`、`/` 的 key 都能逐字节往返。owner 非空时为 `[a-z0-9]+`，不编不解。
 
 ## 配置
 
@@ -214,7 +214,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
     └── ok_mp.txt               # 干净多段对象 key（is_multipart_success_log=true 时）
 ```
 
-> **行分隔与转义**：所有 `bkt|key|partcnt|off...` 形式的行格式实际用 ASCII Unit Separator `\x1f`（`<US>`）作字段分隔——S3 key 可合法包含 `|`，旧 pipe 分隔会静默错切。Server 字段（key/prefix/token/owner）写入文件时 `url.QueryEscape` 转义，读取侧 `QueryUnescape` 还原；含 `\x1f`、`%`、`+`、`/` 的 key 都能逐字节往返。bucket 字段来自 CLI（不写文件），不转义；partcnt 与 offsets 是纯数字，不转义。
+> **行分隔与转义**：所有 `bkt|key|partcnt|off...` 形式的行格式实际用 ASCII Unit Separator `\x1f`（`<US>`）作字段分隔——S3 key 可合法包含 `|`，旧 pipe 分隔会静默错切。Server 字段（key/prefix/token）写入文件时 `url.QueryEscape` 转义，读取侧 `QueryUnescape` 还原；含 `\x1f`、`%`、`+`、`/` 的 key 都能逐字节往返。bucket 字段来自 CLI，不转义；partcnt 与 offsets 是纯数字，不转义；owner 非空时为 `[a-z0-9]+`，不转义。
 
 ### 失败分类与补跑链路
 

@@ -672,19 +672,19 @@ func TestOutputOffsetLineEscapesKey(t *testing.T) {
 }
 
 // TestOutputResultLineFormatEscapesValues — result_line_format files keep
-// the configured separator as literal text but escape the server-field
-// VALUES (<key>, <owner>); <bucket> is CLI-provided and stays raw. The line
-// structure is safe because the values can no longer contain the separator.
+// the configured separator as literal text but escape the <key> VALUE; <bucket>
+// is CLI-provided and stays raw. The line structure is safe because the escaped
+// key can no longer contain the separator. <owner> is [a-z0-9]+ by server
+// convention and is written verbatim (QueryEscape would be a no-op anyway, so
+// escape-vs-raw is indistinguishable for a valid owner).
 func TestOutputResultLineFormatEscapesValues(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, ResultLineFormat: "<bucket>|<key>|<owner>"}
 	o, _ := NewOutput(cfg, "test-bkt", FileInputNone)
-	o.WriteCorrupted("owner|id", "a|b\nc")
+	o.WriteCorrupted("abc123", "a|b\nc")
 	o.Close()
-	// ownerDirName keeps the raw ownerID as the directory (only path
-	// separators are folded); the ESCAPED form appears in line content.
-	data, _ := os.ReadFile(filepath.Join(dir, "owner|id", "corrupted_objects.txt"))
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|a%7Cb%0Ac|owner%7Cid" {
-		t.Errorf("corrupted_objects.txt = %q, want %q", line, "test-bkt|a%7Cb%0Ac|owner%7Cid")
+	data, _ := os.ReadFile(filepath.Join(dir, "abc123", "corrupted_objects.txt"))
+	if line := strings.TrimSpace(string(data)); line != "test-bkt|a%7Cb%0Ac|abc123" {
+		t.Errorf("corrupted_objects.txt = %q, want %q", line, "test-bkt|a%7Cb%0Ac|abc123")
 	}
 }

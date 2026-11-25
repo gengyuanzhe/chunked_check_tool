@@ -16,11 +16,13 @@ import (
 // the default "|" separator) is written verbatim.
 //
 // Server-field VALUES are QueryEscape'd at render time (boundary B): <key>
-// and <owner> come from the LIST response and may contain the format's own
-// separator, newlines, or \x1f; the escaped values cannot, so the line
-// structure survives hostile keys no matter what separator the format
-// uses. <bucket> comes from the CLI flag and stays raw. Result files are
-// terminal outputs (human/script consumers), not tool round-trip inputs.
+// comes from the LIST response and may contain the format's own separator,
+// newlines, or \x1f; the escaped value cannot, so the line structure survives
+// hostile keys no matter what separator the format uses. <bucket> comes from
+// the CLI flag and stays raw. <owner> is [a-z0-9] when non-empty (server
+// convention; empty means the LIST response omitted it and routes to the
+// _unknown/ directory), so it's written verbatim with no escape. Result files
+// are terminal outputs (human/script consumers), not tool round-trip inputs.
 type compiledLineFormat []fmtSegment
 
 type fmtSegment struct {
@@ -80,7 +82,7 @@ func (cf compiledLineFormat) writeTo(w io.Writer, bucket, owner, key string) {
 		case "key":
 			w.Write([]byte(url.QueryEscape(key)))
 		case "owner":
-			w.Write([]byte(url.QueryEscape(owner)))
+			w.Write([]byte(owner))
 		}
 	}
 }
