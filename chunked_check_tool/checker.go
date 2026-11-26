@@ -13,9 +13,8 @@ import (
 // in object bodies when a client uploads via streaming SigV4 with chunked
 // transfer encoding. Format: <hex-size>;chunk-signature=<64-hex>\r\n
 // CRLF is mandatory (RFC 7230 chunked; the server writes the body verbatim).
-// Unanchored: a part probe reads [off_i, off_i+W) where the chunk header
-// sits at byte 0, but historical boundary windows read it mid-slice — keep
-// it unanchored so neither shape breaks.
+// Unanchored so it matches whether the header lands at byte 0 of a probe
+// slice or mid-slice.
 var chunkSigRe = regexp.MustCompile(`[0-9a-fA-F]+;chunk-signature=[0-9a-fA-F]{64}\r\n`)
 
 // trailerRe matches the aws-chunked trailer end-structure of a
@@ -346,8 +345,3 @@ func tailProbe(size, probe int64) probeSpec {
 	}
 	return probeSpec{tailStart, tailLen}
 }
-
-// probeAndRoute removed: runProbes + verify's switch replaced it. The old
-// per-probe early-exit loop (probeAndRoute returning bool to break) is now
-// inside runProbes, which returns the first non-clean result and lets the
-// caller (verify / verifyCorrupt) do mode-specific routing.

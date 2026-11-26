@@ -707,9 +707,7 @@ func (c *S3Client) downloadRangeOnce(ctx context.Context, key string, start, len
 // sends the body raw with no framing and no buffering, which is exactly the
 // relay's memory-bounded streaming requirement; the byte-faithfulness of
 // the relay is already verified end-to-end by the ETag comparison, not by
-// the transport signature. minio's PutObjectStream previously achieved the
-// same streaming via signed chunk frames (STREAMING-AWS4-HMAC-SHA256-PAYLOAD),
-// which v2 does not implement.
+// the transport signature.
 func withUnsignedPayload(o *s3.Options) {
 	o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
 		return v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware(stack)

@@ -24,8 +24,7 @@ import (
 // always multipart), ETag="" and Size=0 (the file does not carry them) and
 // HeadFirst=true (the checker HEADs the object to fill them in before probing).
 //
-// -list-file is the legacy re-check vehicle from the days when list+check
-// could not obtain multipart offsets itself; -check-file (parseCheckFileLine)
+// -list-file is the legacy re-check vehicle; -check-file (parseCheckFileLine)
 // is its mixed-format successor and accepts these lines unchanged.
 func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyTask, error) {
 	if strings.TrimSpace(line) == "" {
@@ -39,11 +38,8 @@ func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyT
 	if bkt != expectedBucket {
 		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: fmt.Sprintf("bucket mismatch: got %q want %q", bkt, expectedBucket)}
 	}
-	// TrimSpace rejects whitespace-only keys at parse time: minio-go's
-	// CheckValidObjectName used to fail them per call; the aws SDK has no
-	// such client check, so this is now our own input hygiene — reject
-	// here with a resolvable line number (parse_failed) instead of
-	// per-object failure entries.
+	// Reject whitespace-only keys at parse time (the aws SDK does no
+	// client-side name validation, so this is our own input hygiene).
 	if strings.TrimSpace(key) == "" {
 		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: "empty key"}
 	}

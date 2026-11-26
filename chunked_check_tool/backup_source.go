@@ -62,10 +62,8 @@ func parseMixedLine(line string, expectedBucket string, lineNum int) (BackupTask
 		return BackupTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: fmt.Sprintf("bucket mismatch: got %q want %q", parts[0], expectedBucket)}
 	}
 	if len(parts) == 2 {
-		// Same TrimSpace rule as parseListFileLine (minio-go used to reject
-		// whitespace-only names client-side; we keep rejecting them at parse
-		// time — the aws SDK does not client-validate, so the rule is now
-		// our own input hygiene).
+		// Reject whitespace-only keys at parse time (the aws SDK does no
+		// client-side name validation, so this is our own input hygiene).
 		if strings.TrimSpace(parts[1]) == "" {
 			return BackupTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: "empty key"}
 		}
