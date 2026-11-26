@@ -11,75 +11,32 @@ import (
 
 // chunkSigRe matches the streaming chunked-upload signature header that S3
 // embeds in object bodies when a client uploads via streaming SigV4 with
-// chunked transfer encoding. The first 128 bytes fetched via RangeGet are
-// enough to see the first chunk header.
-//
-// Format: <hex-size>;chunk-signature=<64-hex>\r\n
-// The chunk size is a hex string (at least one digit). The signature is
-// exactly 64 lowercase or uppercase hex chars. The line terminator is the
-// mandatory CRLF of aws-chunked / RFC 7230 chunked transfer coding — the
-// requests are standard S3 protocol; the server only fails to recognize
-// aws-chunked and writes the body verbatim, so the on-disk bytes keep the
-// CRLF as sent. (A prior claim that bare \n "occurs in practice" had no
-// real wire evidence — only a self-constructed test case — and is dropped.)
-//
+// chunked transfer encoding. Format: <hex-size>;chunk-signature=<64-hex>\r\n
+// CRLF is mandatory (RFC 7230 chunked; the server writes the body verbatim).
 // Unanchored: boundary probes read [off_i-128, off_i+128] (256 bytes), so
-// the next part's chunk header sits at byte 128 of the slice, not byte 0.
-// The anchored form would miss every boundary match. False-positive risk
-// is unchanged: the literal ;chunk-signature= + 64 hex + CRLF is ~74
-// chars of structure, ~zero realistic match in binary payload.
+// the next part's chunk header sits at byte 128, not byte 0 — anchoring would
+// miss every boundary match.
 var chunkSigRe = regexp.MustCompile(`[0-9a-fA-F]+;chunk-signature=[0-9a-fA-F]{64}\r\n`)
 
-// trailerRe matches the full aws-chunked trailer end-structure that S3
-// embeds at the end of a STREAMING-UNSIGNED-PAYLOAD-TRAILER upload:
+// trailerRe matches the aws-chunked trailer end-structure of a
+// STREAMING-UNSIGNED-PAYLOAD-TRAILER upload:
 //
 //	0\r\nx-amz-checksum-<algo>:<value>\r\n\r\n
 //
-// Breakdown (all CRLF mandatory under RFC 7230 chunked + AWS trailer ext):
-//   - 0\r\n          — zero-length chunk, marks end of the chunk stream
-//   - x-amz-checksum-<algo>:<value>  — the trailer checksum header line
-//   - \r\n          — CRLF terminating the trailer header line
-//   - \r\n          — empty line terminating the trailer block
-//
-// No leading \r\n: a non-empty payload is <hexlen>\r\n<data>\r\n0\r\n...,
-// but an EMPTY payload (payloadSize==0) has no data chunk, so the wire bytes
-// are exactly 0\r\nx-amz-checksum-<algo>:<value>\r\n\r\n with NO leading \r\n
-// (confirmed: AWS SDK v2 newUnsignedChunkReader returns only finalChunkBytes
-// "0\r\n" for payloadSize==0 — service/internal/checksum aws_chunked_encoding.go).
-// Requiring \r\n0\r\n would silently miss empty objects — the cardinal-rule
-// failure mode. The 0\r\nx-amz-checksum- framing is a strong enough anchor on
-// its own (~18 bytes); the preceding data chunk's \r\n is not part of the
-// trailer structure and is left to occur naturally before the match.
-//
-// The unsigned-trailer variant has no ;chunk-signature= in its chunk heads,
-// so this full structure is the ONLY strong feature that catches it.
-//
-// Coverage scope — single PUT only:
-//   - Private storage REJECTS multipart parts encoded as trailer uploads
-//     (they error and never land), so trailer corruption only reaches disk
-//     via single (non-multipart) PUT. trailerRe therefore runs on the
-//     whole-object fast path [0,thr] and the tail probe [Size-128,Size] of
-//     ordinary objects. Multipart boundary probes ([off_i-128,off_i+128])
-//     never see a real trailer marker (a multipart part can't be a trailer
-//     upload on private storage), so trailerRe matching there is harmless
-//     over-coverage, not a relied-on path.
-//   - The signed -TRAILER variant ends with ...<value>\r\nx-amz-trailer-signature:...\r\n\r\n,
-//     so this exact pattern won't match it; that's fine — signed -TRAILER
-//     has ;chunk-signature= in every chunk head and is caught by chunkSigRe.
+// No leading \r\n: an empty payload (payloadSize==0) has no data chunk, so
+// AWS SDK v2 emits exactly "0\r\nx-amz-checksum-<algo>:<value>\r\n\r\n" with
+// no preceding CRLF (newUnsignedChunkReader). Requiring \r\n0\r\n would miss
+// empty objects.
 //
 // <algo> is [a-z0-9]+ (not an explicit list): the framing is already a
-// near-zero false-positive anchor, so widening the algo set costs negligible
-// FP risk and future AWS algorithms (e.g. crc64nvme) won't silently evade
-// detection. This tool's cost of a missed detection (silent data corruption)
-// far exceeds its cost of a false positive (manual review).
+// near-zero false-positive anchor, so future AWS algorithms won't evade
+// detection. <value> is [^\r\n]* (bounded by ':' and \r\n\r\n).
 //
-// <value> is [^\r\n]* (single-line, encoding-agnostic): bounded by ':' and
-// \r\n\r\n, so the framing — not the value charset — is the signal.
-//
-// Probe windows always cover the full structure: the trailer is ~75 bytes
-// max (sha256's 44-byte base64), well inside the 128-byte tail window. The
-// whole-object fast path reads the entire body. Unanchored: the trailer may
-// land mid-slice in the tail window.
+// Only single-PUT trailer uploads land on private storage; multipart parts
+// encoded as trailer uploads are rejected (see root AGENTS.md §1). trailerRe
+// therefore runs only on single-PUT probe paths (see matchFunc). The signed
+// -TRAILER variant is not matched (its value is followed by
+// x-amz-trailer-signature, not \r\n\r\n) but is caught by chunkSigRe.
 var trailerRe = regexp.MustCompile(`0\r\nx-amz-checksum-[a-z0-9]+:[^\r\n]*\r\n\r\n`)
 
 // extractHTTPStatusCode pulls the HTTP status code off err if it wraps an
@@ -282,11 +239,9 @@ func (c *Checker) verify(task VerifyTask) {
 type probeResult int
 
 const (
-	// probeClean: every probe succeeded and none matched chunkSigRe or
-	// trailerRe. The object is not corrupted (by this tool's detection).
+	// probeClean: every probe succeeded and none matched a corruption regex.
 	probeClean probeResult = iota
-	// probeCorrupted: at least one probe matched chunkSigRe or trailerRe.
-	// The object is corrupted.
+	// probeCorrupted: at least one probe matched a corruption regex.
 	probeCorrupted
 	// probeFailed: a RangeGet returned an error before any probe matched.
 	// err is the RangeGet error; the caller routes to check_failed /
@@ -294,30 +249,35 @@ const (
 	probeFailed
 )
 
-// runProbes runs the probe matrix for task (head/boundary/tail or
-// small-object whole-read) and returns the first non-clean result. All
-// probes clean → probeClean. Any RangeGet error → probeFailed (err set, no
-// further probes run — matches the early-exit behavior of the old per-probe
-// loop). Any probe matching chunkSigRe OR trailerRe → probeCorrupted.
-//
-// Used by list-check and the file-input check modes (-list-file /
-// -check-file), so all of them detect corruption identically: same probe
-// positions (buildProbesStatic), same regexes (chunkSigRe || trailerRe), same
-// early-exit on first settled result. Backup mode no longer probes — it
-// relays whatever the check stage flagged. threshold is
-// WholeObjectProbeThreshold from cfg (caller passes it in so runProbes has no
-// cfg dependency).
+// runProbes runs the probe matrix and returns the first non-clean result:
+// all clean → probeClean; any RangeGet error → probeFailed (no further
+// probes); any probe matching a corruption regex → probeCorrupted.
+// Regex selection by task shape (matchFunc): single PUT runs chunkSigRe ||
+// trailerRe; multipart runs chunkSigRe only. Shared by list-check and the
+// file-input check modes (-list-file / -check-file). Backup mode does not
+// probe. threshold is WholeObjectProbeThreshold from cfg.
 func runProbes(ctx context.Context, worker S3API, task VerifyTask, threshold int) (probeResult, error) {
+	match := matchFunc(task)
 	for _, p := range buildProbesStatic(task, threshold) {
 		body, err := worker.RangeGetAt(ctx, task.Key, p.start, p.length)
 		if err != nil {
 			return probeFailed, err
 		}
-		if chunkSigRe.Match(body) || trailerRe.Match(body) {
+		if match(body) {
 			return probeCorrupted, nil
 		}
 	}
 	return probeClean, nil
+}
+
+// matchFunc returns the corruption-match function for the task shape:
+// multipart → chunkSigRe only (multipart parts can't be trailer uploads on
+// private storage); single PUT → chunkSigRe || trailerRe.
+func matchFunc(task VerifyTask) func([]byte) bool {
+	if task.IsMultipart {
+		return chunkSigRe.Match
+	}
+	return func(b []byte) bool { return chunkSigRe.Match(b) || trailerRe.Match(b) }
 }
 
 // probeSpec is one RangeGet probe in a VerifyTask's plan.
@@ -331,19 +291,18 @@ type probeSpec struct {
 // bytes straddling the part offset.
 const probeWindow int64 = 128
 
-// buildProbes returns the probe plan for task based on its shape:
-//
+// buildProbes returns the probe plan for task:
 //   - 0 < Size <= WholeObjectProbeThreshold → single RangeGetAt(0, thr)
-//     reads the whole object; chunkSigRe OR trailerRe match against one
-//     body. (Size==0 never reaches here — Handle short-circuits.)
-//   - normal object, Size > threshold → head@0 + tail@Size-probeWindow.
-//   - multipart N parts, Size > threshold → head@0 + (N-1) boundary
-//     probes [off_i-probeWindow, off_i+probeWindow] + tail@Size-probeWindow.
+//     (Size==0 never reaches here — Handle short-circuits.)
+//   - single PUT, Size > threshold → head@0 + tail@Size-W.
+//   - multipart N parts, Size > threshold → head@0 + (N-1) boundary probes
+//     [off_i-W, off_i+W]. No tail probe: multipart runs chunkSigRe only,
+//     which matches chunk HEADS; every part's head is already covered
+//     (head@0 for part 0, boundary front half for part i), so a tail probe
+//     reading the last part's tail would never match.
 //
-// Tail and boundary probes clamp start to 0 and length to Size when the
-// object is smaller than the window — the small-object fast-path already
-// handles tiny objects, but Size can still be < probeWindow in the normal
-// branch (e.g. Size=200, threshold=1024: 2 probes, second reads [72,200)).
+// Boundary probes clamp start to 0 and length to Size when the object is
+// smaller than the window.
 func (c *Checker) buildProbes(task VerifyTask) []probeSpec {
 	return buildProbesStatic(task, c.cfg.WholeObjectProbeThreshold)
 }
@@ -360,7 +319,7 @@ func buildProbesStatic(task VerifyTask, threshold int) []probeSpec {
 		return headTail(task.Size, probeWindow)
 	}
 	offs := task.Offsets
-	out := make([]probeSpec, 0, len(offs)+1)
+	out := make([]probeSpec, 0, len(offs)) // head + (N-1) boundaries; no tail
 	out = append(out, probeSpec{0, probeWindow}) // head @ part 0
 	for i := 1; i < len(offs); i++ {             // internal boundaries
 		s := offs[i] - probeWindow
@@ -375,26 +334,16 @@ func buildProbesStatic(task VerifyTask, threshold int) []probeSpec {
 			out = append(out, probeSpec{s, e - s})
 		}
 	}
-	if task.Size > 0 { // tail (skip degenerate Size==0)
-		// Only append the tail — head@0 was already added at line 252.
-		// Calling headTail here would duplicate the head probe.
-		out = append(out, tailProbe(task.Size, probeWindow))
-	}
 	return out
 }
 
-// headTail returns the head and tail probes for a non-multipart object.
-// Tail start clamps to 0 for Size < probeWindow; tail length clamps to Size.
+// headTail returns the head and tail probes for a single-PUT object.
 func headTail(size, probe int64) []probeSpec {
 	return []probeSpec{{0, probe}, tailProbe(size, probe)}
 }
 
-// tailProbe returns the tail probe spec for an object of `size` bytes with
-// the given probe window. Tail start clamps to 0 for Size < probeWindow;
-// tail length clamps to Size. Used by headTail (non-multipart path) and
-// directly by the multipart path (which adds head@0 separately at line 252
-// and only needs the tail appended after boundary probes — calling headTail
-// there would duplicate the head probe).
+// tailProbe returns the tail probe spec. Used only by headTail (single-PUT);
+// multipart has no tail probe.
 func tailProbe(size, probe int64) probeSpec {
 	tailStart := size - probe
 	if tailStart < 0 {

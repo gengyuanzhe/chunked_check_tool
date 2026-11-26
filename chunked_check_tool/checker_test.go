@@ -462,12 +462,8 @@ func (c *rangeGetCountingS3) RangeGetAt(ctx context.Context, key string, offset,
 	return c.FakeS3.RangeGetAt(ctx, key, offset, length)
 }
 
-// trailerBody is a body that matches trailerRe but NOT chunkSigRe — the
-// unsigned-payload-trailer variant. On private storage, multipart parts
-// encoded as trailer uploads are rejected (never land), so this form only
-// reaches disk via single (non-multipart) PUT. Models the "hello world"
-// example from AGENTS.md §1.1:
-//   b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
+// trailerBody matches trailerRe but NOT chunkSigRe (unsigned-payload-trailer
+// variant). Only single-PUT trailer uploads land on private storage.
 var trailerBody = []byte("b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n\r\n")
 
 func TestTrailerRegex(t *testing.T) {
@@ -630,6 +626,70 @@ func TestCheckerMultipartBoundaryProbeCatchesChunkSigInNextPartHead(t *testing.T
 	}
 }
 
+// TestCheckerMultipartDoesNotRunTrailerRe — multipart probes run chunkSigRe
+// only, so a trailer marker in a multipart probe window reads clean.
+func TestCheckerMultipartDoesNotRunTrailerRe(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, WholeObjectProbeThreshold: 0}
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+	defer out.Close()
+	s := NewStats()
+	const size int64 = 4096
+	tail := []byte("\r\n0\r\nx-amz-checksum-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n\r\n")
+	body := make([]byte, size)
+	for i := range body {
+		body[i] = 'x'
+	}
+	copy(body[size-int64(len(tail)):], tail)
+	worker := &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
+		end := offset + length
+		if end > size {
+			end = size
+		}
+		if offset >= size {
+			return nil, nil
+		}
+		return body[offset:end], nil
+	}}
+	c := NewChecker(context.Background(), worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: size, Offsets: []int64{0, size / 2}})
+	if got := s.Snapshot().CorruptedMp; got != 0 {
+		t.Errorf("corrupted_mp=%d want 0 (multipart does not run trailerRe)", got)
+	}
+}
+
+// TestCheckerSinglePutRunsTrailerRe — single-PUT probes run trailerRe, so a
+// trailer marker in the tail is flagged. Positive counterpart to the above.
+func TestCheckerSinglePutRunsTrailerRe(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, WholeObjectProbeThreshold: 0}
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+	defer out.Close()
+	s := NewStats()
+	const size int64 = 4096
+	tail := []byte("\r\n0\r\nx-amz-checksum-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n\r\n")
+	body := make([]byte, size)
+	for i := range body {
+		body[i] = 'x'
+	}
+	copy(body[size-int64(len(tail)):], tail)
+	worker := &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
+		end := offset + length
+		if end > size {
+			end = size
+		}
+		if offset >= size {
+			return nil, nil
+		}
+		return body[offset:end], nil
+	}}
+	c := NewChecker(context.Background(), worker, out, s, cfg)
+	c.Handle(VerifyTask{Key: "k", IsMultipart: false, Size: size, Offsets: nil})
+	if got := s.Snapshot().CorruptedObjects; got != 1 {
+		t.Errorf("corrupted=%d want 1 (single-PUT probes must run trailerRe)", got)
+	}
+}
+
 // TestRunProbesThreeStates — runProbes returns probeClean / probeCorrupted
 // / probeFailed directly so list-check / -list-file / -backup-file all share
 // the same detection. This test pins the three return paths independently of
@@ -680,16 +740,13 @@ func TestRunProbesThreeStates(t *testing.T) {
 // variant without duplicating the constant.
 var _ = corruptBody
 
-// TestCheckerMultipartProbeCountIsNPlusOne — regression guard: a multipart
-// object with N parts gets exactly N+1 probes (head@0 + (N-1) boundary +
-// tail@Size-128). A previous bug duplicated the head probe (headTail was
-// called at the tail step, returning head+tail and adding head a second
-// time), making it N+2. Tests that only checked match outcome missed it
-// because both head reads returned identical bytes; this test pins the count.
-func TestCheckerMultipartProbeCountIsNPlusOne(t *testing.T) {
+// TestCheckerMultipartProbeCountIsN — N parts get exactly N probes
+// (head@0 + (N-1) boundary; no tail). Pins the count against a past bug that
+// duplicated the head probe (N+2) and against the now-removed tail probe (N+1).
+func TestCheckerMultipartProbeCountIsN(t *testing.T) {
 	dir := t.TempDir()
 	// threshold=0 disables small-object fast-path so we exercise the
-	// head+boundary+tail matrix directly.
+	// head+boundary matrix directly.
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, WholeObjectProbeThreshold: 0}
 	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
@@ -707,24 +764,17 @@ func TestCheckerMultipartProbeCountIsNPlusOne(t *testing.T) {
 	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: size, Offsets: offs})
 
-	// N=2 parts → expect N+1 = 3 probes (head + 1 boundary + tail). The old
-	// bug ran 4 (head added twice via headTail at the tail step).
-	if count != 3 {
-		t.Errorf("RangeGetAt calls = %d, want 3 (head@0 + 1 boundary + tail; old bug duplicated head → 4)", count)
+	// N=2 parts → expect N = 2 probes (head@0 + 1 boundary, no tail).
+	if count != 2 {
+		t.Errorf("RangeGetAt calls = %d, want 2", count)
 	}
 }
 
-// TestCheckerHeadFirstFillsSizeEnablesTailProbe — regression guard for the
-// list-file-mode bug: parseListFileLine returns Size=0, and buildProbesStatic
-// gated the tail probe on `if task.Size > 0`, so list-file tasks silently
-// skipped the tail probe — missing trailer corruption at the object tail.
-// HeadFirst (set by the list-file source) makes Checker.Handle HEAD the
-// object first to fill Size; the tail probe is now built and catches a
-// trailer marker that lives only in the last 128 bytes.
+// TestCheckerHeadFirstFillsSizeEnablesTailProbe — HeadFirst fills Size via
+// HEAD so the tail probe is built (Size==0 would skip it). Single-PUT only;
+// multipart has no tail probe.
 func TestCheckerHeadFirstFillsSizeEnablesTailProbe(t *testing.T) {
 	dir := t.TempDir()
-	// threshold=0 disables small-object fast-path so we exercise head+tail
-	// (the test body is large enough that head won't see the trailer).
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, WholeObjectProbeThreshold: 0}
 	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
@@ -739,7 +789,7 @@ func TestCheckerHeadFirstFillsSizeEnablesTailProbe(t *testing.T) {
 	copy(body[size-int64(len(tail)):], tail)
 
 	worker := &FakeS3{
-		Heads: map[string]HeadInfo{"k": {ETag: "0123456789abcdef0123456789abcdef-2", Size: size}},
+		Heads: map[string]HeadInfo{"k": {ETag: "0123456789abcdef0123456789abcdef", Size: size}},
 		RangeGetHandler: func(offset, length int64) ([]byte, error) {
 			end := offset + length
 			if end > size {
@@ -752,13 +802,10 @@ func TestCheckerHeadFirstFillsSizeEnablesTailProbe(t *testing.T) {
 		},
 	}
 	c := NewChecker(context.Background(), worker, out, s, cfg)
-	// HeadFirst=true + Size=0 mirrors what parseListFileLine produces. Without
-	// the Handle HEAD, buildProbesStatic would skip the tail probe and the
-	// trailer at byte 3968 would be missed.
-	c.Handle(VerifyTask{Key: "k", IsMultipart: true, Offsets: []int64{0, size / 2}, HeadFirst: true})
+	c.Handle(VerifyTask{Key: "k", IsMultipart: false, HeadFirst: true})
 
-	if got := s.Snapshot().CorruptedMp; got != 1 {
-		t.Errorf("corrupted_mp=%d want 1 (tail probe must run once Size is filled by HEAD)", got)
+	if got := s.Snapshot().CorruptedObjects; got != 1 {
+		t.Errorf("corrupted=%d want 1", got)
 	}
 }
 
