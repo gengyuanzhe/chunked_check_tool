@@ -12,6 +12,7 @@
 | 签名校验覆盖 `x-amz-*` 和 `x-obs-*` 两类前缀（标准 SigV4 只强制 `x-amz-*`） | 自定义 header 一律不以 `x-` 开头；内部修复专用 header 用 `internal-` 前缀（SigV2/V4 下允许不签名） |
 | LIST 带 `internal-list-mp-offset: true` 时改写多段 ETag：`<md5>-N` → `<md5>-<partcnt>-<off0>\|<off1>\|...`，`off_i` 是第 i 段在落盘字节里的物理起始偏移 | 解析时校验 md5 是 32 位 hex、offset 个数 = partcnt、`off_0 = 0`、严格递增、每个 `off_i ≤ Size`；该 header 只挂 LIST 调用，HEAD/GET/PUT 不带 |
 | `Owner.ID` 非空时为 `[a-z0-9]+` | 不做 URL 编解码，原样读写；owner 为空落 `_unknown/` |
+| **trailer 类多段上传报错不落盘**：trailer 类编码（`STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER`、`STREAMING-UNSIGNED-PAYLOAD-TRAILER`）作为**多段 part** 上传时报错，对象不落盘。**但单次 PUT 走 trailer 编码仍能成功落盘** | 检测工具的 trailer 损坏检测（`trailerRe`）只需覆盖**单次 PUT** 场景（普通对象的 whole-object / tail 探测）；多段边界探测不会遇到真实 trailer marker（多段 part 不可能是 trailer 上传）。trailerRe **不能删**——它守护单次 PUT 的 unsigned-trailer 损坏检测。具体机制未深究，是行为约定；服务端若修此行为需重测 |
 
 ## 2. 实测过、行为标准
 

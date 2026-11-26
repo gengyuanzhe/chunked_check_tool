@@ -463,8 +463,11 @@ func (c *rangeGetCountingS3) RangeGetAt(ctx context.Context, key string, offset,
 }
 
 // trailerBody is a body that matches trailerRe but NOT chunkSigRe — the
-// unsigned-payload-trailer variant. Models the "hello world" example from
-// AGENTS.md §1.1: b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
+// unsigned-payload-trailer variant. On private storage, multipart parts
+// encoded as trailer uploads are rejected (never land), so this form only
+// reaches disk via single (non-multipart) PUT. Models the "hello world"
+// example from AGENTS.md §1.1:
+//   b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 var trailerBody = []byte("b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n\r\n")
 
 func TestTrailerRegex(t *testing.T) {
@@ -600,30 +603,6 @@ func TestCheckerLargeNormalObjectHeadTail(t *testing.T) {
 	}
 	if count != 2 {
 		t.Errorf("RangeGetAt calls=%d want 2 (head + tail)", count)
-	}
-}
-
-func TestCheckerMultipartBoundaryProbeCatchesTrailerInPartTail(t *testing.T) {
-	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
-	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
-	defer out.Close()
-	s := NewStats()
-	// 2 parts, boundary at 5MiB. Boundary probe reads [5242752, 5253008].
-	// Return a body that contains a trailer marker in that window (prev
-	// part tail ending the trailer + clean next part head). The head@0
-	// probe and tail@10MiB probe get clean bytes.
-	boundary := int64(5242880)
-	worker := &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
-		if offset <= boundary && offset+length > boundary {
-			return trailerBody, nil
-		}
-		return []byte("clean part body, no signature"), nil
-	}}
-	c := NewChecker(context.Background(), worker, out, s, cfg)
-	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5242880}})
-	if got := s.Snapshot().CorruptedMp; got != 1 {
-		t.Errorf("corrupted_mp=%d want 1 (boundary probe should catch trailer)", got)
 	}
 }
 

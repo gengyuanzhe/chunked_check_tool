@@ -52,12 +52,20 @@ var chunkSigRe = regexp.MustCompile(`[0-9a-fA-F]+;chunk-signature=[0-9a-fA-F]{64
 // trailer structure and is left to occur naturally before the match.
 //
 // The unsigned-trailer variant has no ;chunk-signature= in its chunk heads,
-// so this full structure is the ONLY strong feature that catches it — it
-// must run on tail probes ([Size-128, Size]) and boundary probes
-// ([off_i-128, off_i+128]). The signed -TRAILER variant instead ends with
-// ...<value>\r\nx-amz-trailer-signature:...\r\n\r\n, so this exact pattern
-// won't match it; that's fine — signed -TRAILER has ;chunk-signature= in
-// every chunk head and is caught by chunkSigRe at the head/boundary probe.
+// so this full structure is the ONLY strong feature that catches it.
+//
+// Coverage scope — single PUT only:
+//   - Private storage REJECTS multipart parts encoded as trailer uploads
+//     (they error and never land), so trailer corruption only reaches disk
+//     via single (non-multipart) PUT. trailerRe therefore runs on the
+//     whole-object fast path [0,thr] and the tail probe [Size-128,Size] of
+//     ordinary objects. Multipart boundary probes ([off_i-128,off_i+128])
+//     never see a real trailer marker (a multipart part can't be a trailer
+//     upload on private storage), so trailerRe matching there is harmless
+//     over-coverage, not a relied-on path.
+//   - The signed -TRAILER variant ends with ...<value>\r\nx-amz-trailer-signature:...\r\n\r\n,
+//     so this exact pattern won't match it; that's fine — signed -TRAILER
+//     has ;chunk-signature= in every chunk head and is caught by chunkSigRe.
 //
 // <algo> is [a-z0-9]+ (not an explicit list): the framing is already a
 // near-zero false-positive anchor, so widening the algo set costs negligible
@@ -69,10 +77,9 @@ var chunkSigRe = regexp.MustCompile(`[0-9a-fA-F]+;chunk-signature=[0-9a-fA-F]{64
 // \r\n\r\n, so the framing — not the value charset — is the signal.
 //
 // Probe windows always cover the full structure: the trailer is ~75 bytes
-// max (sha256's 44-byte base64), and both the 128-byte tail window and the
-// 128-byte back-half of a 256-byte boundary window hold it (the trailer
-// sits flush against off_i as the previous part's tail). Unanchored: the
-// trailer lands mid-slice in boundary probes.
+// max (sha256's 44-byte base64), well inside the 128-byte tail window. The
+// whole-object fast path reads the entire body. Unanchored: the trailer may
+// land mid-slice in the tail window.
 var trailerRe = regexp.MustCompile(`0\r\nx-amz-checksum-[a-z0-9]+:[^\r\n]*\r\n\r\n`)
 
 // extractHTTPStatusCode pulls the HTTP status code off err if it wraps an
