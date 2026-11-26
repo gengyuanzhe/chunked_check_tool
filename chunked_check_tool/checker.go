@@ -9,13 +9,13 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-// chunkSigRe matches the streaming chunked-upload signature header that S3
-// embeds in object bodies when a client uploads via streaming SigV4 with
-// chunked transfer encoding. Format: <hex-size>;chunk-signature=<64-hex>\r\n
+// chunkSigRe matches the streaming chunked-upload signature header embedded
+// in object bodies when a client uploads via streaming SigV4 with chunked
+// transfer encoding. Format: <hex-size>;chunk-signature=<64-hex>\r\n
 // CRLF is mandatory (RFC 7230 chunked; the server writes the body verbatim).
-// Unanchored: boundary probes read [off_i-128, off_i+128] (256 bytes), so
-// the next part's chunk header sits at byte 128, not byte 0 — anchoring would
-// miss every boundary match.
+// Unanchored: a part probe reads [off_i, off_i+W) where the chunk header
+// sits at byte 0, but historical boundary windows read it mid-slice — keep
+// it unanchored so neither shape breaks.
 var chunkSigRe = regexp.MustCompile(`[0-9a-fA-F]+;chunk-signature=[0-9a-fA-F]{64}\r\n`)
 
 // trailerRe matches the aws-chunked trailer end-structure of a
@@ -24,19 +24,16 @@ var chunkSigRe = regexp.MustCompile(`[0-9a-fA-F]+;chunk-signature=[0-9a-fA-F]{64
 //	0\r\nx-amz-checksum-<algo>:<value>\r\n\r\n
 //
 // No leading \r\n: an empty payload (payloadSize==0) has no data chunk, so
-// AWS SDK v2 emits exactly "0\r\nx-amz-checksum-<algo>:<value>\r\n\r\n" with
-// no preceding CRLF (newUnsignedChunkReader). Requiring \r\n0\r\n would miss
-// empty objects.
-//
-// <algo> is [a-z0-9]+ (not an explicit list): the framing is already a
-// near-zero false-positive anchor, so future AWS algorithms won't evade
-// detection. <value> is [^\r\n]* (bounded by ':' and \r\n\r\n).
+// AWS SDK v2 emits it with no preceding CRLF — requiring one would miss
+// empty objects. <algo> is [a-z0-9]+ (not an explicit list) so future AWS
+// algorithms won't evade detection; <value> is [^\r\n]* (bounded by ':' and
+// \r\n\r\n).
 //
 // Only single-PUT trailer uploads land on private storage; multipart parts
-// encoded as trailer uploads are rejected (see root AGENTS.md §1). trailerRe
-// therefore runs only on single-PUT probe paths (see matchFunc). The signed
-// -TRAILER variant is not matched (its value is followed by
-// x-amz-trailer-signature, not \r\n\r\n) but is caught by chunkSigRe.
+// encoded as trailer uploads are rejected (root AGENTS.md §1), so trailerRe
+// runs only on single-PUT probe paths (see matchFunc). The signed -TRAILER
+// variant is not matched (its value is followed by x-amz-trailer-signature,
+// not \r\n\r\n) but is caught by chunkSigRe.
 var trailerRe = regexp.MustCompile(`0\r\nx-amz-checksum-[a-z0-9]+:[^\r\n]*\r\n\r\n`)
 
 // extractHTTPStatusCode pulls the HTTP status code off err if it wraps an
