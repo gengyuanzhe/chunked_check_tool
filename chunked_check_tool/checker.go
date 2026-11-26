@@ -286,23 +286,19 @@ type probeSpec struct {
 	length int64
 }
 
-// probeWindow is the half-window size for head/tail/boundary probes.
-// Head and tail read probeWindow bytes; boundary reads 2*probeWindow
-// bytes straddling the part offset.
+// probeWindow is the read size for head/tail/part probes (bytes).
 const probeWindow int64 = 128
 
 // buildProbes returns the probe plan for task:
 //   - 0 < Size <= WholeObjectProbeThreshold → single RangeGetAt(0, thr)
 //     (Size==0 never reaches here — Handle short-circuits.)
 //   - single PUT, Size > threshold → head@0 + tail@Size-W.
-//   - multipart N parts, Size > threshold → head@0 + (N-1) boundary probes
-//     [off_i-W, off_i+W]. No tail probe: multipart runs chunkSigRe only,
-//     which matches chunk HEADS; every part's head is already covered
-//     (head@0 for part 0, boundary front half for part i), so a tail probe
-//     reading the last part's tail would never match.
+//   - multipart N parts, Size > threshold → one probe per part offset,
+//     each reads [off_i, off_i+W). Multipart runs chunkSigRe only, which
+//     matches ;chunk-signature= at chunk HEADS, so each part's head is
+//     covered by its own probe. No tail probe (heads-only matching).
 //
-// Boundary probes clamp start to 0 and length to Size when the object is
-// smaller than the window.
+// Probes clamp length to Size when the object is smaller than the window.
 func (c *Checker) buildProbes(task VerifyTask) []probeSpec {
 	return buildProbesStatic(task, c.cfg.WholeObjectProbeThreshold)
 }
@@ -318,20 +314,18 @@ func buildProbesStatic(task VerifyTask, threshold int) []probeSpec {
 	if !task.IsMultipart {
 		return headTail(task.Size, probeWindow)
 	}
+	// Multipart: one probe per part offset, each reading [off, off+W).
+	// chunkSigRe matches chunk heads, so each part's head is covered by its
+	// own probe — no part depends on another's probe, and no tail probe.
 	offs := task.Offsets
-	out := make([]probeSpec, 0, len(offs)) // head + (N-1) boundaries; no tail
-	out = append(out, probeSpec{0, probeWindow}) // head @ part 0
-	for i := 1; i < len(offs); i++ {             // internal boundaries
-		s := offs[i] - probeWindow
-		if s < 0 {
-			s = 0
-		}
-		e := offs[i] + probeWindow
+	out := make([]probeSpec, 0, len(offs))
+	for _, off := range offs {
+		e := off + probeWindow
 		if task.Size > 0 && e > task.Size {
 			e = task.Size
 		}
-		if e > s {
-			out = append(out, probeSpec{s, e - s})
+		if e > off {
+			out = append(out, probeSpec{off, e - off})
 		}
 	}
 	return out

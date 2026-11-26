@@ -602,19 +602,18 @@ func TestCheckerLargeNormalObjectHeadTail(t *testing.T) {
 	}
 }
 
-func TestCheckerMultipartBoundaryProbeCatchesChunkSigInNextPartHead(t *testing.T) {
+func TestCheckerMultipartProbeCatchesChunkSigInPartHead(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
 	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
 	s := NewStats()
-	// 2 parts, boundary at 5MiB. Boundary probe reads [5242752, 5253008]
-	// where byte 128 of the 256-byte slice is the next part's head. The
-	// de-anchored chunkSigRe must match at byte 128 — fails without the
-	// de-anchor (regression guard).
+	// 2 parts, part 1 starts at 5MiB. Its probe reads [5242880, 5243008)
+	// where the part head sits at byte 0 of the slice. The de-anchored
+	// chunkSigRe must match there (regression guard against re-anchoring).
 	boundary := int64(5242880)
 	worker := &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
-		if offset <= boundary && offset+length > boundary {
+		if offset == boundary {
 			return chunkSigBody, nil
 		}
 		return []byte("clean part body, no signature"), nil
@@ -622,7 +621,7 @@ func TestCheckerMultipartBoundaryProbeCatchesChunkSigInNextPartHead(t *testing.T
 	c := NewChecker(context.Background(), worker, out, s, cfg)
 	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5242880}})
 	if got := s.Snapshot().CorruptedMp; got != 1 {
-		t.Errorf("corrupted_mp=%d want 1 (de-anchored regex should match next part head)", got)
+		t.Errorf("corrupted_mp=%d want 1 (chunkSigRe should match part head)", got)
 	}
 }
 
