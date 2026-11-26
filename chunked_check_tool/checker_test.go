@@ -35,11 +35,12 @@ func TestChunkSigRegex(t *testing.T) {
 		match bool
 	}{
 		{"1000;chunk-signature=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\r\n", true},
-		{"ff;chunk-signature=0000000000000000000000000000000000000000000000000000000000000000\n", true},
+		{"ff;chunk-signature=0000000000000000000000000000000000000000000000000000000000000000\r\n", true},
 		{"hello world", false},
-		{"1000;chunk-signature=short\n", false}, // signature not 64
-		{";chunk-signature=abcdef\n", false},    // empty chunk size
-		{"1000;notchunk-signature=abc\n", false},
+		{"1000;chunk-signature=short\r\n", false}, // signature not 64
+		{";chunk-signature=abcdef\r\n", false},    // empty chunk size
+		{"1000;notchunk-signature=abc\r\n", false},
+		{"ff;chunk-signature=0000000000000000000000000000000000000000000000000000000000000000\n", false}, // bare \n not CRLF — protocol mandates CRLF
 		// De-anchored: matches mid-body, not just at byte 0. Boundary probes
 		// read [off-128, off+128] where the next part's head lands at byte 128.
 		{"garbage prefix 1000;chunk-signature=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\r\n", true},
@@ -471,14 +472,24 @@ func TestTrailerRegex(t *testing.T) {
 		body  string
 		match bool
 	}{
-		{"x-amz-checksum-sha256:abc=", true},
-		{"x-amz-checksum-crc32c:abc=", true},
-		{"x-amz-checksum-crc64:abc=", true},
-		{"x-amz-checksum-sha1:abc=", true},
-		{"x-amz-checksum-crc32:abc=", true},
-		{"prefix 0\r\nx-amz-checksum-sha256:abc=\r\n\r\n", true}, // mid-body
+		// Full unsigned-trailer end-structure (the exact wire form on disk).
+		{"\r\n0\r\nx-amz-checksum-sha256:abc=\r\n\r\n", true},  // non-empty payload
+		{"0\r\nx-amz-checksum-sha256:abc=\r\n\r\n", true},     // empty payload: NO leading \r\n (payloadSize==0 → only finalChunkBytes) — must still match
+		{"\r\n0\r\nx-amz-checksum-crc32c:abc=\r\n\r\n", true},
+		{"\r\n0\r\nx-amz-checksum-crc64:abc=\r\n\r\n", true},
+		{"\r\n0\r\nx-amz-checksum-sha1:abc=\r\n\r\n", true},
+		{"\r\n0\r\nx-amz-checksum-crc32:abc=\r\n\r\n", true},
+		{"\r\n0\r\nx-amz-checksum-crc64nvme:abc=\r\n\r\n", true}, // future AWS algo — widened set must not miss it
+		{"\r\n0\r\nx-amz-checksum-foo:abc=\r\n\r\n", true},       // algo [a-z0-9]+: framing is the anchor, not the algo list
+		{"data here\r\n0\r\nx-amz-checksum-sha256:abc=\r\n\r\n", true}, // mid-body with preceding data
+		{"\r\n0\r\nx-amz-checksum-sha256:\r\n\r\n", true},              // empty value still matches (framing is the signal)
+		// Signed -TRAILER variant: base64 is followed by \r\nx-amz-trailer-signature,
+		// not \r\n\r\n — this pattern must NOT match it (chunkSigRe catches it instead).
+		{"\r\n0\r\nx-amz-checksum-sha256:abc=\r\nx-amz-trailer-signature:deadbeef\r\n\r\n", false},
+		// Missing the full framing — must not match.
+		{"x-amz-checksum-sha256:abc=", false},  // no 0\r\n prefix, no \r\n\r\n suffix
+		{"\r\n0\r\nx-amz-checksum-sha256:abc=", false}, // no trailing \r\n\r\n
 		{"not-a-checksum:abc", false},
-		{"x-amz-checksum-foo:abc", false}, // unknown algo
 		{"hello world", false},
 	}
 	for _, c := range cases {

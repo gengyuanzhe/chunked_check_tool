@@ -16,27 +16,64 @@ import (
 //
 // Format: <hex-size>;chunk-signature=<64-hex>\r\n
 // The chunk size is a hex string (at least one digit). The signature is
-// exactly 64 lowercase or uppercase hex chars. The line terminator is \r\n
-// or \n — both occur in practice depending on the client.
+// exactly 64 lowercase or uppercase hex chars. The line terminator is the
+// mandatory CRLF of aws-chunked / RFC 7230 chunked transfer coding — the
+// requests are standard S3 protocol; the server only fails to recognize
+// aws-chunked and writes the body verbatim, so the on-disk bytes keep the
+// CRLF as sent. (A prior claim that bare \n "occurs in practice" had no
+// real wire evidence — only a self-constructed test case — and is dropped.)
 //
 // Unanchored: boundary probes read [off_i-128, off_i+128] (256 bytes), so
 // the next part's chunk header sits at byte 128 of the slice, not byte 0.
 // The anchored form would miss every boundary match. False-positive risk
-// is unchanged: the literal ;chunk-signature= + 64 hex + CR/LF is ~73
+// is unchanged: the literal ;chunk-signature= + 64 hex + CRLF is ~74
 // chars of structure, ~zero realistic match in binary payload.
-var chunkSigRe = regexp.MustCompile(`[0-9a-fA-F]+;chunk-signature=[0-9a-fA-F]{64}[\r\n]`)
+var chunkSigRe = regexp.MustCompile(`[0-9a-fA-F]+;chunk-signature=[0-9a-fA-F]{64}\r\n`)
 
-// trailerRe matches the aws-chunked trailer checksum marker emitted at the
-// end of STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER and
-// STREAMING-UNSIGNED-PAYLOAD-TRAILER uploads: 0\r\nx-amz-checksum-<algo>:...
-// The unsigned-trailer variant has no ;chunk-signature= in the part head,
-// so trailerRe is the ONLY strong feature that catches it — it must run on
-// tail probes ([Size-128, Size]) and boundary probes ([off_i-128, off_i+128]).
+// trailerRe matches the full aws-chunked trailer end-structure that S3
+// embeds at the end of a STREAMING-UNSIGNED-PAYLOAD-TRAILER upload:
 //
-// Algorithms: sha256, crc32, crc32c, sha1, crc64 (AWS 2024 SDK set).
-// Explicit alternation, not [a-z0-9]+, to reject non-AWS x-amz-checksum-foo:.
-// Unanchored: the trailer lands mid-slice in tail/boundary probes.
-var trailerRe = regexp.MustCompile(`x-amz-checksum-(sha256|crc32|crc32c|sha1|crc64):`)
+//	0\r\nx-amz-checksum-<algo>:<value>\r\n\r\n
+//
+// Breakdown (all CRLF mandatory under RFC 7230 chunked + AWS trailer ext):
+//   - 0\r\n          — zero-length chunk, marks end of the chunk stream
+//   - x-amz-checksum-<algo>:<value>  — the trailer checksum header line
+//   - \r\n          — CRLF terminating the trailer header line
+//   - \r\n          — empty line terminating the trailer block
+//
+// No leading \r\n: a non-empty payload is <hexlen>\r\n<data>\r\n0\r\n...,
+// but an EMPTY payload (payloadSize==0) has no data chunk, so the wire bytes
+// are exactly 0\r\nx-amz-checksum-<algo>:<value>\r\n\r\n with NO leading \r\n
+// (confirmed: AWS SDK v2 newUnsignedChunkReader returns only finalChunkBytes
+// "0\r\n" for payloadSize==0 — service/internal/checksum aws_chunked_encoding.go).
+// Requiring \r\n0\r\n would silently miss empty objects — the cardinal-rule
+// failure mode. The 0\r\nx-amz-checksum- framing is a strong enough anchor on
+// its own (~18 bytes); the preceding data chunk's \r\n is not part of the
+// trailer structure and is left to occur naturally before the match.
+//
+// The unsigned-trailer variant has no ;chunk-signature= in its chunk heads,
+// so this full structure is the ONLY strong feature that catches it — it
+// must run on tail probes ([Size-128, Size]) and boundary probes
+// ([off_i-128, off_i+128]). The signed -TRAILER variant instead ends with
+// ...<value>\r\nx-amz-trailer-signature:...\r\n\r\n, so this exact pattern
+// won't match it; that's fine — signed -TRAILER has ;chunk-signature= in
+// every chunk head and is caught by chunkSigRe at the head/boundary probe.
+//
+// <algo> is [a-z0-9]+ (not an explicit list): the framing is already a
+// near-zero false-positive anchor, so widening the algo set costs negligible
+// FP risk and future AWS algorithms (e.g. crc64nvme) won't silently evade
+// detection. This tool's cost of a missed detection (silent data corruption)
+// far exceeds its cost of a false positive (manual review).
+//
+// <value> is [^\r\n]* (single-line, encoding-agnostic): bounded by ':' and
+// \r\n\r\n, so the framing — not the value charset — is the signal.
+//
+// Probe windows always cover the full structure: the trailer is ~75 bytes
+// max (sha256's 44-byte base64), and both the 128-byte tail window and the
+// 128-byte back-half of a 256-byte boundary window hold it (the trailer
+// sits flush against off_i as the previous part's tail). Unanchored: the
+// trailer lands mid-slice in boundary probes.
+var trailerRe = regexp.MustCompile(`0\r\nx-amz-checksum-[a-z0-9]+:[^\r\n]*\r\n\r\n`)
 
 // extractHTTPStatusCode pulls the HTTP status code off err if it wraps an
 // *awshttp.ResponseError (every S3 protocol error from the aws SDK does).
