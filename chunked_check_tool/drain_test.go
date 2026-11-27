@@ -1,8 +1,8 @@
-// drain_test.go — tests for the two-stage shutdown / graceful-drain design:
-// Queue.Drain, drainQueuedPrefixes seed round-tripping, the lister's
-// graceful (next-page cursor) and hard (current-page cursor) abort
-// recordings, and the run-level integration (pre-cancelled listCtx → seeds
-// land in list_failed, run returns errInterrupted).
+// drain_test.go — tests for the single-stage shutdown / graceful-drain
+// design: the signal handler, Queue.Drain, drainQueuedPrefixes seed
+// round-tripping, the lister's graceful abort recording (next-page cursor),
+// and the run-level integration (pre-cancelled listCtx → seeds land in
+// list_failed, run returns errInterrupted).
 package main
 
 import (
@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -155,10 +156,10 @@ func TestListerGracefulCancelRecordsNextPageToken(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		l.processPrefix(listCtx, context.Background(), "root/", "", objCh, fake, nil)
+		l.processPrefix(listCtx, "root/", "", objCh, fake, nil)
 	}()
 	<-objCh  // page 1 fetched and its object sent — worker now in ListPage #2
-	cancel() // first signal
+	cancel() // the signal
 	<-done
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
@@ -176,53 +177,35 @@ func TestListerGracefulCancelRecordsNextPageToken(t *testing.T) {
 	}
 }
 
-// TestListerHardAbortMidPageRecordsCurrentPageToken — second signal
-// cancels hardCtx while a page's objects are still being sent: the failure
-// records the CURRENT page's cursor (not the next one), so the resume
-// re-lists the partially-emitted page and its unsent objects are recovered.
-func TestListerHardAbortMidPageRecordsCurrentPageToken(t *testing.T) {
-	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, ListType: 2, IsCheck: true}
-	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
-	stats := NewStats()
-	l := NewLister(NewQueue(), out, stats, cfg)
+// TestInstallSignalHandlerSingleStage — the handler has one stage: the first
+// SIGINT/SIGTERM cancels listCtx, and later signals change nothing. They
+// stay swallowed rather than killing the process mid-drain (stopping
+// immediately is kill -9).
+func TestInstallSignalHandlerSingleStage(t *testing.T) {
+	listCtx, stop := installSignalHandler()
+	defer stop()
 
-	const normal = "0123456789abcdef0123456789abcdef"
-	hardCtx, hardCancel := context.WithCancel(context.Background())
-	defer hardCancel()
-	fake := &scriptedS3{pages: map[string][]pageResult{
-		"root/": {
-			{objs: []ObjectInfo{
-				{Key: "root/a", ETag: normal},
-				{Key: "root/b", ETag: normal},
-			}, nextToken: "tok2"},
-		},
-	}}
-
-	objCh := make(chan VerifyTask, 1) // first send fills the buffer; second blocks
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		l.processPrefix(context.Background(), hardCtx, "root/", "", objCh, fake, nil)
-	}()
-	// Page 1 was fetched with cursor "" (first page). root/a sits in the
-	// channel; the send of root/b blocks on the full buffer.
-	waitFor(t, func() bool { return len(objCh) == 1 }, 2*time.Second)
-	hardCancel()
-	<-done
-	if err := out.Close(); err != nil {
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
 		t.Fatal(err)
 	}
+	select {
+	case <-listCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("listCtx not cancelled after SIGINT")
+	}
+	if got := listCtx.Err(); !errors.Is(got, context.Canceled) {
+		t.Fatalf("listCtx.Err() = %v, want context.Canceled", got)
+	}
 
-	data, err := os.ReadFile(filepath.Join(dir, "list_failed.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := string(data), "root%2F\n"; got != want {
-		t.Errorf("list_failed.txt = %q, want %q (current page cursor re-lists the page; root/b is otherwise lost)", got, want)
-	}
-	if got := stats.Snapshot().ListFailed; got != 1 {
-		t.Errorf("ListFailed = %d, want 1", got)
+	// Repeated signals: the process must still be running afterwards, with
+	// listCtx in the same state. The sleep lets both be delivered before
+	// stop() unregisters the handler (a signal arriving after that would
+	// take the default action).
+	syscall.Kill(os.Getpid(), syscall.SIGINT)
+	syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	time.Sleep(200 * time.Millisecond)
+	if got := listCtx.Err(); got != context.Canceled {
+		t.Fatalf("listCtx.Err() after repeated signals = %v, want context.Canceled", got)
 	}
 }
 
@@ -250,7 +233,7 @@ func TestRunInterruptedDrainsQueue(t *testing.T) {
 	listCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var buf strings.Builder
-	err = run(listCtx, context.Background(), cfg, "mybucket", "scanscope/", "", "", "", "", "", &buf)
+	err = run(listCtx, cfg, "mybucket", "scanscope/", "", "", "", "", "", &buf)
 	if !errors.Is(err, errInterrupted) {
 		t.Fatalf("run err = %v, want errInterrupted", err)
 	}

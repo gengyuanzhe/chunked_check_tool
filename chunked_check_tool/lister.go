@@ -29,15 +29,11 @@ import (
 // own Lister (as Task 10's main.go does), per-instance counters would break
 // BFS termination. Run and processPrefix therefore take s3 as a parameter.
 //
-// Contexts (two-stage shutdown, see main.go installSignalHandler):
-//   - listCtx is cancelled on the FIRST signal: workers stop popping new
-//     prefixes and in-flight ListPage calls fail, which records the
-//     remaining pages of the in-flight prefix into list_failed with a
-//     resume cursor.
-//   - hardCtx is cancelled on the SECOND signal: the objCh send aborts
-//     mid-page, which records the CURRENT page's cursor (so the resume
-//     re-lists that page — already-sent objects land in check_failed via
-//     the cancelled probes) and the worker returns.
+// Context (see main.go installSignalHandler): listCtx is cancelled by the
+// signal. Workers then stop popping new prefixes and in-flight ListPage
+// calls fail, which records the remaining pages of the in-flight prefix in
+// list_failed with a resume cursor; the objects of the page already fetched
+// are still sent, and are checked like every other task.
 type Lister struct {
 	queue    *Queue
 	out      *Output
@@ -94,7 +90,7 @@ func (l *Lister) SeedWithToken(prefix, token string) {
 // onObject is invoked after each object is processed (sent to objCh in
 // check mode, classified locally in list-only mode). It is used by main to
 // drive per-worker progress printing. Pass nil to disable.
-func (l *Lister) Run(listCtx, hardCtx context.Context, wg *sync.WaitGroup, objCh chan<- VerifyTask, workerIdx int, s3 S3API, onObject func()) {
+func (l *Lister) Run(listCtx context.Context, wg *sync.WaitGroup, objCh chan<- VerifyTask, workerIdx int, s3 S3API, onObject func()) {
 	defer wg.Done()
 	_ = workerIdx
 	for {
@@ -115,7 +111,7 @@ func (l *Lister) Run(listCtx, hardCtx context.Context, wg *sync.WaitGroup, objCh
 			initialToken = prefix[i+1:]
 			prefix = prefix[:i]
 		}
-		l.processPrefix(listCtx, hardCtx, prefix, initialToken, objCh, s3, onObject)
+		l.processPrefix(listCtx, prefix, initialToken, objCh, s3, onObject)
 		// Every prefix that is popped accounts for one Add(-1). Seed and the
 		// Mode-2 sub-prefix enqueue path do the matching Add(+1).
 		if l.inflight.Add(-1) == 0 {
@@ -146,13 +142,10 @@ func (l *Lister) recordListFailure(prefix, token string, err error) {
 //
 // Failure recording: the continuationToken recorded is always the cursor of
 // the page that did NOT complete — the `next` of the last successful page
-// (empty when the first page failed). On a graceful interrupt the failing
-// ListPage is the first page after the signal, so previously completed
-// pages are not re-listed on resume; on a hard abort mid-page the same
-// cursor makes the resume re-list the partially-emitted page (its unsent
-// objects are otherwise lost — the already-sent ones land in check_failed
-// via the cancelled probes).
-func (l *Lister) processPrefix(listCtx, hardCtx context.Context, prefix, initialToken string, objCh chan<- VerifyTask, s3 S3API, onObject func()) {
+// (empty when the first page failed). After the signal the failing ListPage
+// is the first page requested after it, so the pages completed before are
+// not re-listed on resume.
+func (l *Lister) processPrefix(listCtx context.Context, prefix, initialToken string, objCh chan<- VerifyTask, s3 S3API, onObject func()) {
 	continuationToken := initialToken
 	for {
 		objs, prefixes, next, err := s3.ListPage(listCtx, prefix, "", continuationToken, l.delim(), int(l.cfg.MaxKeys))
@@ -164,9 +157,9 @@ func (l *Lister) processPrefix(listCtx, hardCtx context.Context, prefix, initial
 		// Register the page's FULL object count and record this page's
 		// discoveries BEFORE any object of the page can reach a terminal
 		// state (the first objCh send). Two load-bearing orderings:
-		//   - full count: a hard abort mid-page leaves the count short, so
-		//     the journal cursor freezes before the page (recovery re-lists
-		//     it instead of silently skipping the unsent objects);
+		//   - full count: the page counts as complete only once all of its
+		//     objects have reported, so the journal cursor never crosses a
+		//     page whose results may not be on disk yet;
 		//   - discoveries first: the parent's cursor may only cross this
 		//     page once the sub-prefixes it revealed are visible to the
 		//     tracker, or a checkpoint could drop a subtree.
@@ -192,12 +185,7 @@ func (l *Lister) processPrefix(listCtx, hardCtx context.Context, prefix, initial
 				} else {
 					l.stats.IncrListedObject()
 				}
-				select {
-				case objCh <- task:
-				case <-hardCtx.Done():
-					l.recordListFailure(prefix, continuationToken, hardCtx.Err())
-					return
-				}
+				objCh <- task
 			} else {
 				// list-only mode: classify via ETag directly so no per-object
 				// []int64 offset slice is allocated (resolveOffsets would

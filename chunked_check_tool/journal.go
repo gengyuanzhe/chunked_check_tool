@@ -172,9 +172,9 @@ func applyJournalEvent(states map[string]journalState, line string) error {
 // persists is the continuation token AT that position (the next token the
 // page at that position returned), or the seed token when no page has
 // completed yet. Because the position never crosses a page with unreported
-// objects, a hard abort mid-page (objects pushed but never probed) freezes
-// the cursor BEFORE that page: recovery re-lists it. That is the load-bearing
-// safety property — see TestTrackerFrozenOnPartialPage.
+// objects, the cursor always sits before the first page whose results may
+// not be on disk yet, so recovery re-lists from there at worst. That is the
+// load-bearing safety property — see TestTrackerFrozenOnPartialPage.
 //
 // Memory is bounded by drop-after-commit: prefixes whose done state has
 // been persisted (Commit) leave the map, and per-page bookkeeping below the
@@ -247,8 +247,8 @@ func (t *JournalTracker) AddDiscovered(prefix string) {
 
 // RegisterPage records a successfully listed page: objCount objects will
 // report terminal states, nextToken is the page's returned continuation.
-// The count is the FULL page length, registered once — it never shrinks
-// with partial emission, which is what freezes the position on hard abort.
+// The count is the FULL page length, registered once: the page is complete
+// only when every one of them has reported.
 // Returns the page seq tasks must carry for their Terminal reports.
 func (t *JournalTracker) RegisterPage(prefix string, objCount int, nextToken string) int32 {
 	t.mu.Lock()

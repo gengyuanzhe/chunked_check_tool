@@ -245,15 +245,15 @@ func TestTrackerConsecutivePagesRequired(t *testing.T) {
 	}
 }
 
-// TestTrackerFrozenOnPartialPage — the core kill -9 invariant: a page whose
-// objects were only partially emitted (hard abort mid-page) never reaches
-// zero outstanding, so the cursor freezes BEFORE it. Registering the full
-// page count up front is what makes this hold.
+// TestTrackerFrozenOnPartialPage — the core journal invariant: a page whose
+// objects have only partly reported never counts as complete, so the cursor
+// stays BEFORE it. Registering the full page count up front is what makes
+// this hold.
 func TestTrackerFrozenOnPartialPage(t *testing.T) {
 	tr := NewJournalTracker()
 	tr.RegisterPage("p", 1, "T1") // page 0 completes fully
 	tr.Terminal("p", 0)
-	seq := tr.RegisterPage("p", 1000, "T2") // page 1: hard abort after 400 pushes
+	seq := tr.RegisterPage("p", 1000, "T2") // page 1: only 400 of 1000 report
 	for i := 0; i < 400; i++ {
 		tr.Terminal("p", seq)
 	}
@@ -558,7 +558,7 @@ func TestListerJournalRegistersPages(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		l.processPrefix(context.Background(), context.Background(), "root/", "", objCh, fake, nil)
+		l.processPrefix(context.Background(), "root/", "", objCh, fake, nil)
 	}()
 	var tasks []VerifyTask
 	for len(tasks) < 4 {
@@ -591,56 +591,6 @@ func TestListerJournalRegistersPages(t *testing.T) {
 	}
 }
 
-// TestListerJournalHardAbortFreezesPosition — the pipeline-level form of
-// the core invariant: a second-signal abort mid-page leaves the page's
-// outstanding count short, so the journal cursor freezes on the LAST
-// completed page and recovery re-lists the aborted page.
-func TestListerJournalHardAbortFreezesPosition(t *testing.T) {
-	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, ListType: 2, IsCheck: true}
-	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
-	defer out.Close()
-	l := NewLister(NewQueue(), out, NewStats(), cfg)
-	tr := NewJournalTracker()
-	l.SetJournal(tr)
-
-	const normal = "0123456789abcdef0123456789abcdef"
-	hardCtx, hardCancel := context.WithCancel(context.Background())
-	defer hardCancel()
-	fake := &scriptedS3{pages: map[string][]pageResult{
-		"root/": {
-			{objs: []ObjectInfo{{Key: "root/a", ETag: normal}}, nextToken: "tok2"},
-			{objs: []ObjectInfo{{Key: "root/b", ETag: normal}, {Key: "root/c", ETag: normal}}, nextToken: ""},
-		},
-	}}
-	objCh := make(chan VerifyTask, 1)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		l.processPrefix(context.Background(), hardCtx, "root/", "", objCh, fake, nil)
-	}()
-	// Consume page 0's only object as a checker would and report its
-	// terminal: page 0 completes, cursor moves to its token.
-	select {
-	case task := <-objCh:
-		tr.Terminal(task.JournalPrefix, task.PageSeq)
-	case <-time.After(2 * time.Second):
-		t.Fatal("page 0 task never arrived")
-	}
-	// Page 1: root/b fills the capacity-1 channel, root/c's send blocks.
-	waitFor(t, func() bool { return len(objCh) == 1 }, 2*time.Second)
-	hardCancel() // second signal: abort the mid-page send
-	<-done
-
-	snap := tr.Snapshot()
-	if c := findCursor(snap, "root/"); c == nil || c.Token != "tok2" {
-		t.Errorf("cursor after mid-page hard abort = %+v, want {root/, tok2} (frozen at last completed page)", c)
-	}
-	if containsString(snap.Dones, "root/") {
-		t.Errorf("done = true after hard abort, want false")
-	}
-}
-
 // TestListerJournalPipeKeyFlowsNormally — a key containing "|" is a normal
 // object now that every output path escapes server fields: it becomes a
 // task like any other key, and the page completes through the checker's
@@ -664,7 +614,7 @@ func TestListerJournalPipeKeyFlowsNormally(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		l.processPrefix(context.Background(), context.Background(), "root/", "", objCh, fake, nil)
+		l.processPrefix(context.Background(), "root/", "", objCh, fake, nil)
 	}()
 	got := map[string]bool{}
 	for i := 0; i < 2; i++ {
@@ -709,7 +659,7 @@ func TestListerJournalDiscoversBeforeEmission(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		l.processPrefix(context.Background(), context.Background(), "root/", "", objCh, fake, nil)
+		l.processPrefix(context.Background(), "root/", "", objCh, fake, nil)
 	}()
 	var tasks []VerifyTask
 	for len(tasks) < 2 {
@@ -740,7 +690,7 @@ func TestCheckerJournalTerminalAfterHandle(t *testing.T) {
 	cfg := &Config{OutputDir: dir, IsCheck: true}
 	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	defer out.Close()
-	c := NewChecker(context.Background(), &scriptedS3{}, out, NewStats(), cfg)
+	c := NewChecker(&scriptedS3{}, out, NewStats(), cfg)
 	tr := NewJournalTracker()
 	c.SetJournal(tr)
 	tr.RegisterPage("root/", 1, "T1")
@@ -772,7 +722,7 @@ func TestListerJournalListOnlyTerminals(t *testing.T) {
 		},
 	}}
 	objCh := make(chan VerifyTask, 8)
-	l.processPrefix(context.Background(), context.Background(), "root/", "", objCh, fake, nil)
+	l.processPrefix(context.Background(), "root/", "", objCh, fake, nil)
 
 	if snap := tr.Snapshot(); !containsString(snap.Dones, "root/") {
 		t.Errorf("done = false in list-only mode; snapshot: %+v", snap)
@@ -839,7 +789,7 @@ func TestJournalResumeRoundTrip(t *testing.T) {
 	tr := NewJournalTracker()
 	l := NewLister(NewQueue(), out, NewStats(), cfg)
 	l.SetJournal(tr)
-	c := NewChecker(context.Background(), &scriptedS3{}, out, NewStats(), cfg)
+	c := NewChecker(&scriptedS3{}, out, NewStats(), cfg)
 	c.SetJournal(tr)
 
 	// Checkpoint loop mirrors run()'s wiring; registered cleanups replicate
@@ -868,7 +818,7 @@ func TestJournalResumeRoundTrip(t *testing.T) {
 	prefixDone := make(chan struct{})
 	go func() {
 		defer close(prefixDone)
-		l.processPrefix(context.Background(), context.Background(), "root/", "", objCh, fake, nil)
+		l.processPrefix(context.Background(), "root/", "", objCh, fake, nil)
 	}()
 	// Checkers probe the first page's objects (terminals flow, page 0
 	// completes). The rest are emitted but never probed — the kill window.
@@ -928,7 +878,7 @@ func TestJournalEnabledOnlyMode2S3List(t *testing.T) {
 		_ = args
 		listCtx, cancel := context.WithCancel(context.Background())
 		cancel() // pre-cancelled: no network, no listing, run returns errInterrupted
-		_ = run(listCtx, context.Background(), cfg, "mybucket", "", "", "", "", "", "", &buf)
+		_ = run(listCtx, cfg, "mybucket", "", "", "", "", "", "", &buf)
 		return cfg.OutputDir
 	}
 
@@ -958,7 +908,7 @@ func TestJournalEnabledOnlyMode2S3List(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), context.Background(), cfg, "mybucket", "", "", checkPath, "", "", "", &buf); err != nil {
+	if err := run(context.Background(), cfg, "mybucket", "", "", checkPath, "", "", "", &buf); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(cfg.OutputDir, "journal.txt")); !os.IsNotExist(err) {

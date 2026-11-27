@@ -281,7 +281,7 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", "", &buf); err != nil {
+	if err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 
@@ -362,7 +362,7 @@ func TestRunBackupFileETagMismatchEndToEnd(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", "", &buf); err != nil {
+	if err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 
@@ -403,7 +403,7 @@ func TestRunBackupListUploadFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", "", &buf)
+	err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", "", &buf)
 	if err == nil || !strings.Contains(err.Error(), "upload backup list") {
 		t.Fatalf("run err = %v, want upload backup list failure", err)
 	}
@@ -437,7 +437,7 @@ func TestRunBackupProgressLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", "", &buf); err != nil {
+	if err := run(context.Background(), cfg, "srcbucket", "", "", "", backupPath, "", "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 	out := buf.String()

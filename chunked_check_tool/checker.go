@@ -92,13 +92,6 @@ func isNormalETag(etag string) bool {
 // outputs based on RangeGet probes (head/boundary/tail or whole-object
 // fast-path) per buildProbes.
 type Checker struct {
-	// ctx bounds every S3 call the checker makes (HEAD probes, RangeGets).
-	// It is the hard context of the two-stage shutdown: cancelled only on a
-	// second signal, so a graceful drain (first signal) finishes normally,
-	// while a hard abort fails in-flight probes fast — the error path then
-	// records the task in check_failed/mp_check_failed, which is exactly the
-	// -check-file retry input.
-	ctx    context.Context
 	worker S3API
 	out    *Output
 	stats  *Stats
@@ -108,8 +101,8 @@ type Checker struct {
 	journal *JournalTracker
 }
 
-func NewChecker(ctx context.Context, worker S3API, out *Output, stats *Stats, cfg *Config) *Checker {
-	return &Checker{ctx: ctx, worker: worker, out: out, stats: stats, cfg: cfg}
+func NewChecker(worker S3API, out *Output, stats *Stats, cfg *Config) *Checker {
+	return &Checker{worker: worker, out: out, stats: stats, cfg: cfg}
 }
 
 // SetJournal wires the progress tracker. Setter (not a constructor param)
@@ -147,7 +140,7 @@ func (c *Checker) Handle(task VerifyTask) {
 		defer c.journal.Terminal(task.JournalPrefix, task.PageSeq)
 	}
 	if task.HeadFirst {
-		etag, size, err := c.worker.HeadObject(c.ctx, task.Key)
+		etag, size, err := c.worker.HeadObject(context.Background(), task.Key)
 		if err != nil {
 			if task.IsMultipart {
 				c.out.WriteMpCheckFailed(task.Key, task.Offsets)
@@ -198,7 +191,7 @@ func (c *Checker) verify(task VerifyTask) {
 		}
 		return
 	}
-	result, err := runProbes(c.ctx, c.worker, task, c.cfg.WholeObjectProbeThreshold)
+	result, err := runProbes(context.Background(), c.worker, task, c.cfg.WholeObjectProbeThreshold)
 	switch result {
 	case probeCorrupted:
 		if task.IsMultipart {

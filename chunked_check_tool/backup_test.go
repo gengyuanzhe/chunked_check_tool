@@ -2,7 +2,6 @@
 package main
 
 import (
-	"context"
 	"crypto/md5"
 	"errors"
 	"fmt"
@@ -50,7 +49,7 @@ func newBackupTestEnv(t *testing.T, f *FakeS3) (*BackupChecker, string, func()) 
 	}
 	t.Cleanup(flush)
 	stats := NewStats()
-	return NewBackupChecker(context.Background(), f, out, stats, cfg), dir, flush
+	return NewBackupChecker(f, out, stats, cfg), dir, flush
 }
 
 func readBackupFile(t *testing.T, dir, name string) string {

@@ -290,13 +290,17 @@ join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
 
 `list_failed.txt` 行格式 `prefix\x1ftoken`：token 是失败页的 continuationToken（V1 是上一页最后一个 key，V2 是服务端返回的不透明 token）。第一页就失败或该 prefix 从未启动时 token 为空，整行就是单字段 `prefix`。补跑时 `-resume-list` 读这些行，把 `(prefix, token)` 作为初始状态 seed 进 BFS 队列，`processPrefix` 从该 token 续页，避免重复枚举已成功的前几页。**仅 Mode 2 支持**——Mode 1 的根/子前缀游标语义不可区分，其列举失败重试 = 原命令重跑（幂等，跨轮并集吸收重复）。
 
-### 信号与断点续传（两段式）
+### 信号与断点续传
 
-**第一次 SIGINT/SIGTERM**：停止列举/读输入，**排空**已入队的检查/中转任务；进行中的前缀把剩余页的游标写入 `list_failed.txt`，队列里未启动的前缀也写入（裸 prefix；`-resume-list` 种子带原 token 精确往返）。效果：**run 目录成为完备检查点**——每个 prefix 要么列完且每个对象都有终态，要么带可续游标；进程以非零退出（`interrupted: graceful drain complete`）。
+**收到 SIGINT/SIGTERM**：停止列举/读输入，**排空**已入队的检查/中转任务；进行中的前缀把剩余页的游标写入 `list_failed.txt`，队列里未启动的前缀也写入（裸 prefix；`-resume-list` 种子带原 token 精确往返）。效果：**run 目录成为完备检查点**——每个 prefix 要么列完且每个对象都有终态，要么带可续游标；进程以非零退出（`interrupted: graceful drain complete`）。
 
-**第二次信号**：立即硬停——进行中的探测/中转中止（多段上传 Abort 清理），队列里未处理的对象快速记入 `check_failed.txt` / `mp_check_failed.txt` / `backup_failed.txt`（即各自的补跑输入），不静默丢任何对象。
+**之后的信号不再有动作**：进程里没有强停路径，排空一定跑完（第一次信号时日志会提示用 kill -9）。
 
-**kill -9 / 崩溃**是唯一有损路径：未处理部分无记录。补救 = 用相同 `-prefix` 重跑全量扫描（探测幂等、输出 append-only 并集语义容忍重复）。
+**kill -9 / 崩溃**：没处理的部分不留记录，按运行模式续跑：
+
+- `list_type=2` 扫描：`-resume-journal <被杀那一轮的目录>/journal.txt`，最多重做 10 分钟的进度
+- `-check-file` / `-backup-file`：重跑原输入文件，或用结果文件求差集只跑没有定论的对象（见上文「kill -9 后的续跑」）
+- `list_type=1`：只能用相同参数重跑全量扫描（探测幂等、输出 append-only 并集语义容忍重复）
 
 **跨轮合并**：`output_dir_timestamp` 默认 true，每轮（含每轮补跑）独立目录；逻辑结果 = 跨目录并集，收敛判据 = 最新一轮失败文件为空。最终备份输入：
 

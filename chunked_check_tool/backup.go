@@ -34,25 +34,18 @@ import (
 //     the bad copy stays in the backup
 //     bucket as evidence
 type BackupChecker struct {
-	// ctx bounds every S3 call the relay makes. It is the hard context of
-	// the two-stage shutdown: cancelled only on a second signal, so a
-	// graceful drain (first signal) finishes in-flight relays, while a hard
-	// abort cancels them (multipart uploads are aborted, no partial object
-	// lingers) and the error path records the task in backup_failed — the
-	// file this mode's own retry consumes.
-	ctx    context.Context
 	worker S3API
 	out    *Output
 	stats  *Stats
 	cfg    *Config
 }
 
-func NewBackupChecker(ctx context.Context, worker S3API, out *Output, stats *Stats, cfg *Config) *BackupChecker {
-	return &BackupChecker{ctx: ctx, worker: worker, out: out, stats: stats, cfg: cfg}
+func NewBackupChecker(worker S3API, out *Output, stats *Stats, cfg *Config) *BackupChecker {
+	return &BackupChecker{worker: worker, out: out, stats: stats, cfg: cfg}
 }
 
 func (c *BackupChecker) Handle(task BackupTask) {
-	etag, size, err := c.worker.HeadObject(c.ctx, task.Key)
+	etag, size, err := c.worker.HeadObject(context.Background(), task.Key)
 	if err != nil {
 		c.fail(task, "head", err)
 		return
@@ -96,14 +89,14 @@ func (c *BackupChecker) backup(task BackupTask, srcETag string, size int64) {
 func (c *BackupChecker) relayRegular(key string, size int64) (string, error) {
 	var r io.Reader = strings.NewReader("")
 	if size > 0 {
-		rc, err := c.worker.DownloadRange(c.ctx, key, 0, size)
+		rc, err := c.worker.DownloadRange(context.Background(), key, 0, size)
 		if err != nil {
 			return "", err
 		}
 		defer rc.Close()
 		r = rc
 	}
-	return c.worker.PutObjectStream(c.ctx, c.cfg.BackupBucket, key, r, size)
+	return c.worker.PutObjectStream(context.Background(), c.cfg.BackupBucket, key, r, size)
 }
 
 // relayMultipart re-uploads the object as multipart parts split at the
@@ -113,7 +106,7 @@ func (c *BackupChecker) relayRegular(key string, size int64) (string, error) {
 // aborts the in-progress upload so no partial object lingers.
 func (c *BackupChecker) relayMultipart(task BackupTask, size int64) (string, error) {
 	dst := c.cfg.BackupBucket
-	uploadID, err := c.worker.CreateMultipart(c.ctx, dst, task.Key)
+	uploadID, err := c.worker.CreateMultipart(context.Background(), dst, task.Key)
 	if err != nil {
 		return "", err
 	}
@@ -125,25 +118,25 @@ func (c *BackupChecker) relayMultipart(task BackupTask, size int64) (string, err
 		}
 		length := end - off
 		if length <= 0 {
-			c.worker.AbortMultipart(c.ctx, dst, task.Key, uploadID)
+			c.worker.AbortMultipart(context.Background(), dst, task.Key, uploadID)
 			return "", fmt.Errorf("part %d at offset %d has non-positive length %d (object size %d)", i+1, off, length, size)
 		}
-		rc, err := c.worker.DownloadRange(c.ctx, task.Key, off, length)
+		rc, err := c.worker.DownloadRange(context.Background(), task.Key, off, length)
 		if err != nil {
-			c.worker.AbortMultipart(c.ctx, dst, task.Key, uploadID)
+			c.worker.AbortMultipart(context.Background(), dst, task.Key, uploadID)
 			return "", err
 		}
-		partETag, err := c.worker.UploadPart(c.ctx, dst, task.Key, uploadID, i+1, rc, length)
+		partETag, err := c.worker.UploadPart(context.Background(), dst, task.Key, uploadID, i+1, rc, length)
 		rc.Close()
 		if err != nil {
-			c.worker.AbortMultipart(c.ctx, dst, task.Key, uploadID)
+			c.worker.AbortMultipart(context.Background(), dst, task.Key, uploadID)
 			return "", err
 		}
 		parts = append(parts, UploadedPart{PartNumber: i + 1, ETag: partETag})
 	}
-	dstETag, err := c.worker.CompleteMultipart(c.ctx, dst, task.Key, uploadID, parts)
+	dstETag, err := c.worker.CompleteMultipart(context.Background(), dst, task.Key, uploadID, parts)
 	if err != nil {
-		c.worker.AbortMultipart(c.ctx, dst, task.Key, uploadID)
+		c.worker.AbortMultipart(context.Background(), dst, task.Key, uploadID)
 		return "", err
 	}
 	return dstETag, nil

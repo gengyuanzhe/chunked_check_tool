@@ -112,57 +112,47 @@ func main() {
 
 	printConfig(mwOut, *cfgPath, cfg, *bucket, *prefix, *startAfter, *checkFile, *backupFile, *resumeList, *resumeJournal, runLogPath)
 
-	listCtx, hardCtx, stopSignals := installSignalHandler()
+	listCtx, stopSignals := installSignalHandler()
 	defer stopSignals()
 
-	if err := run(listCtx, hardCtx, cfg, *bucket, *prefix, *startAfter, *checkFile, *backupFile, *resumeList, *resumeJournal, mwOut); err != nil {
+	if err := run(listCtx, cfg, *bucket, *prefix, *startAfter, *checkFile, *backupFile, *resumeList, *resumeJournal, mwOut); err != nil {
 		log.Fatalf("run: %v", err)
 	}
 }
 
-// installSignalHandler wires the two-stage SIGINT/SIGTERM shutdown.
+// installSignalHandler wires the SIGINT/SIGTERM shutdown.
 //
-//	1st signal cancels listCtx: S3 listing and input-file reading stop.
-//
+// The signal cancels listCtx: S3 listing and input-file reading stop.
 // In-flight pages record their resume cursor into list_failed.txt; prefixes
 // still queued are recorded by drainQueuedPrefixes; every task already
 // emitted finishes through the workers. The run directory becomes a
 // complete checkpoint — nothing that was listed is left without a terminal
 // state, nothing unlisted is left without a resume cursor.
 //
-//	2nd signal cancels hardCtx: in-flight probes/relays abort (multipart
-//
-// uploads are aborted, no partial object lingers) and every task still
-// queued fails fast into its failure file — check_failed / mp_check_failed
-// (the -check-file retry input) or backup_failed (the -backup-file retry
-// input). Nothing unprocessed is silently dropped; the process exits once
-// the queues burn down.
-//
-// A hard crash (kill -9, OOM) is the only lossy path: nothing is recorded
-// for the unprocessed remainder. Recovery is re-running the same scan scope
-// — probes are idempotent reads and outputs are append-only unions. The
-// output writer goroutines flush every outputFlushInterval, so a hard
-// crash loses at most one interval of tail lines per file (the failure
-// files are the resume inputs) instead of the full 64KB bufio buffer.
-func installSignalHandler() (listCtx, hardCtx context.Context, stop func()) {
+// There is no second stage: later signals are swallowed and the drain runs
+// to completion. Stopping earlier means kill -9, which records nothing for
+// the unprocessed remainder — a Mode 2 scan resumes from journal.txt
+// (-resume-journal); the file-input modes re-run their input minus the
+// objects that already have a result (AGENTS §7.4). The output writer
+// goroutines flush every outputFlushInterval, so a kill loses at most one
+// interval of tail lines per file (the failure files are the resume
+// inputs) instead of the full 64KB bufio buffer.
+func installSignalHandler() (listCtx context.Context, stop func()) {
 	listCtx, listCancel := context.WithCancel(context.Background())
-	hardCtx, hardCancel := context.WithCancel(context.Background())
-	sigCh := make(chan os.Signal, 2)
+	// Capacity 1 keeps a repeated signal swallowed after the handler has
+	// taken the first one, instead of letting it reach the process.
+	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Printf("signal received: stopping listing, draining in-flight work (second signal aborts immediately)")
+		log.Printf("signal received: stopping listing, draining in-flight work (to stop now: kill -9)")
 		listCancel()
-		<-sigCh
-		log.Printf("second signal: aborting in-flight work, recording unprocessed tasks as failures")
-		hardCancel()
 	}()
 	stop = func() {
 		signal.Stop(sigCh)
 		listCancel()
-		hardCancel()
 	}
-	return listCtx, hardCtx, stop
+	return listCtx, stop
 }
 
 // printConfig writes a config snapshot to w at startup. sk is masked so the
@@ -259,18 +249,18 @@ func drainQueuedPrefixes(listCtx context.Context, q *Queue, out *Output, stats *
 // pagination returned no sub-prefixes), the queue is closed explicitly so
 // list workers exit immediately.
 //
-// The two contexts come from installSignalHandler: listCtx stops listing
-// (graceful drain begins), hardCtx aborts in-flight work (see Checker /
-// BackupChecker / Lister comments).
-func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAfter, checkFile, backupFile, resumeList, resumeJournal string, stdout io.Writer) error {
+// listCtx comes from installSignalHandler: its cancellation stops listing
+// and starts the drain; work already emitted then finishes through the
+// workers (see the Lister comment).
+func run(listCtx context.Context, cfg *Config, bucket, prefix, startAfter, checkFile, backupFile, resumeList, resumeJournal string, stdout io.Writer) error {
 	// Backup mode: an entirely separate pipeline (HEAD + type gate + relay);
 	// see runBackup. Dispatched before any list/check wiring.
 	if backupFile != "" {
-		return runBackup(listCtx, hardCtx, cfg, bucket, backupFile, stdout)
+		return runBackup(listCtx, cfg, bucket, backupFile, stdout)
 	}
 
 	pool := NewNodePool(cfg)
-	startNodeRecovery(hardCtx, pool, cfg, bucket)
+	startNodeRecovery(context.Background(), pool, cfg, bucket)
 
 	// Journal interval env override (smoke runbook lever — see
 	// journalIntervalFromEnv). Resolved before anything starts so a bad
@@ -366,7 +356,7 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 			lc := &localCounter{interval: cfg.ProgressInterval, printer: printer}
 			go func(w S3API, lc *localCounter) {
 				defer checkWg.Done()
-				c := NewChecker(hardCtx, w, out, stats, cfg)
+				c := NewChecker(w, out, stats, cfg)
 				if journal != nil {
 					c.SetJournal(journal)
 				}
@@ -413,7 +403,7 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 		workerS3 := newWorker(pool, i, cfg, bucket, stats, debugLogger, listLogger)
 		lc := &localCounter{interval: cfg.ProgressInterval, printer: printer}
 		onObject := func() { lc.incr(stats, "listed") }
-		go lister.Run(listCtx, hardCtx, &listWg, objCh, i, workerS3, onObject)
+		go lister.Run(listCtx, &listWg, objCh, i, workerS3, onObject)
 	}
 
 	// Seeding.
@@ -428,8 +418,7 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 		seedWorker := newWorker(pool, cfg.ListConcurrency+cfg.CheckConcurrency, cfg, bucket, stats, debugLogger, listLogger)
 		sa := startAfter
 		continuationToken := ""
-		abort := false
-		for !abort {
+		for {
 			objs, subprefixes, next, err := seedWorker.ListPage(listCtx, prefix, sa, continuationToken, true, int(cfg.MaxKeys))
 			if err != nil {
 				out.WriteListFailed(prefix, continuationToken)
@@ -441,22 +430,7 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 			sa = "" // continuation tokens take over after the first page
 			for _, o := range objs {
 				if cfg.IsCheck {
-					select {
-					case objCh <- resolveOffsets(o, cfg):
-					case <-hardCtx.Done():
-						// Hard abort mid-page: re-record the current page's
-						// cursor so the resume re-lists this page (already-sent
-						// objects land in check_failed via the cancelled
-						// probes).
-						hardErr := hardCtx.Err()
-						out.WriteListFailed(prefix, continuationToken)
-						out.WriteListFailedLog(prefix, extractHTTPStatusCode(hardErr), extractS3Code(hardErr), extractRequestID(hardErr), hardErr)
-						stats.IncrListFailed()
-						abort = true
-					}
-					if abort {
-						break
-					}
+					objCh <- resolveOffsets(o, cfg)
 				} else {
 					// list-only: lister is the sole counter, so main counts
 					// and classifies root direct objects here. No check is
@@ -467,9 +441,6 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 						stats.IncrListedObject()
 					}
 				}
-			}
-			if abort {
-				break
 			}
 			for _, sp := range subprefixes {
 				lister.Seed(sp)
@@ -587,9 +558,9 @@ func newWorker(pool *NodePool, workerIdx int, cfg *Config, bucket string, stats 
 // backup bucket, then check_concurrency workers consume BackupTasks
 // (HEAD → type validation → relay). See BackupChecker for the per-task
 // routing.
-func runBackup(listCtx, hardCtx context.Context, cfg *Config, bucket, backupFile string, stdout io.Writer) error {
+func runBackup(listCtx context.Context, cfg *Config, bucket, backupFile string, stdout io.Writer) error {
 	pool := NewNodePool(cfg)
-	startNodeRecovery(hardCtx, pool, cfg, bucket)
+	startNodeRecovery(context.Background(), pool, cfg, bucket)
 	out, err := NewBackupOutput(cfg, bucket)
 	if err != nil {
 		return fmt.Errorf("output: %w", err)
@@ -634,7 +605,7 @@ func runBackup(listCtx, hardCtx context.Context, cfg *Config, bucket, backupFile
 		lc := &localCounter{interval: cfg.ProgressInterval, printer: printer}
 		go func(w S3API, lc *localCounter) {
 			defer wg.Done()
-			c := NewBackupChecker(hardCtx, w, out, stats, cfg)
+			c := NewBackupChecker(w, out, stats, cfg)
 			for task := range ch {
 				c.Handle(task)
 				lc.incr(stats, "backed")

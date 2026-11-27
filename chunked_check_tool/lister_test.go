@@ -41,7 +41,7 @@ func TestListerMode2BFSPrefixes(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.ListConcurrency; i++ {
 		wg.Add(1)
-		go lister.Run(context.Background(), context.Background(), &wg, objCh, i, fake, nil)
+		go lister.Run(context.Background(), &wg, objCh, i, fake, nil)
 	}
 	go func() {
 		wg.Wait()
@@ -98,7 +98,7 @@ func TestListerMode2CommonPrefixesOnlyPage(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go lister.Run(context.Background(), context.Background(), &wg, objCh, 0, fake, nil)
+	go lister.Run(context.Background(), &wg, objCh, 0, fake, nil)
 	go func() {
 		wg.Wait()
 		close(objCh)
@@ -239,7 +239,7 @@ func TestListerShortResponseWarns(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.ListConcurrency; i++ {
 		wg.Add(1)
-		go lister.Run(context.Background(), context.Background(), &wg, objCh, i, fake, nil)
+		go lister.Run(context.Background(), &wg, objCh, i, fake, nil)
 	}
 	go func() {
 		wg.Wait()
@@ -295,7 +295,7 @@ func TestListerShortResponseDisabledWhenUnconfigured(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.ListConcurrency; i++ {
 		wg.Add(1)
-		go lister.Run(context.Background(), context.Background(), &wg, objCh, i, fake, nil)
+		go lister.Run(context.Background(), &wg, objCh, i, fake, nil)
 	}
 	go func() {
 		wg.Wait()
@@ -339,7 +339,7 @@ func TestListerPassesConfiguredMaxKeys(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.ListConcurrency; i++ {
 		wg.Add(1)
-		go lister.Run(context.Background(), context.Background(), &wg, objCh, i, fake, nil)
+		go lister.Run(context.Background(), &wg, objCh, i, fake, nil)
 	}
 	go func() {
 		wg.Wait()
@@ -393,7 +393,7 @@ func TestListerSlashSuffixKeyFlowsAsObject(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.ListConcurrency; i++ {
 		wg.Add(1)
-		go lister.Run(context.Background(), context.Background(), &wg, objCh, i, fake, nil)
+		go lister.Run(context.Background(), &wg, objCh, i, fake, nil)
 	}
 	go func() {
 		wg.Wait()
@@ -460,7 +460,7 @@ func TestListerSlashSuffixKeyFlowsAsObject_ListOnly(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.ListConcurrency; i++ {
 		wg.Add(1)
-		go lister.Run(context.Background(), context.Background(), &wg, objCh, i, fake, nil)
+		go lister.Run(context.Background(), &wg, objCh, i, fake, nil)
 	}
 	go func() {
 		wg.Wait()
