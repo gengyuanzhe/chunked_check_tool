@@ -218,7 +218,7 @@ func TestCheckerMultipartSegmentCheckCorrupted(t *testing.T) {
 	c := NewChecker(worker, out, s, cfg)
 	// multipart etag + Size=10MB → 2 segments at offset 0 and 5MB. Body
 	// matches at offset 0, so it's flagged immediately as corrupted.
-	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5 * 1024 * 1024}})
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5 * 1024 * 1024}})
 	if got := s.Snapshot().CorruptedMp; got != 1 {
 		t.Errorf("corrupted_mp=%d want 1", got)
 	}
@@ -245,7 +245,7 @@ func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 	s := NewStats()
 	worker := &FakeS3{Body: []byte("normal object body, no chunk signature here")}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5 * 1024 * 1024}})
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5 * 1024 * 1024}})
 	if got := s.Snapshot().CorruptedMp; got != 0 {
 		t.Errorf("corrupted_mp=%d want 0", got)
 	}
@@ -298,6 +298,89 @@ func TestCheckerSegmentModeZeroSizeMultipartWritesMpTxt(t *testing.T) {
 	}
 }
 
+// range416S3 answers every range read with the 416 a real server gives for
+// an empty object, and counts the calls.
+type range416S3 struct {
+	*FakeS3
+	calls *int
+}
+
+func (c *range416S3) RangeGetAt(ctx context.Context, key string, offset, length int64) ([]byte, error) {
+	*c.calls++
+	return nil, fakeS3Err(416, "InvalidRange", "The requested range is not satisfiable", "REQ-416")
+}
+
+// TestCheckerOffsetModeZeroSizeMultipartIsCleanWithoutProbe — offset mode:
+// an empty multipart object (Size 0, ETag <md5>-1-0) parses to one part at
+// offset 0. Probing it reads a range from an empty body, which the server
+// answers with 416, so the object landed in mp_check_failed on every run and
+// never cleared on retry. An empty object cannot hold leftover upload
+// framing: it is clean, with no request at all.
+func TestCheckerOffsetModeZeroSizeMultipartIsCleanWithoutProbe(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, IsMultipartSuccessLog: true}
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+	calls := 0
+	s := NewStats()
+	c := NewChecker(&range416S3{FakeS3: &FakeS3{}, calls: &calls}, out, s, cfg)
+	// The task comes from the real resolveOffsets, as in the lister.
+	task := resolveOffsets(ObjectInfo{Key: "empty", ETag: "0123456789abcdef0123456789abcdef-1-0", Size: 0, OwnerID: "owner-A"}, cfg)
+	if len(task.Offsets) != 1 {
+		t.Fatalf("ETag <md5>-1-0 with Size 0 should parse to one part, got offsets %v", task.Offsets)
+	}
+	c.Handle(task)
+	if calls != 0 {
+		t.Errorf("range requests = %d, want 0 (an empty object is not probed)", calls)
+	}
+	if snap := s.Snapshot(); snap.OkMp != 1 || snap.MpCheckFailed != 0 || snap.CorruptedMp != 0 {
+		t.Errorf("ok_mp=%d mp_check_failed=%d corrupt_mp=%d, want 1/0/0",
+			snap.OkMp, snap.MpCheckFailed, snap.CorruptedMp)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "ok_mp.txt"))
+	if err != nil {
+		t.Fatalf("read ok_mp.txt: %v", err)
+	}
+	if got, want := string(data), "test-bkt\x1fempty\x1f1\x1f0\n"; got != want {
+		t.Errorf("ok_mp.txt = %q, want %q", got, want)
+	}
+}
+
+// TestCheckerCheckFileZeroSizeMultipartIsCleanWithoutProbe — the same object
+// through a -check-file line: HEAD reports Size 0 and a multipart ETag, and
+// the line carries [0]. This is the path a retry of the old mp_check_failed
+// line took, so the line could never be cleared.
+func TestCheckerCheckFileZeroSizeMultipartIsCleanWithoutProbe(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
+	out, _ := NewOutput(cfg, "mybucket", FileInputCheckFile)
+	calls := 0
+	s := NewStats()
+	worker := &range416S3{
+		FakeS3: &FakeS3{Heads: map[string]HeadInfo{"k": {ETag: "0123456789abcdef0123456789abcdef-1", Size: 0}}},
+		calls:  &calls,
+	}
+	NewChecker(worker, out, s, cfg).Handle(VerifyTask{Key: "k", IsMultipart: true, Offsets: []int64{0}, HeadFirst: true})
+	if calls != 0 {
+		t.Errorf("range requests = %d, want 0 (an empty object is not probed)", calls)
+	}
+	if snap := s.Snapshot(); snap.OkMp != 1 || snap.MpCheckFailed != 0 {
+		t.Errorf("ok_mp=%d mp_check_failed=%d, want 1/0", snap.OkMp, snap.MpCheckFailed)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "_unknown", "ok_mp.txt"))
+	if err != nil {
+		t.Fatalf("read ok_mp.txt: %v", err)
+	}
+	if got, want := string(data), "mybucket\x1fk\x1f1\x1f0\n"; got != want {
+		t.Errorf("ok_mp.txt = %q, want %q", got, want)
+	}
+}
+
 // TestCheckerMultipartSegmentCheckRangeError: segment RangeGet error →
 // writes to mp_check_failed.txt at the root (NOT check_failed), and
 // bumps MpCheckFailed (not CheckFailed).
@@ -308,7 +391,7 @@ func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
 	s := NewStats()
 	worker := &FakeS3{Err: context.DeadlineExceeded}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5 * 1024 * 1024}})
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5 * 1024 * 1024}})
 	if got := s.Snapshot().MpCheckFailed; got != 1 {
 		t.Errorf("mp_check_failed=%d want 1 (segment RangeGet error should bump MpCheckFailed)", got)
 	}
@@ -466,7 +549,7 @@ func TestCheckerMultipartSegmentCheckSecondSegmentMatches(t *testing.T) {
 		},
 	}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Offsets: []int64{0, 5 * 1024 * 1024}})
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5 * 1024 * 1024}})
 	if got := s.Snapshot().CorruptedMp; got != 1 {
 		t.Errorf("corrupted_mp=%d want 1 (second segment should trigger)", got)
 	}

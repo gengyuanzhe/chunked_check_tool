@@ -123,9 +123,9 @@ func (c *Checker) SetJournal(j *JournalTracker) {
 	c.journal = j
 }
 
-// Handle routes task to verify. The size==0 normal-object shortcut stays
-// here (RangeGet on an empty body returns 416 → would misclassify as
-// check_failed). Listed-counter bumps (list_obj/list_mp) are NOT done here —
+// Handle routes task to verify. The empty-object shortcut stays here (RangeGet
+// on an empty body returns 416 → would misclassify as check_failed /
+// mp_check_failed). Listed-counter bumps (list_obj/list_mp) are NOT done here —
 // the S3 lister bumps them in check mode before pushing the task. The
 // file-input mode (-check-file) does not bump them either (no S3 LIST);
 // its summary reports read instead of list_all.
@@ -174,9 +174,19 @@ func (c *Checker) Handle(task VerifyTask) {
 			}
 		}
 	}
-	if !task.IsMultipart && task.Size == 0 {
-		c.stats.IncrOkObjects()
-		c.out.WriteSuccess(task.OwnerID, task.Key) // Output gates it on the success-log switch
+	// An empty object holds no bytes, so it cannot hold leftover upload
+	// framing: clean, and probing it would only mislead — a range read on an
+	// empty body is answered with 416, which reads as a failure that no retry
+	// clears. A multipart object without offsets is never probed; verify()
+	// records it unverified, so it stays on that path.
+	if task.Size == 0 && (!task.IsMultipart || len(task.Offsets) > 0) {
+		if task.IsMultipart {
+			c.out.WriteMultipartOk(task.OwnerID, task.Key, task.Offsets)
+			c.stats.IncrOkMp()
+		} else {
+			c.out.WriteSuccess(task.OwnerID, task.Key) // Output gates it on the success-log switch
+			c.stats.IncrOkObjects()
+		}
 		return
 	}
 	c.verify(task)
