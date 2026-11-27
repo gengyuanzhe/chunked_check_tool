@@ -442,25 +442,24 @@ func TestNewOutputCheckFileModeEnablesMultipartResults(t *testing.T) {
 	assertFileContent(t, dir, filepath.Join("_unknown", "mp.txt"), "test-bkt\x1fmp-drift\n")
 }
 
-// TestNewOutputCheckFileModeOkMpOptIn — ok_mp.txt stays opt-in via
-// is_multipart_success_log (default false), matching bucket-mode
-// philosophy; corrupted/failed results are unconditional.
-func TestNewOutputCheckFileModeOkMpOptIn(t *testing.T) {
+// TestNewOutputCheckFileModeAlwaysLogsSuccess — check-file records clean
+// objects unconditionally, like its failure results and like backup mode:
+// neither is_success_log nor is_multipart_success_log gates ok_objects.txt /
+// ok_mp.txt here (both are left at their default, false).
+func TestNewOutputCheckFileModeAlwaysLogsSuccess(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
 	o, err := NewOutput(cfg, "test-bkt", FileInputCheckFile)
 	if err != nil {
 		t.Fatal(err)
 	}
+	o.WriteSuccess("", "reg-ok")
 	o.WriteMultipartOk("", "mp-ok", []int64{0, 1024})
-	o.WriteCorruptedMultipart("", "mp-bad", []int64{0, 1024})
 	if err := o.Close(); err != nil {
 		t.Fatal(err)
 	}
-	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "test-bkt\x1fmp-bad\x1f2\x1f0\x1f1024\n")
-	if _, err := os.Stat(filepath.Join(dir, "_unknown", "ok_mp.txt")); !os.IsNotExist(err) {
-		t.Errorf("ok_mp.txt should require is_multipart_success_log=true")
-	}
+	assertFileContent(t, dir, filepath.Join("_unknown", "ok_objects.txt"), "test-bkt\x1freg-ok\n")
+	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "test-bkt\x1fmp-ok\x1f2\x1f0\x1f1024\n")
 }
 
 // TestOutputPeriodicFlushRoot — kill -9 safety of the resume inputs: a line

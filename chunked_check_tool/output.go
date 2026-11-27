@@ -93,10 +93,10 @@ type Output struct {
 	corruptedEnabled          bool // is_check
 	multipartAllEnabled       bool // is_check && (mode=off || check-file type drift)
 	corruptedMultipartEnabled bool // is_check && (mode!=off || file input)
-	multipartOkEnabled        bool // is_check && (mode!=off || file input) && is_success_log
+	multipartOkEnabled        bool // is_check && (mode!=off || file input) && (is_multipart_success_log || check-file)
 	mpCheckFailedEnabled      bool // is_check && (mode!=off || file input)
 	checkEnabled              bool // is_check
-	successEnabled            bool // is_check && is_success_log
+	successEnabled            bool // is_check && (is_success_log || check-file)
 	backupEnabled             bool // backup mode: the three backup files
 	listParseFailedEnabled    bool // is_check && mode=offset && S3-list (not file-input)
 
@@ -114,7 +114,10 @@ type Output struct {
 // file-input mode (if any) and forces the multipart result routing
 // (corrupted_mp/mp_check_failed/ok_mp) on regardless of multipart_check_mode:
 // file-input tasks carry explicit offsets, so their verification results must
-// land in those files even when the mode is off.
+// land in those files even when the mode is off. It also forces the success
+// logs (ok_objects/ok_mp) on regardless of is_success_log /
+// is_multipart_success_log: every line of a finite input list must leave a
+// result line, as in backup mode.
 func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, error) {
 	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
 		return nil, fmt.Errorf("mkdir output: %w", err)
@@ -168,10 +171,10 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 		corruptedEnabled:          isCheck,
 		multipartAllEnabled:       multipartAll,
 		corruptedMultipartEnabled: isCheck && mpOutputs,
-		multipartOkEnabled:        isCheck && mpOutputs && cfg.IsMultipartSuccessLog,
+		multipartOkEnabled:        isCheck && mpOutputs && (cfg.IsMultipartSuccessLog || fileInput == FileInputCheckFile),
 		mpCheckFailedEnabled:      isCheck && mpOutputs,
 		checkEnabled:              isCheck,
-		successEnabled:            isCheck && cfg.IsSuccessLog,
+		successEnabled:            isCheck && (cfg.IsSuccessLog || fileInput == FileInputCheckFile),
 		listParseFailedEnabled:    listParseFailed,
 	}
 	// list_failed is written by the lister in both check and list-only modes,

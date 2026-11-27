@@ -171,9 +171,7 @@ func (c *Checker) Handle(task VerifyTask) {
 	}
 	if !task.IsMultipart && task.Size == 0 {
 		c.stats.IncrOkObjects()
-		if c.cfg.IsSuccessLog {
-			c.out.WriteSuccess(task.OwnerID, task.Key)
-		}
+		c.out.WriteSuccess(task.OwnerID, task.Key) // Output gates it on the success-log switch
 		return
 	}
 	c.verify(task)
@@ -217,15 +215,14 @@ func (c *Checker) verify(task VerifyTask) {
 			c.stats.IncrCheckFailed()
 		}
 	case probeClean:
+		// The success lines are gated by Output, not here: bucket mode
+		// honours is_success_log / is_multipart_success_log, -check-file
+		// always records them.
 		if task.IsMultipart {
-			if c.cfg.IsMultipartSuccessLog {
-				c.out.WriteMultipartOk(task.OwnerID, task.Key, task.Offsets)
-			}
+			c.out.WriteMultipartOk(task.OwnerID, task.Key, task.Offsets)
 			c.stats.IncrOkMp()
 		} else {
-			if c.cfg.IsSuccessLog {
-				c.out.WriteSuccess(task.OwnerID, task.Key)
-			}
+			c.out.WriteSuccess(task.OwnerID, task.Key)
 			c.stats.IncrOkObjects()
 		}
 	}

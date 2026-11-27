@@ -46,7 +46,7 @@ backup_output_dir: ./backup_out
 # true=列举+校验；false=仅列举（不校验普通对象，不写对象文件，不创建 owner 目录，仅写 list_failed.*）
 is_check: true
 
-# 是否记录正常普通对象到 <ownerID>/ok_objects.txt
+# 是否记录正常普通对象到 <ownerID>/ok_objects.txt（-check-file 模式恒记录，不受此项控制）
 is_success_log: false
 
 # 多段对象损坏检查模式：
@@ -65,7 +65,7 @@ multipart_check_mode: 0
 multipart_segment_size: 0
 
 # 是否记录干净的多段对象到 <ownerID>/ok_mp.txt
-# （multipart_check_mode != 0 或 -check-file 模式时生效）
+# 主扫描里 multipart_check_mode != 0 时生效；-check-file 模式恒记录，不受此项控制
 is_multipart_success_log: false
 
 # 节点隔离阈值：进程级累积的节点故障数（连接错误、超时、5xx；4xx 业务错误

@@ -109,9 +109,10 @@ func TestRunCheckFileDispatch(t *testing.T) {
 // TestRunCheckFileEndToEnd — -check-file against the fake S3 server: mixed
 // regular/multipart input (the failure-file shapes of a prior run), with
 // multipart_check_mode=0 proving the mode's irrelevance for file inputs
-// (offsets come from the lines). Covers both type-drift directions: line
-// multipart + HEAD regular (probed as regular → ok_obj) and line regular +
-// HEAD multipart (no offsets → mp.txt unverified).
+// (offsets come from the lines), and both success-log switches left off
+// proving check-file records clean objects regardless of them. Covers both
+// type-drift directions: line multipart + HEAD regular (probed as regular →
+// ok_obj) and line regular + HEAD multipart (no offsets → mp.txt unverified).
 func TestRunCheckFileEndToEnd(t *testing.T) {
 	f := newFakeBackupS3Server(t)
 	f.objects["regcorrupt"] = fakeBackupObject{ETag: md5Hex([]byte(corruptBody)), Content: []byte(corruptBody)}
@@ -122,19 +123,17 @@ func TestRunCheckFileEndToEnd(t *testing.T) {
 	host := strings.TrimPrefix(f.srv.URL, "http://")
 	dir := t.TempDir()
 	cfg := &Config{
-		Endpoints:             []string{host},
-		Scheme:                "http",
-		AK:                    "t",
-		SK:                    "t",
-		OutputDir:             dir,
-		IsCheck:               true,
-		IsSuccessLog:          true,
-		IsMultipartSuccessLog: true,
-		MultipartCheckMode:    MultipartCheckModeOff,
-		ProgressInterval:      1000,
-		CheckConcurrency:      2,
-		ListConcurrency:       2,
-		ListAPIVersion:        2,
+		Endpoints:          []string{host},
+		Scheme:             "http",
+		AK:                 "t",
+		SK:                 "t",
+		OutputDir:          dir,
+		IsCheck:            true,
+		MultipartCheckMode: MultipartCheckModeOff,
+		ProgressInterval:   1000,
+		CheckConcurrency:   2,
+		ListConcurrency:    2,
+		ListAPIVersion:     2,
 	}
 	checkPath := filepath.Join(dir, "check.txt")
 	content := "srcbucket\x1fregcorrupt\n" +

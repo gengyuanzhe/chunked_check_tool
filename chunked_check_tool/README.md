@@ -96,7 +96,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `output_dir_timestamp` | `true` | `true` 时在目录名后追加 `<YYYYMMDD_HHMMSS>` 后缀（`./out` → `./out_20260908_175201`），每次运行互不混写；`false` 时固定使用 `output_dir` 原样路径（断点续跑请显式设 `false`，否则每次重启进入新目录）。同时作用于 `backup_output_dir` |
 | `backup_output_dir` | （无） | `-backup-file` 模式专用输出目录，与 `output_dir` 分离避免 backup 结果与 list/check 结果混写。仅 backup 模式必填，其他模式忽略；同样受 `output_dir_timestamp` 控制并共享同一时间戳成对生成 |
 | `is_check` | `true` | `false` 时只列举不校验，不写对象文件，仅写 `list_failed.*` |
-| `is_success_log` | `false` | `true` 时把正常普通对象 key 写入 `<ownerID>/ok_objects.txt` |
+| `is_success_log` | `false` | 主扫描：`true` 时把正常普通对象 key 写入 `<ownerID>/ok_objects.txt`。`-check-file` 模式恒记录，不受此项控制 |
 | `max_keys` | 必填 | 每次 LIST 请求的最大键数（1..1000，必填；服务端单页响应上限决定分页粒度） |
 | `encoding_type_url` | `false` | `true` 时 LIST 请求带 `EncodingType=url`，wire 上 server 字段（key/prefix/marker）URL 编码。保护 XML 反序列化免受 `\x1f` 等 XML 1.0 非法控制字符撕裂；wire 出口由工具统一 `QueryUnescape` 解码。V1 NextMarker 出口解码回原始 key 形态回传（probe-verified minio 语义）；V2 NextContinuationToken 是不透明 base64，**不**解码（字面 `+` 必须原样往返） |
 | `debug_log` | `false` | `true` 时每次 LIST 请求打三行 Debug 级诊断（req/resp/err）到 run.log，记录 marker/token/req_id/next/truncated/nContents/nCP 等，便于追 marker 游标漂移与短响应 quirk |
@@ -104,7 +104,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 `mp.txt` 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，服务端返回 `<md5>-<partcnt>-<off0>|<off1>|...` 格式 ETag（注：ETag 内部分隔符仍是 `|`，由服务端生成），按真实 part 边界逐段检查；解析不出 offsets 的对象回落 `list_parse_failed.txt`，配套 `list_parse_failed.log` 记录完整 ETag）；`2`=固定分段检查（旧模式，未来废弃；必须配 `multipart_segment_size > 0`） |
 | `multipart_segment_size` | `0` | 模式 2 的段长度（字节），需与上传 part size 一致；仅 `multipart_check_mode: 2` 时必填 |
 | `whole_object_probe_threshold` | `1024` | 小对象全读阈值（字节）。`0 < Size <= 该值` 时走快路径：单次 RangeGet 读全对象，body 匹配损坏正则，1 请求覆盖段首+段尾两种损坏；超过该值走 head@0+tail@Size-128（普通对象 2 请求）/ 每 part offset 一次 `[off_i, off_i+128]` 探测（多段 N 请求，无 tail probe）多探测。`0` 禁用快路径恒走多探测；负值启动报错 |
-| `is_multipart_success_log` | `false` | `true` 时把干净的多段对象 key 写入 `<ownerID>/ok_mp.txt` |
+| `is_multipart_success_log` | `false` | 主扫描：`true` 时把干净的多段对象 key 写入 `<ownerID>/ok_mp.txt`。`-check-file` 模式恒记录，不受此项控制 |
 | `node_isolate_threshold` | `3` | 节点隔离阈值：进程级累积节点故障数（连接错误/超时/5xx，4xx 不计）达到才隔离节点，跨 worker 共享、无时间衰减；`1` 恢复旧的首次故障即隔离；故障后的重试一律换节点（仅剩单节点时同节点重试），真死节点不丢工作项 |
 | `node_recover_probe_interval` | `60` | 隔离节点恢复探测间隔（秒）：后台每轮 HEAD bucket，连续 2 次健康应答 → 恢复进轮询池并清零故障计数；`0` 禁用恢复（隔离进程内永久） |
 | `dial_timeout` | `10` | 单次 TCP 建连超时（秒）：建连阶段（SYN→SYN-ACK→ACK）上限。黑洞 IP（不路由、不回 RST）场景 OS 默认 SYN 重试要 ~75s（macOS）/ ~127s（Linux），默认 10s 兜底；`0` = Go net/http 默认（无超时，走 OS 默认）。负值启动报错。只控制建连阶段，不影响已建立连接上的请求/响应传输 |
@@ -131,6 +131,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
   - HEAD 多段 + 行无 offsets（普通行漂移成多段）→ 写 `mp.txt` 不认干净（无边界无法逐段验证）
 - HEAD 失败按**行声明的类型**分流：普通行 → `check_failed.txt`（`bkt\x1fkey`）；多段行 → `mp_check_failed.txt`（保留 offsets）——两个文件都可再喂回本模式循环重试
 - 无 S3 LIST，无需配 `multipart_check_mode`（offsets 来自输入行）；结果文件落在 `_unknown/` 子目录（行内无 owner）
+- **成功和失败都记录**：`ok_objects.txt` / `ok_mp.txt` 恒写，不受 `is_success_log` / `is_multipart_success_log` 控制（两个开关只管主扫描），与失败文件、备份模式一致
 - 进度行 `[progress] read=X ok_obj=… corrupt_obj=… ok_mp=… corrupt_mp=… check_failed=… mp_check_failed=… get_calls=… get_avg_ms=… (checked=N) q=obj:…`；汇总 `read: X` + `list_failed`（仅坏行）+ `get_calls` + `ok_obj/corrupt_obj/ok_mp/corrupt_mp/check_failed/mp_check_failed`
 
 **收敛重试**：本模式自己也会产出更小的 `check_failed.txt` / `mp_check_failed.txt`（瞬时故障恢复后重试即可清零），循环喂回直到为空。对象在检查后被改写导致的 `mismatch.txt`（backup 模式产出）同样喂本模式重查。
@@ -180,8 +181,6 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 |---|---|---|
 | `-backup-file` | `backup_ok.txt` | `backup_failed.txt`、`mismatch.txt`、`parse_failed.txt` |
 | `-check-file` | `_unknown/` 下的 `ok_objects.txt`、`ok_mp.txt`、`corrupted_objects.txt`、`corrupted_mp.txt` | `mp.txt`、`check_failed.txt`、`mp_check_failed.txt`、`parse_failed.txt` |
-
-`-check-file` 的前提：被杀的那一轮开了 `is_success_log` 和 `is_multipart_success_log`，否则检查干净的对象没有记录，会被全部当成没处理过。
 
 ```bash
 # -backup-file
@@ -266,10 +265,10 @@ join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
 ├── mismatch.log                # 输入类型校验失败的结构化诊断：line_is_multipart/head_etag/head_size/reason（-backup-file 模式）
 └── <ownerID>/                  # OwnerID 为空（含全部文件输入模式）时落到 _unknown/
     ├── corrupted_objects.txt   # 损坏普通对象 key（Range GET 命中 chunk-signature/trailer）
-    ├── ok_objects.txt          # 正常普通对象 key（is_success_log=true 时）
+    ├── ok_objects.txt          # 正常普通对象 key（主扫描 is_success_log=true 时；-check-file 恒写）
     ├── mp.txt                  # 多段对象 key（multipart_check_mode=0 时全部多段；-check-file 时普通行 HEAD 判多段的漂移对象）
     ├── corrupted_mp.txt        # 损坏多段对象 key（分段检查命中）
-    └── ok_mp.txt               # 干净多段对象（is_multipart_success_log=true 时）；行格式同 corrupted_mp.txt：multipart_check_mode=1 与 -check-file 带 partcnt+offsets，mode=2 只有 key
+    └── ok_mp.txt               # 干净多段对象（主扫描 is_multipart_success_log=true 时；-check-file 恒写）；行格式同 corrupted_mp.txt：multipart_check_mode=1 与 -check-file 带 partcnt+offsets，mode=2 只有 key
 ```
 
 > **行分隔与转义**：所有 `bkt|key|partcnt|off...` 形式的行格式实际用 ASCII Unit Separator `\x1f`（`<US>`）作字段分隔——S3 key 可合法包含 `|`，旧 pipe 分隔会静默错切。Server 字段（key/prefix/token）写入文件时 `url.QueryEscape` 转义，读取侧 `QueryUnescape` 还原；含 `\x1f`、`%`、`+`、`/` 的 key 都能逐字节往返。bucket 字段来自 CLI，不转义；partcnt 与 offsets 是纯数字，不转义；owner 非空时为 `[a-z0-9]+`，不转义。
