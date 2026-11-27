@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -593,46 +594,86 @@ func TestCheckerSmallObjectFastPathCorruptedTrailer(t *testing.T) {
 	}
 }
 
-func TestCheckerLargeNormalObjectHeadTail(t *testing.T) {
-	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, WholeObjectProbeThreshold: 1024}
-	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
-	defer out.Close()
-	s := NewStats()
-	const size int64 = 4096
-	// Body of 4096 bytes: clean head, trailer marker in the last 128 bytes
-	// (the tail probe window [3968, 4096)). Head probe reads clean bytes
-	// (no match) so the tail probe must run and catch the trailer.
-	tail := []byte("\r\n0\r\nx-amz-checksum-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n\r\n")
+// trailerTail is the unsigned-trailer end-structure as it sits in the last
+// bytes of a body: the closing CRLF of the last data chunk, then the marker
+// (the bytes trailerBody ends with).
+var trailerTail = []byte("\r\n0\r\nx-amz-checksum-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n\r\n")
+
+// bodyWithTail builds a size-byte object body: head at byte 0, 'x' filler,
+// and tail occupying the last len(tail) bytes when tail is non-nil.
+func bodyWithTail(size int64, head string, tail []byte) []byte {
 	body := make([]byte, size)
 	for i := range body {
 		body[i] = 'x'
 	}
-	copy(body[size-int64(len(tail)):], tail)
-	count := 0
-	// RangeGetHandler slices the body by [offset, offset+length) so the
-	// head probe (offset 0, 128 bytes) sees only clean 'x' bytes and the
-	// tail probe (offset 3968, 128 bytes) sees the trailer marker.
-	worker := &rangeGetCountingS3{
-		FakeS3: &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
-			end := offset + length
-			if end > size {
-				end = size
-			}
-			if offset >= size {
-				return nil, nil
-			}
-			return body[offset:end], nil
-		}},
-		count: &count,
+	copy(body, head)
+	if tail != nil {
+		copy(body[size-int64(len(tail)):], tail)
 	}
-	c := NewChecker(worker, out, s, cfg)
-	c.Handle(VerifyTask{Key: "k", Size: size, IsMultipart: false, Offsets: nil})
-	if got := s.Snapshot().CorruptedObjects; got != 1 {
-		t.Errorf("corrupted=%d want 1 (tail probe should catch trailer)", got)
+	return body
+}
+
+// TestCheckerTailProbeGatedOnChunkSizeHead — a single-PUT object on the
+// head+tail plan (above the fast-path threshold, or with the fast path
+// disabled): the tail probe is read only when the head opens with a
+// chunk-size line. The trailer marker belongs to an unsigned-trailer body,
+// and such a body always opens with that line; any other head rules the
+// marker out, so the object is clean after the head request alone.
+func TestCheckerTailProbeGatedOnChunkSizeHead(t *testing.T) {
+	const size int64 = 4096
+	cases := []struct {
+		name          string
+		head          string
+		tail          bool // put the trailer marker in the last 128 bytes
+		wantCorrupted bool
+		wantCalls     int
+	}{
+		{"plain head, trailer marker at the tail", "plain text\r\n", true, false, 1},
+		{"plain head, plain tail", "plain text\r\n", false, false, 1},
+		{"chunk-size head, trailer marker at the tail", "1000\r\n", true, true, 2},
+		{"chunk-size head, plain tail", "1000\r\n", false, false, 2},
 	}
-	if count != 2 {
-		t.Errorf("RangeGetAt calls=%d want 2 (head + tail)", count)
+	for _, thr := range []int{1024, 0} {
+		t.Run(fmt.Sprintf("threshold=%d", thr), func(t *testing.T) {
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					var tail []byte
+					if tc.tail {
+						tail = trailerTail
+					}
+					body := bodyWithTail(size, tc.head, tail)
+					count := 0
+					// RangeGetAt slices the body by [offset, offset+length), so
+					// the head probe sees the first 128 bytes and the tail
+					// probe the last 128.
+					worker := &rangeGetCountingS3{
+						FakeS3: &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
+							end := offset + length
+							if end > size {
+								end = size
+							}
+							if offset >= size {
+								return nil, nil
+							}
+							return body[offset:end], nil
+						}},
+						count: &count,
+					}
+					dir := t.TempDir()
+					cfg := &Config{OutputDir: dir, IsCheck: true, WholeObjectProbeThreshold: thr}
+					out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+					defer out.Close()
+					s := NewStats()
+					NewChecker(worker, out, s, cfg).Handle(VerifyTask{Key: "k", Size: size})
+					if got := s.Snapshot().CorruptedObjects; (got == 1) != tc.wantCorrupted {
+						t.Errorf("corrupted=%d, want corrupted=%v", got, tc.wantCorrupted)
+					}
+					if count != tc.wantCalls {
+						t.Errorf("RangeGetAt calls=%d want %d", count, tc.wantCalls)
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -748,6 +789,8 @@ func TestCheckerMultipartDoesNotRunTrailerRe(t *testing.T) {
 
 // TestCheckerSinglePutRunsTrailerRe — single-PUT probes run trailerRe, so a
 // trailer marker in the tail is flagged. Positive counterpart to the above.
+// The body is an unsigned-trailer body: its head opens with a chunk-size
+// line, which is what makes the tail probe run.
 func TestCheckerSinglePutRunsTrailerRe(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, WholeObjectProbeThreshold: 0}
@@ -760,6 +803,7 @@ func TestCheckerSinglePutRunsTrailerRe(t *testing.T) {
 	for i := range body {
 		body[i] = 'x'
 	}
+	copy(body, "1000\r\n")
 	copy(body[size-int64(len(tail)):], tail)
 	worker := &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
 		end := offset + length
@@ -860,7 +904,8 @@ func TestCheckerMultipartProbeCountIsN(t *testing.T) {
 
 // TestCheckerHeadFirstFillsSizeEnablesTailProbe — HeadFirst fills Size via
 // HEAD so the tail probe is built (Size==0 would skip it). Single-PUT only;
-// multipart has no tail probe.
+// multipart has no tail probe. The head opens with a chunk-size line (an
+// unsigned-trailer body), so the tail probe is what needs Size.
 func TestCheckerHeadFirstFillsSizeEnablesTailProbe(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, WholeObjectProbeThreshold: 0}
@@ -874,6 +919,7 @@ func TestCheckerHeadFirstFillsSizeEnablesTailProbe(t *testing.T) {
 	for i := range body {
 		body[i] = 'x'
 	}
+	copy(body, "1000\r\n")
 	copy(body[size-int64(len(tail)):], tail)
 
 	worker := &FakeS3{

@@ -36,6 +36,17 @@ var chunkSigRe = regexp.MustCompile(`^[0-9a-fA-F]+;chunk-signature=[0-9a-fA-F]{6
 // not \r\n\r\n) but is caught by chunkSigRe.
 var trailerRe = regexp.MustCompile(`0\r\nx-amz-checksum-[a-z0-9]+:[^\r\n]*\r\n\r\n`)
 
+// chunkSizeLineRe matches the chunk-size line that opens every
+// STREAMING-UNSIGNED-PAYLOAD-TRAILER body: <hex-size>\r\n, with no
+// chunk-signature after the size.
+//
+// A weak feature on its own — any text starting with hex digits and a CRLF
+// matches — so it is never a verdict. It gates the tail probe: the server
+// writes the request body verbatim, so an unsigned-trailer body always
+// opens with this line, and only such a body ends with the trailer marker.
+// A head without the line rules the marker out.
+var chunkSizeLineRe = regexp.MustCompile(`^[0-9a-fA-F]+\r\n`)
+
 // extractHTTPStatusCode pulls the HTTP status code off err if it wraps an
 // *awshttp.ResponseError (every S3 protocol error from the aws SDK does).
 // Returns 0 when err carries no HTTP response (e.g. context.DeadlineExceeded,
@@ -244,19 +255,30 @@ const (
 // all clean → probeClean; any RangeGet error → probeFailed (no further
 // probes); any probe matching a corruption regex → probeCorrupted.
 // Regex selection by task shape (matchFunc): single PUT runs chunkSigRe ||
-// trailerRe; multipart runs chunkSigRe only. Shared by list-check and the
-// file-input check mode (-check-file). Backup mode does not
-// probe. threshold is WholeObjectProbeThreshold from cfg.
+// trailerRe; multipart runs chunkSigRe only.
+//
+// The tail probe of a single-PUT head+tail plan is conditional (see
+// chunkSizeLineRe): a head that does not open with a chunk-size line makes
+// the object clean, and the tail request is skipped. The one-read plan
+// already holds the whole body, so trailerRe applies to it unconditionally.
+//
+// Shared by list-check and the file-input check mode (-check-file). Backup
+// mode does not probe. threshold is WholeObjectProbeThreshold from cfg.
 func runProbes(ctx context.Context, worker S3API, task VerifyTask, threshold int) (probeResult, error) {
 	probes := buildProbesStatic(task, threshold)
 	match := matchFunc(task, probes)
-	for _, p := range probes {
+	for i, p := range probes {
 		body, err := worker.RangeGetAt(ctx, task.Key, p.start, p.length)
 		if err != nil {
 			return probeFailed, err
 		}
 		if match(body) {
 			return probeCorrupted, nil
+		}
+		// i == 0 of the head+tail plan: multipart plans have no tail probe
+		// and the one-read plan has no second probe.
+		if i == 0 && len(probes) == 2 && !task.IsMultipart && !chunkSizeLineRe.Match(body) {
+			return probeClean, nil
 		}
 	}
 	return probeClean, nil
@@ -301,7 +323,8 @@ const probeWindow int64 = 128
 // buildProbes returns the probe plan for task:
 //   - 0 < Size <= WholeObjectProbeThreshold → single RangeGetAt(0, thr)
 //     (Size==0 never reaches here — Handle short-circuits.)
-//   - single PUT, Size > threshold → head@0 + tail@Size-W.
+//   - single PUT, Size > threshold → head@0, then tail@Size-W (runProbes
+//     skips the tail when the head does not open with a chunk-size line).
 //   - multipart N parts, Size > threshold → one probe per part offset,
 //     each reads [off_i, off_i+W). Multipart runs chunkSigRe only, which
 //     matches ;chunk-signature= at chunk HEADS, so each part's head is
