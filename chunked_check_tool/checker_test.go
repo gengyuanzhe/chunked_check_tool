@@ -264,6 +264,39 @@ func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 	}
 }
 
+// TestCheckerSegmentModeZeroSizeMultipartWritesMpTxt — main scan in segment
+// mode: a multipart object of Size 0 gets no synthesized offsets, so there is
+// nothing to probe. It must land in mp.txt unverified instead of vanishing:
+// mp.txt used to be disabled outside mode=off, which made that write a silent
+// no-op. The task comes from the real resolveOffsets, as in the lister.
+func TestCheckerSegmentModeZeroSizeMultipartWritesMpTxt(t *testing.T) {
+	dir := t.TempDir()
+	cfg := multipartCfg(dir, 5*1024*1024)
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+	s := NewStats()
+	// Would match — but nothing must be probed.
+	c := NewChecker(context.Background(), &FakeS3{Body: chunkSigBody}, out, s, cfg)
+	task := resolveOffsets(ObjectInfo{Key: "empty", ETag: "0123456789abcdef0123456789abcdef-1", Size: 0, OwnerID: "owner-A"}, cfg)
+	if len(task.Offsets) != 0 {
+		t.Fatalf("Size 0 yields no synthesized offsets, got %v", task.Offsets)
+	}
+	c.Handle(task)
+	if snap := s.Snapshot(); snap.GetCalls != 0 || snap.OkMp != 0 || snap.CorruptedMp != 0 {
+		t.Errorf("zero-size multipart must be neither probed nor claimed: get_calls=%d ok_mp=%d corrupt_mp=%d",
+			snap.GetCalls, snap.OkMp, snap.CorruptedMp)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "mp.txt"))
+	if err != nil {
+		t.Fatalf("zero-size multipart is in no result file (mp.txt missing): %v", err)
+	}
+	if got, want := string(data), "test-bkt\x1fempty\n"; got != want {
+		t.Errorf("mp.txt = %q, want %q", got, want)
+	}
+}
+
 // TestCheckerMultipartSegmentCheckRangeError: segment RangeGet error →
 // writes to mp_check_failed.txt at the root (NOT check_failed), and
 // bumps MpCheckFailed (not CheckFailed).

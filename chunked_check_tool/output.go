@@ -91,7 +91,7 @@ type Output struct {
 
 	// enable flags — each gates one writer goroutine + file
 	corruptedEnabled          bool // is_check
-	multipartAllEnabled       bool // is_check && (mode=off || check-file type drift)
+	multipartAllEnabled       bool // is_check && (mode!=offset || check-file type drift)
 	corruptedMultipartEnabled bool // is_check && (mode!=off || file input)
 	multipartOkEnabled        bool // is_check && (mode!=off || file input) && (is_multipart_success_log || check-file)
 	mpCheckFailedEnabled      bool // is_check && (mode!=off || file input)
@@ -138,8 +138,8 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 	//   - mode=off writes every multipart here.
 	//   - mode=offset routes ETag parse failures to list_parse_failed.txt
 	//     (not mp.txt), so mp.txt is disabled.
-	//   - mode=segment disables it (offsets always synthesized when Size>0;
-	//     Size==0 has no offsets and is silently dropped).
+	//   - mode=segment synthesizes offsets for every multipart with Size>0;
+	//     Size==0 yields none and the object is written here unverified.
 	//   - -check-file accepts regular lines, and a regular line whose HEAD
 	//     reveals a multipart object (type drift) has no offsets → on.
 	// list_parse_failed.txt gating:
@@ -152,7 +152,7 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 	case FileInputCheckFile:
 		multipartAll = isCheck
 	default:
-		multipartAll = isCheck && cfg.MultipartCheckMode == MultipartCheckModeOff
+		multipartAll = isCheck && cfg.MultipartCheckMode != MultipartCheckModeOffset
 		listParseFailed = isCheck && cfg.MultipartCheckMode == MultipartCheckModeOffset
 	}
 	o := &Output{

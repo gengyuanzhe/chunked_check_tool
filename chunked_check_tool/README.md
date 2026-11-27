@@ -266,7 +266,7 @@ join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
 └── <ownerID>/                  # OwnerID 为空（含全部文件输入模式）时落到 _unknown/
     ├── corrupted_objects.txt   # 损坏普通对象 key（Range GET 命中 chunk-signature/trailer）
     ├── ok_objects.txt          # 正常普通对象 key（主扫描 is_success_log=true 时；-check-file 恒写）
-    ├── mp.txt                  # 多段对象 key（multipart_check_mode=0 时全部多段；-check-file 时普通行 HEAD 判多段的漂移对象）
+    ├── mp.txt                  # 多段对象 key（multipart_check_mode=0 时全部多段；mode=2 时大小为 0 的多段对象；-check-file 时普通行 HEAD 判多段的漂移对象）
     ├── corrupted_mp.txt        # 损坏多段对象 key（分段检查命中）
     └── ok_mp.txt               # 干净多段对象（主扫描 is_multipart_success_log=true 时；-check-file 恒写）；行格式同 corrupted_mp.txt：multipart_check_mode=1 与 -check-file 带 partcnt+offsets，mode=2 只有 key
 ```
