@@ -103,7 +103,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `latency_window_sec` | `60` | 进度行 `latency_avg_ms`/`latency_max_ms` 的滑动窗口秒数：每窗口重置，反映**当前批次**的 LIST 延迟健康（全局平均会被早期 spike 稀释、掩盖当前批次问题）。负值启动报错 |
 | `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 `mp.txt` 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，服务端返回 `<md5>-<partcnt>-<off0>|<off1>|...` 格式 ETag（注：ETag 内部分隔符仍是 `|`，由服务端生成），按真实 part 边界逐段检查；解析不出 offsets 的对象回落 `list_parse_failed.txt`，配套 `list_parse_failed.log` 记录完整 ETag）；`2`=固定分段检查（旧模式，未来废弃；必须配 `multipart_segment_size > 0`） |
 | `multipart_segment_size` | `0` | 模式 2 的段长度（字节），需与上传 part size 一致；仅 `multipart_check_mode: 2` 时必填 |
-| `whole_object_probe_threshold` | `1024` | 小对象全读阈值（字节）。`0 < Size <= 该值` 时走快路径：单次 RangeGet 读全对象，body 匹配损坏正则，1 请求覆盖段首+段尾两种损坏；超过该值走多探测：普通对象先读 head@0，head 以 chunk 长度行 `<hexlen>\r\n` 开头才再读 tail@Size-128（否则 1 请求即判干净）；多段每 part offset 一次 `[off_i, off_i+128]` 探测（N 请求，无 tail probe）。`0` 禁用快路径恒走多探测；负值启动报错 |
+| `whole_object_probe_threshold` | `1024` | 小对象全读阈值（字节）。`0 < Size <= 该值` 时走快路径：单次 RangeGet 读全对象，1 请求覆盖段首+段尾两种损坏；超过该值走多探测：普通对象先读 head@0，head 以 chunk 长度行 `<hexlen>\r\n` 开头才再读 tail@Size-128（否则 1 请求即判干净）；多段每 part offset 一次 `[off_i, off_i+128]` 探测（N 请求，无 tail probe）。普通对象两种路径是同一条规则：开头是签名头，或者以 chunk 长度行开头且尾部有 trailer 标记，才算损坏。`0` 禁用快路径恒走多探测；负值启动报错 |
 | `is_multipart_success_log` | `false` | 主扫描：`true` 时把干净的多段对象 key 写入 `<ownerID>/ok_mp.txt`。`-check-file` 模式恒记录，不受此项控制 |
 | `node_isolate_threshold` | `3` | 节点隔离阈值：进程级累积节点故障数（连接错误/超时/5xx，4xx 不计）达到才隔离节点，跨 worker 共享、无时间衰减；`1` 恢复旧的首次故障即隔离；故障后的重试一律换节点（仅剩单节点时同节点重试），真死节点不丢工作项 |
 | `node_recover_probe_interval` | `60` | 隔离节点恢复探测间隔（秒）：后台每轮 HEAD bucket，连续 2 次健康应答 → 恢复进轮询池并清零故障计数；`0` 禁用恢复（隔离进程内永久） |

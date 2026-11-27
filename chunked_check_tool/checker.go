@@ -41,10 +41,10 @@ var trailerRe = regexp.MustCompile(`0\r\nx-amz-checksum-[a-z0-9]+:[^\r\n]*\r\n\r
 // chunk-signature after the size.
 //
 // A weak feature on its own — any text starting with hex digits and a CRLF
-// matches — so it is never a verdict. It gates the tail probe: the server
-// writes the request body verbatim, so an unsigned-trailer body always
-// opens with this line, and only such a body ends with the trailer marker.
-// A head without the line rules the marker out.
+// matches — so it is never a verdict. It gates trailerRe: the server writes
+// the request body verbatim, so an unsigned-trailer body always opens with
+// this line, and only such a body ends with the trailer marker. The marker
+// in an object whose head lacks the line is not counted.
 var chunkSizeLineRe = regexp.MustCompile(`^[0-9a-fA-F]+\r\n`)
 
 // extractHTTPStatusCode pulls the HTTP status code off err if it wraps an
@@ -253,21 +253,20 @@ const (
 
 // runProbes runs the probe matrix and returns the first non-clean result:
 // all clean → probeClean; any RangeGet error → probeFailed (no further
-// probes); any probe matching a corruption regex → probeCorrupted.
-// Regex selection by task shape (matchFunc): single PUT runs chunkSigRe ||
-// trailerRe; multipart runs chunkSigRe only.
+// probes); an object settled as corrupted → probeCorrupted.
 //
-// The tail probe of a single-PUT head+tail plan is conditional (see
-// chunkSizeLineRe): a head that does not open with a chunk-size line makes
-// the object clean, and the tail request is skipped. The one-read plan
-// already holds the whole body, so trailerRe applies to it unconditionally.
+// Single PUT follows probeSinglePut. Multipart matches chunkSigRe only, at
+// each part head (matchFunc).
 //
 // Shared by list-check and the file-input check mode (-check-file). Backup
 // mode does not probe. threshold is WholeObjectProbeThreshold from cfg.
 func runProbes(ctx context.Context, worker S3API, task VerifyTask, threshold int) (probeResult, error) {
 	probes := buildProbesStatic(task, threshold)
+	if !task.IsMultipart {
+		return probeSinglePut(ctx, worker, task, probes)
+	}
 	match := matchFunc(task, probes)
-	for i, p := range probes {
+	for _, p := range probes {
 		body, err := worker.RangeGetAt(ctx, task.Key, p.start, p.length)
 		if err != nil {
 			return probeFailed, err
@@ -275,40 +274,65 @@ func runProbes(ctx context.Context, worker S3API, task VerifyTask, threshold int
 		if match(body) {
 			return probeCorrupted, nil
 		}
-		// i == 0 of the head+tail plan: multipart plans have no tail probe
-		// and the one-read plan has no second probe.
-		if i == 0 && len(probes) == 2 && !task.IsMultipart && !chunkSizeLineRe.Match(body) {
-			return probeClean, nil
-		}
+	}
+	return probeClean, nil
+}
+
+// probeSinglePut decides a single-PUT object. It is corrupted when a
+// chunk-signature header opens it (signed streaming), or when it opens with
+// a chunk-size line and ends with the trailer marker (unsigned trailer, see
+// chunkSizeLineRe).
+//
+// probes is either one read of the whole object, or head@0 followed by a
+// tail probe. The first read settles everything but a trailer still out of
+// its reach, so the tail probe is only sent when the head opens with a
+// chunk-size line and holds no marker itself.
+func probeSinglePut(ctx context.Context, worker S3API, task VerifyTask, probes []probeSpec) (probeResult, error) {
+	head, err := worker.RangeGetAt(ctx, task.Key, probes[0].start, probes[0].length)
+	if err != nil {
+		return probeFailed, err
+	}
+	switch {
+	case chunkSigRe.Match(head):
+		return probeCorrupted, nil
+	case !chunkSizeLineRe.Match(head):
+		return probeClean, nil
+	case trailerRe.Match(head):
+		return probeCorrupted, nil
+	case len(probes) == 1:
+		return probeClean, nil
+	}
+	tail, err := worker.RangeGetAt(ctx, task.Key, probes[1].start, probes[1].length)
+	if err != nil {
+		return probeFailed, err
+	}
+	if trailerRe.Match(tail) {
+		return probeCorrupted, nil
 	}
 	return probeClean, nil
 }
 
 // matchFunc returns the corruption-match function for the probes planned
-// for task. chunkSigRe is anchored, so the header must be the first byte of
-// the object or of a part; this is what points the anchor at each part:
+// for a multipart task: chunkSigRe only, as multipart parts can't be trailer
+// uploads on private storage. chunkSigRe is anchored, so the header must be
+// the first byte of a part; this is what points the anchor at each part:
 //
-//   - multipart, one probe per part: every probe starts at its own part
-//     head, so the header is at byte 0. chunkSigRe only — multipart parts
-//     can't be trailer uploads on private storage.
-//   - multipart, the one-read plan: all part heads are inside the single
-//     body, each at its offset.
-//   - single PUT → chunkSigRe || trailerRe.
+//   - one probe per part: every probe starts at its own part head, so the
+//     header is at byte 0.
+//   - the one-read plan: all part heads are inside the single body, each at
+//     its offset.
 func matchFunc(task VerifyTask, probes []probeSpec) func([]byte) bool {
-	if task.IsMultipart {
-		if len(probes) > 1 {
-			return chunkSigRe.Match
-		}
-		return func(body []byte) bool {
-			for _, off := range task.Offsets {
-				if off < int64(len(body)) && chunkSigRe.Match(body[off:]) {
-					return true
-				}
-			}
-			return false
-		}
+	if len(probes) > 1 {
+		return chunkSigRe.Match
 	}
-	return func(b []byte) bool { return chunkSigRe.Match(b) || trailerRe.Match(b) }
+	return func(body []byte) bool {
+		for _, off := range task.Offsets {
+			if off < int64(len(body)) && chunkSigRe.Match(body[off:]) {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 // probeSpec is one RangeGet probe in a VerifyTask's plan.
@@ -323,7 +347,7 @@ const probeWindow int64 = 128
 // buildProbes returns the probe plan for task:
 //   - 0 < Size <= WholeObjectProbeThreshold → single RangeGetAt(0, thr)
 //     (Size==0 never reaches here — Handle short-circuits.)
-//   - single PUT, Size > threshold → head@0, then tail@Size-W (runProbes
+//   - single PUT, Size > threshold → head@0, then tail@Size-W (probeSinglePut
 //     skips the tail when the head does not open with a chunk-size line).
 //   - multipart N parts, Size > threshold → one probe per part offset,
 //     each reads [off_i, off_i+W). Multipart runs chunkSigRe only, which

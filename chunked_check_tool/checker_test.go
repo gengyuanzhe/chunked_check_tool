@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -613,67 +612,82 @@ func bodyWithTail(size int64, head string, tail []byte) []byte {
 	return body
 }
 
-// TestCheckerTailProbeGatedOnChunkSizeHead — a single-PUT object on the
-// head+tail plan (above the fast-path threshold, or with the fast path
-// disabled): the tail probe is read only when the head opens with a
-// chunk-size line. The trailer marker belongs to an unsigned-trailer body,
-// and such a body always opens with that line; any other head rules the
-// marker out, so the object is clean after the head request alone.
-func TestCheckerTailProbeGatedOnChunkSizeHead(t *testing.T) {
-	const size int64 = 4096
+// TestCheckerSinglePutTrailerMarkerNeedsChunkSizeHead — for a single-PUT
+// object, whatever the plan, the trailer marker is a verdict only when the
+// object opens with a chunk-size line. The marker belongs to an
+// unsigned-trailer body, and such a body always opens with that line; any
+// other head rules the marker out.
+//
+// The plan follows the size and the threshold: one read of the whole object
+// (Size <= threshold), or head@0 plus a tail probe that is only read when
+// the head opens with a chunk-size line (Size > threshold, or threshold 0).
+func TestCheckerSinglePutTrailerMarkerNeedsChunkSizeHead(t *testing.T) {
+	plans := []struct {
+		name     string
+		size     int64
+		thr      int
+		headTail bool // a head probe, then a tail probe on demand
+	}{
+		{"one read", 900, 1024, false},
+		{"head+tail", 4096, 1024, true},
+		{"head+tail, fast path off", 4096, 0, true},
+	}
 	cases := []struct {
 		name          string
 		head          string
+		chunkSizeHead bool // the head is a chunk-size line, so a tail read has something to find
 		tail          bool // put the trailer marker in the last 128 bytes
 		wantCorrupted bool
-		wantCalls     int
 	}{
-		{"plain head, trailer marker at the tail", "plain text\r\n", true, false, 1},
-		{"plain head, plain tail", "plain text\r\n", false, false, 1},
-		{"chunk-size head, trailer marker at the tail", "1000\r\n", true, true, 2},
-		{"chunk-size head, plain tail", "1000\r\n", false, false, 2},
+		{"plain head, trailer marker at the tail", "plain text\r\n", false, true, false},
+		{"plain head, plain tail", "plain text\r\n", false, false, false},
+		{"chunk-size head, trailer marker at the tail", "1000\r\n", true, true, true},
+		{"chunk-size head, plain tail", "1000\r\n", true, false, false},
 	}
-	for _, thr := range []int{1024, 0} {
-		t.Run(fmt.Sprintf("threshold=%d", thr), func(t *testing.T) {
-			for _, tc := range cases {
-				t.Run(tc.name, func(t *testing.T) {
-					var tail []byte
-					if tc.tail {
-						tail = trailerTail
-					}
-					body := bodyWithTail(size, tc.head, tail)
-					count := 0
-					// RangeGetAt slices the body by [offset, offset+length), so
-					// the head probe sees the first 128 bytes and the tail
-					// probe the last 128.
-					worker := &rangeGetCountingS3{
-						FakeS3: &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
-							end := offset + length
-							if end > size {
-								end = size
-							}
-							if offset >= size {
-								return nil, nil
-							}
-							return body[offset:end], nil
-						}},
-						count: &count,
-					}
-					dir := t.TempDir()
-					cfg := &Config{OutputDir: dir, IsCheck: true, WholeObjectProbeThreshold: thr}
-					out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
-					defer out.Close()
-					s := NewStats()
-					NewChecker(worker, out, s, cfg).Handle(VerifyTask{Key: "k", Size: size})
-					if got := s.Snapshot().CorruptedObjects; (got == 1) != tc.wantCorrupted {
-						t.Errorf("corrupted=%d, want corrupted=%v", got, tc.wantCorrupted)
-					}
-					if count != tc.wantCalls {
-						t.Errorf("RangeGetAt calls=%d want %d", count, tc.wantCalls)
-					}
-				})
-			}
-		})
+	for _, pl := range plans {
+		for _, tc := range cases {
+			t.Run(pl.name+"/"+tc.name, func(t *testing.T) {
+				size := pl.size
+				var tail []byte
+				if tc.tail {
+					tail = trailerTail
+				}
+				body := bodyWithTail(size, tc.head, tail)
+				count := 0
+				// RangeGetAt slices the body by [offset, offset+length): the
+				// one read gets the whole object, the head probe its first
+				// 128 bytes and the tail probe its last 128.
+				worker := &rangeGetCountingS3{
+					FakeS3: &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
+						end := offset + length
+						if end > size {
+							end = size
+						}
+						if offset >= size {
+							return nil, nil
+						}
+						return body[offset:end], nil
+					}},
+					count: &count,
+				}
+				dir := t.TempDir()
+				cfg := &Config{OutputDir: dir, IsCheck: true, WholeObjectProbeThreshold: pl.thr}
+				out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+				defer out.Close()
+				s := NewStats()
+				NewChecker(worker, out, s, cfg).Handle(VerifyTask{Key: "k", Size: size})
+				if got := s.Snapshot().CorruptedObjects; (got == 1) != tc.wantCorrupted {
+					t.Errorf("corrupted=%d, want corrupted=%v", got, tc.wantCorrupted)
+				}
+				wantCalls := 1
+				if pl.headTail && tc.chunkSizeHead {
+					wantCalls = 2
+				}
+				if count != wantCalls {
+					t.Errorf("RangeGetAt calls=%d want %d", count, wantCalls)
+				}
+			})
+		}
 	}
 }
 
