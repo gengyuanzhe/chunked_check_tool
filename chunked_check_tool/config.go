@@ -65,10 +65,11 @@ type Config struct {
 	BackupBucket              string `yaml:"backup_bucket"`
 	// MaxKeys is the LIST page size AND the threshold for the
 	// short-response quirk detection (IsTruncated but fewer entries than
-	// requested — a server pagination quirk signal). Required, 1..1000
-	// (the S3 wire max; anything above is silently truncated server-side,
-	// which would skew the detection). No default: an explicit page size
-	// is what makes "returned < requested" meaningful.
+	// requested — a server pagination quirk signal). Defaults to 1000 when
+	// left out (the S3 wire max); otherwise 1..1000, since anything above is
+	// silently truncated server-side, which would skew the detection. A
+	// Config built without LoadConfig keeps the zero value, which disables
+	// the detection (see checkShortResponse).
 	MaxKeys int32 `yaml:"max_keys"`
 	// EncodingTypeURL adds EncodingType=url to LIST requests: the server
 	// then URL-encodes key/prefix/marker fields on the wire, which keeps
@@ -195,9 +196,12 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.ResponseHeaderTimeout < 0 {
 		return nil, fmt.Errorf("response_header_timeout must be >= 0 seconds (got %d)", cfg.ResponseHeaderTimeout)
 	}
-	// max_keys: required (no default), 1..1000. See the field comment.
+	// max_keys: absent (0) = 1000, the S3 wire max; otherwise 1..1000.
+	if cfg.MaxKeys == 0 {
+		cfg.MaxKeys = 1000
+	}
 	if cfg.MaxKeys < 1 || cfg.MaxKeys > 1000 {
-		return nil, fmt.Errorf("max_keys is required and must be 1..1000 (got %d)", cfg.MaxKeys)
+		return nil, fmt.Errorf("max_keys must be 1..1000 (got %d)", cfg.MaxKeys)
 	}
 	// Windowed latency stats window. Absent (0) = 60s default; negative is
 	// meaningless and rejected.

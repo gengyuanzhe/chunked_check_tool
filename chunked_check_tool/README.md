@@ -66,7 +66,7 @@ output_dir: ./out                   # 输出目录
 output_dir_timestamp: true         # true=output_dir 追加 _YYYYMMDD_HHMMSS 后缀（./out → ./out_20260908_175201）隔离每次运行; false=固定用 output_dir
 is_check: true                      # true=列举+校验, false=仅列举
 is_success_log: false               # 是否记录正常普通对象到 <ownerID>/ok_objects.txt
-max_keys: 1000                       # 每次 LIST 请求的最大键数（1..1000，必填）
+max_keys: 1000                       # 每次 LIST 请求的最大键数（默认 1000，范围 1..1000）
 encoding_type_url: true             # true=LIST 请求带 EncodingType=url，wire 上 server 字段 URL 编码（保护 XML 反序列化免受 \x1f 等非法控制字符撕裂）
 debug_log: false                     # true=每次 LIST 请求打 req/resp/err 诊断行到 run.log（Debug 级）
 latency_window_sec: 60               # 进度行 latency_avg_ms/latency_max_ms 的滑动窗口秒数（默认 60，负值报错；窗口越短越能反映当前批次健康）
@@ -97,7 +97,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `backup_output_dir` | （无） | `-backup-file` 模式专用输出目录，与 `output_dir` 分离避免 backup 结果与 list/check 结果混写。仅 backup 模式必填，其他模式忽略；同样受 `output_dir_timestamp` 控制并共享同一时间戳成对生成 |
 | `is_check` | `true` | `false` 时只列举不校验，不写对象文件，仅写 `list_failed.*` |
 | `is_success_log` | `false` | 主扫描：`true` 时把正常普通对象 key 写入 `<ownerID>/ok_objects.txt`。`-check-file` 模式恒记录，不受此项控制 |
-| `max_keys` | 必填 | 每次 LIST 请求的最大键数（1..1000，必填；服务端单页响应上限决定分页粒度） |
+| `max_keys` | `1000` | 每次 LIST 请求的最大键数（不配时默认 1000；配了须在 1..1000 内，否则启动报错）。服务端单页响应上限决定分页粒度 |
 | `encoding_type_url` | `false` | `true` 时 LIST 请求带 `EncodingType=url`，wire 上 server 字段（key/prefix/marker）URL 编码。保护 XML 反序列化免受 `\x1f` 等 XML 1.0 非法控制字符撕裂；wire 出口由工具统一 `QueryUnescape` 解码。V1 NextMarker 出口解码回原始 key 形态回传（probe-verified minio 语义）；V2 NextContinuationToken 是不透明 base64，**不**解码（字面 `+` 必须原样往返） |
 | `debug_log` | `false` | `true` 时每次 LIST 请求打三行 Debug 级诊断（req/resp/err）到 run.log，记录 marker/token/req_id/next/truncated/nContents/nCP 等，便于追 marker 游标漂移与短响应 quirk |
 | `latency_window_sec` | `60` | 进度行 `latency_avg_ms`/`latency_max_ms` 的滑动窗口秒数：每窗口重置，反映**当前批次**的 LIST 延迟健康（全局平均会被早期 spike 稀释、掩盖当前批次问题）。负值启动报错 |

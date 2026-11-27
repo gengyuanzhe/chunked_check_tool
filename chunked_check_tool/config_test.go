@@ -442,25 +442,33 @@ func TestLoadConfig_BackupOutputDirDefaultEmpty(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_MaxKeysRequired — max_keys must be set explicitly (1..1000).
-// It is both the LIST page size and the threshold for the short-response
-// quirk detection ("IsTruncated but fewer entries than requested"), so a
-// silent default would let a mis-sized page go unnoticed.
-func TestLoadConfig_MaxKeysRequired(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cfg.yaml")
-	content := []byte(`
-endpoints:
-  - 10.0.0.1:9000
-ak: x
-sk: y
-`)
-	if err := os.WriteFile(path, content, 0644); err != nil {
-		t.Fatal(err)
-	}
-	_, err := LoadConfig(path)
-	if err == nil || !strings.Contains(err.Error(), "max_keys") {
-		t.Fatalf("expected max_keys required error, got %v", err)
+// TestLoadConfig_MaxKeysDefault — max_keys is optional: absent, or 0 (what
+// an absent key unmarshals to), falls back to 1000, the S3 page maximum. It
+// is both the LIST page size and the threshold for the short-response quirk
+// detection ("IsTruncated but fewer entries than requested").
+func TestLoadConfig_MaxKeysDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+	}{
+		{"absent", ""},
+		{"zero", "max_keys: 0\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "cfg.yaml")
+			content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\n" + tc.yaml)
+			if err := os.WriteFile(path, content, 0644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.MaxKeys != 1000 {
+				t.Errorf("MaxKeys = %d, want 1000 (the default)", cfg.MaxKeys)
+			}
+		})
 	}
 }
 

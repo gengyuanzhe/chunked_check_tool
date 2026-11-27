@@ -77,10 +77,9 @@ node_recover_probe_interval: 60
 # stdout 进度打印阈值（约，性能优先，不要求精确）
 progress_interval: 5000
 
-# 每页 LIST 的 MaxKeys。必填，1..1000（S3 wire 上限，超过会被服务端截断）。
-# 必填不给默认：该值同时是"短响应检测"的基准——服务端返回 IsTruncated=true
-# 但本页条目数（对象+公共前缀）少于 max_keys 时打告警（矛盾状态，常预示
-# 服务端翻页 bug），客户端必须知道自己请求了多少才能判定"没给满"。
+# 每页 LIST 的 MaxKeys。可选，默认 1000，范围 1..1000（S3 wire 上限，超过会被服务端截断）。
+# 该值同时是"短响应检测"的基准——服务端返回 IsTruncated=true 但本页条目数
+# （对象+公共前缀）少于 max_keys 时打告警（矛盾状态，常预示服务端翻页 bug）。
 max_keys: 1000
 
 # LIST 请求是否带 EncodingType=url（默认 false）。开启后服务端把 key/prefix/
