@@ -18,7 +18,8 @@ const (
 	// MultipartCheckModeOffset asks the server for real part boundaries: LIST
 	// requests carry internal-list-mp-offset: true and multipart ETags come
 	// back as <md5>-<partcnt>-<off0>|<off1>|..., each part start is probed.
-	// ETags that don't parse (server without the feature) fall back to mp.txt.
+	// ETags that don't parse (server without the feature) go to
+	// list_parse_failed.txt.
 	MultipartCheckModeOffset = 1
 )
 

@@ -53,8 +53,8 @@ is_success_log: false
 #   0 = 关闭：所有多段对象直接写 mp.txt，不做检查
 #   1 = offset 检查：LIST 请求带 internal-list-mp-offset: true header，
 #       服务端返回的多段 ETag 为 <md5>-<partcnt>-<off0>|<off1>|... 格式，
-#       按真实 part 边界逐段检查；ETag 解析不出 offsets 的对象回落 mp.txt
-#       （服务端未实现该特性时行为等同模式 0，优雅降级）
+#       按真实 part 边界逐段检查；ETag 解析不出 offsets 的对象落 list_parse_failed.txt
+#       （根目录，需要人工补 part 边界后再检查）
 multipart_check_mode: 0
 
 # 是否记录干净的多段对象到 <ownerID>/ok_mp.txt
