@@ -196,7 +196,7 @@ func (c *Checker) Handle(task VerifyTask) {
 // are no part boundaries to probe at; where the object is recorded depends on
 // what the run opens. List+check in offset mode opens list_parse_failed.txt
 // (the ETag should have carried offsets but did not parse) and routes there.
-// Otherwise it goes to mp.txt unverified, without claiming ok_mp: off/segment
+// Otherwise it goes to mp.txt unverified, without claiming ok_mp: off
 // mode, and every mode under -check-file (HEAD never carries offsets).
 // With offsets, buildProbes produces the probe plan
 // for this object's shape (small-object fast-path / head+tail / head+

@@ -6,7 +6,6 @@ import (
 )
 
 func TestResolveOffsets(t *testing.T) {
-	const seg = int64(5 * 1024 * 1024)
 	cases := []struct {
 		name string
 		obj  ObjectInfo
@@ -20,40 +19,16 @@ func TestResolveOffsets(t *testing.T) {
 			want: VerifyTask{Key: "k", OwnerID: "o", ETag: "0123456789abcdef0123456789abcdef", Size: 100, IsMultipart: false, Offsets: nil},
 		},
 		{
-			name: "multipart segcheck on builds ceil size/seg offsets",
-			obj:  ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, OwnerID: "o"},
-			cfg:  &Config{MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: seg},
-			want: VerifyTask{Key: "k", OwnerID: "o", ETag: "0123456789abcdef0123456789abcdef-2", Size: 10 * 1024 * 1024, IsMultipart: true, Offsets: []int64{0, seg}},
-		},
-		{
-			name: "multipart segcheck on size not multiple of seg",
-			obj:  ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-3", Size: 12*1024*1024 + 1, OwnerID: "o"},
-			cfg:  &Config{MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: seg},
-			want: VerifyTask{Key: "k", OwnerID: "o", ETag: "0123456789abcdef0123456789abcdef-3", Size: 12*1024*1024 + 1, IsMultipart: true, Offsets: []int64{0, seg, 2 * seg}},
-		},
-		{
-			name: "multipart segcheck off nil offsets",
+			name: "multipart check off nil offsets",
 			obj:  ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 100, OwnerID: "o"},
-			cfg:  &Config{MultipartCheckMode: MultipartCheckModeOff, MultipartSegmentSize: 0},
+			cfg:  &Config{MultipartCheckMode: MultipartCheckModeOff},
 			want: VerifyTask{Key: "k", OwnerID: "o", ETag: "0123456789abcdef0123456789abcdef-2", Size: 100, IsMultipart: true, Offsets: nil},
-		},
-		{
-			name: "multipart segcheck on but size zero nil offsets",
-			obj:  ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2", Size: 0, OwnerID: "o"},
-			cfg:  &Config{MultipartCheckMode: MultipartCheckModeSegment, MultipartSegmentSize: seg},
-			want: VerifyTask{Key: "k", OwnerID: "o", ETag: "0123456789abcdef0123456789abcdef-2", Size: 0, IsMultipart: true, Offsets: nil},
 		},
 		{
 			name: "offset mode parses etag offsets",
 			obj:  ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-3-0|5242880|10485760", Size: 15 * 1024 * 1024, OwnerID: "o"},
 			cfg:  &Config{MultipartCheckMode: MultipartCheckModeOffset},
 			want: VerifyTask{Key: "k", OwnerID: "o", ETag: "0123456789abcdef0123456789abcdef-3-0|5242880|10485760", Size: 15 * 1024 * 1024, IsMultipart: true, Offsets: []int64{0, 5242880, 10485760}},
-		},
-		{
-			name: "offset mode takes priority over segment size",
-			obj:  ObjectInfo{Key: "k", ETag: "0123456789abcdef0123456789abcdef-2-0|5242880", Size: 10 * 1024 * 1024, OwnerID: "o"},
-			cfg:  &Config{MultipartCheckMode: MultipartCheckModeOffset, MultipartSegmentSize: seg},
-			want: VerifyTask{Key: "k", OwnerID: "o", ETag: "0123456789abcdef0123456789abcdef-2-0|5242880", Size: 10 * 1024 * 1024, IsMultipart: true, Offsets: []int64{0, 5242880}},
 		},
 		{
 			name: "offset mode unparseable etag falls back nil offsets",

@@ -115,15 +115,7 @@ func TestLoadConfig_SchemeHttps(t *testing.T) {
 func TestLoadConfig_MultipartCheckMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
-	content := []byte(`
-endpoints:
-  - 10.0.0.1:9000
-ak: x
-sk: y
-max_keys: 1000
-multipart_check_mode: 2
-multipart_segment_size: 5242880
-`)
+	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 1000\nmultipart_check_mode: 1\n")
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -131,11 +123,8 @@ multipart_segment_size: 5242880
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.MultipartCheckMode != MultipartCheckModeSegment {
-		t.Errorf("multipart_check_mode = %d, want %d (segment)", cfg.MultipartCheckMode, MultipartCheckModeSegment)
-	}
-	if cfg.MultipartSegmentSize != 5242880 {
-		t.Errorf("multipart_segment_size = %d, want 5242880", cfg.MultipartSegmentSize)
+	if cfg.MultipartCheckMode != MultipartCheckModeOffset {
+		t.Errorf("multipart_check_mode = %d, want %d (offset)", cfg.MultipartCheckMode, MultipartCheckModeOffset)
 	}
 }
 
@@ -158,18 +147,23 @@ func TestLoadConfig_MultipartCheckModeDefault(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_MultipartCheckModeInvalid — values outside 0/1/2 must fail
-// at startup: silently treating a typo like 3 as "off" would skip multipart
-// checking without the operator noticing.
+// TestLoadConfig_MultipartCheckModeInvalid — values outside 0/1 must fail
+// at startup with a message naming the valid ones: silently treating a typo
+// as "off" would skip multipart checking without the operator noticing.
 func TestLoadConfig_MultipartCheckModeInvalid(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cfg.yaml")
-	content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmultipart_check_mode: 3\n")
-	if err := os.WriteFile(path, content, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadConfig(path); err == nil {
-		t.Fatal("expected error when multipart_check_mode=3")
+	for _, mode := range []string{"3", "2", "-1"} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "cfg.yaml")
+			content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 1000\nmultipart_check_mode: " + mode + "\n")
+			if err := os.WriteFile(path, content, 0644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadConfig(path)
+			if err == nil || !strings.Contains(err.Error(), "multipart_check_mode must be 0 (off) or 1 (offset)") {
+				t.Fatalf("multipart_check_mode=%s: err = %v, want the 0/1 error", mode, err)
+			}
+		})
 	}
 }
 
@@ -445,31 +439,6 @@ func TestLoadConfig_BackupOutputDirDefaultEmpty(t *testing.T) {
 	}
 	if cfg.BackupOutputDir != "" {
 		t.Errorf("backup_output_dir default = %q, want empty (unset)", cfg.BackupOutputDir)
-	}
-}
-
-// TestLoadConfig_SegmentCheckWithoutSize — multipart_check_mode=2 (segment)
-// with multipart_segment_size=0 is a contradictory config: the user asked for
-// segment check but provided no segment size. Fail fast at startup rather
-// than silently treating every multipart as clean (which would mask bugs).
-func TestLoadConfig_SegmentCheckWithoutSize(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cfg.yaml")
-	content := []byte(`
-endpoints:
-  - 10.0.0.1:9000
-ak: x
-sk: y
-max_keys: 1000
-multipart_check_mode: 2
-multipart_segment_size: 0
-`)
-	if err := os.WriteFile(path, content, 0644); err != nil {
-		t.Fatal(err)
-	}
-	_, err := LoadConfig(path)
-	if err == nil {
-		t.Fatal("expected error when multipart_check_mode=2 but multipart_segment_size=0")
 	}
 }
 

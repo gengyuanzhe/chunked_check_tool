@@ -20,10 +20,6 @@ const (
 	// back as <md5>-<partcnt>-<off0>|<off1>|..., each part start is probed.
 	// ETags that don't parse (server without the feature) fall back to mp.txt.
 	MultipartCheckModeOffset = 1
-	// MultipartCheckModeSegment assumes uniform part size: offsets are
-	// synthesized as [0, seg, 2*seg, ...] from multipart_segment_size.
-	// Legacy mode, lowest priority, slated for removal.
-	MultipartCheckModeSegment = 2
 )
 
 // defaultJournalCheckpointIntervalSec is journal_checkpoint_interval_sec
@@ -51,7 +47,6 @@ type Config struct {
 	IsCheck               bool   `yaml:"is_check"`
 	IsSuccessLog          bool   `yaml:"is_success_log"`
 	MultipartCheckMode    int    `yaml:"multipart_check_mode"`
-	MultipartSegmentSize  int64  `yaml:"multipart_segment_size"`
 	IsMultipartSuccessLog bool   `yaml:"is_multipart_success_log"`
 	// WholeObjectProbeThreshold is the byte cutoff for the small-object
 	// fast-path: when 0 < task.Size <= threshold, verify() issues one
@@ -159,11 +154,8 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.ListAPIVersion == 0 {
 		cfg.ListAPIVersion = 1
 	}
-	if cfg.MultipartCheckMode < MultipartCheckModeOff || cfg.MultipartCheckMode > MultipartCheckModeSegment {
-		return nil, fmt.Errorf("multipart_check_mode must be 0 (off), 1 (offset), or 2 (segment), got %d", cfg.MultipartCheckMode)
-	}
-	if cfg.MultipartCheckMode == MultipartCheckModeSegment && cfg.MultipartSegmentSize <= 0 {
-		return nil, fmt.Errorf("multipart_check_mode=2 (segment) requires multipart_segment_size > 0 (got %d)", cfg.MultipartSegmentSize)
+	if cfg.MultipartCheckMode < MultipartCheckModeOff || cfg.MultipartCheckMode > MultipartCheckModeOffset {
+		return nil, fmt.Errorf("multipart_check_mode must be 0 (off) or 1 (offset), got %d", cfg.MultipartCheckMode)
 	}
 	if cfg.WholeObjectProbeThreshold < 0 {
 		return nil, fmt.Errorf("whole_object_probe_threshold must be >= 0 (got %d)", cfg.WholeObjectProbeThreshold)

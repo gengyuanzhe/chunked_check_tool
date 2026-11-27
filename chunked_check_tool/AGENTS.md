@@ -39,7 +39,6 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 - 多段对象（任何非 `^[0-9a-f]{32}$` 的 ETag）→ 按 `multipart_check_mode` 处理：
   - `0`（关闭）→ 直接入 `mp.txt`，不做 Range GET。
   - `1`（offset 检查）→ LIST 带 `internal-list-mp-offset: true` header，服务端把多段 ETag 改写为 `<md5>-<partcnt>-<off0>|<off1>|...`（物理字节偏移）；按**每个 part offset 一次探测 `[off_i, off_i+128]`** = **N 次请求，无 tail probe**（多段只跑 `chunkSigRe`，它匹配段首 `;chunk-signature=`；每个 part 段首由自己的探测覆盖，tail probe 读末段段尾永不命中 → 死请求，已删）；ETag 解析不出 offsets（格式不符或 offset > Size）的对象回落 `list_parse_failed.txt`（根目录，行格式 `bucket\x1fkey`）。`parseMultipartOffsetETag` 始终校验每个 offset ≤ Size（Size=0 是合法空对象：唯一合法 ETag 是 `<md5>-1-0`）。这种空的多段对象不探测，直接记 `ok_mp`（见不变量 16 的 (a)）。
-  - `2`（固定分段，旧模式待废弃）→ 按 `multipart_segment_size` 合成 `[0, seg, 2*seg, ...]` 边界，探测矩阵同 mode=1。
 - 列举失败、校验失败分别落不同文件。
 - 支持几十亿对象规模，内存有界，背压自调节。探测矩阵与双 regex 细则见 §4.17。
 
@@ -84,7 +83,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 1a. **offset 模式的 header 注入与回落**：`multipart_check_mode=1` 且 `is_check=true` 时，LIST 请求（V1/V2、failover 重建的 client）经 `withMpOffsetListHeader`（per-call API option，`listPageOnce` 的 LIST 调用点传入）注入 `internal-list-mp-offset: true`——"仅 LIST、绝不 HEAD/GET/PUT"由调用点结构保证。该 header 名**不得**改成 x-amz-/x-obs- 开头（服务端签名计算覆盖这些前缀，注入会被拒；非 x-amz 名在 SigV2/V4 下均可不签）。ETag 解析不出 offsets（服务端未实现/未升级、格式不符、或 offset > Size）→ Offsets=nil → 根目录 `list_parse_failed.txt` + `list_parse_failed.log` 回落（**不再**写 mp.txt）。`parseMultipartOffsetETag(etag, size)` 始终校验每个 offset ≤ Size；Size=0 是合法空对象，唯一合法 ETag 是 `<md5>-1-0`，多段 ETag 的非零 offset > 0 即非法。log 是根目录 slog，字段 `bucket/key/owner/size/etag_len/etag`（完整 ETag 无截断）。**假设服务端只改多段对象的 ETag**——普通对象若也被改写会被判为多段（不漏检损坏，但 list_obj/list_mp 计数失真）。`TestMpOffsetHeaderListOnly` 是回归钉（LIST 带 header、HEAD 不带）。
 
-2. **mode=0 时多段对象跳过 Range GET**：直接写 `<ownerID>/mp.txt`。每行 `bucket\x1f<escaped-key>`（见不变量 23），不带 ETag。mode=1/2 的多段对象按 offsets 逐段探测（见 14），**不是**无条件跳过 Range GET。
+2. **mode=0 时多段对象跳过 Range GET**：直接写 `<ownerID>/mp.txt`。每行 `bucket\x1f<escaped-key>`（见不变量 23），不带 ETag。mode=1 的多段对象按 offsets 逐段探测（见 14），**不是**无条件跳过 Range GET。
 
 3. **ETag 来源**：list 响应（统一），**不从 Range GET response header 取**。OwnerID 同样来自 list 响应（V2 请求必须显式 `FetchOwner=true`——minio-go 默认带上，aws SDK **不**默认；漏设则所有 OwnerID 为空、全部结果塌进 `_unknown/`。`TestListPageV2_SetsFetchOwner` 是回归钉）。ETag 落地在 `ListPage`/`HeadObject` 出口统一 `trimETagQuotes`（S3 wire 上 ETag 带引号，aws SDK 不剥）。
 
@@ -93,7 +92,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 4a. **失败分类三文件**（list_failed / parse_failed / list_parse_failed 职责分离）：
   - `list_failed.txt` — S3 LIST 调用失败（节点故障/5xx/超时）。行格式 `prefix\x1ftoken`：token 是失败页的 continuationToken（V1=上一页最后 key，V2=服务端不透明 token），第一页失败时为单字段 `prefix`。**可自动补跑**：`-resume-list <list_failed.txt>` 读这些行，把 `(prefix, token)` seed 进 BFS 队列，`processPrefix` 从 token 续页。
   - `parse_failed.txt` — `-check-file`/`-backup-file`/`-resume-list` 输入解析失败（坏行/bkt 不匹配/whitespace-only 行/无效 `%XX` 转义）。写入整行原始内容。**不可自动补跑**，需人工修输入文件。
-  - `list_parse_failed.txt` — **仅 mode=offset + S3 LIST**：multipart ETag 解析失败（服务端未实现 header / ETag 格式不符 / offset > Size）。根目录全局，行格式 `bucket\x1fkey`（对齐 `check_failed.txt`）。**喂回 `-check-file` 不会真正检查**：HEAD 不带分段边界，这些行会落到 `mp.txt`（任何 `multipart_check_mode` 下都是），要检查需人工补 part 边界。配套 `list_parse_failed.log`（根目录 slog，字段 `bucket/key/owner/size/etag_len/etag`，完整 ETag 无截断）。**与 mp.txt 的区别**：mp.txt 是 mode=0 主动关闭 / check-file 类型漂移 / mode=segment+Size==0 的未校验 multipart；list_parse_failed 是 mode=offset 下 ETag 本应解析但失败的对象。
+  - `list_parse_failed.txt` — **仅 mode=offset + S3 LIST**：multipart ETag 解析失败（服务端未实现 header / ETag 格式不符 / offset > Size）。根目录全局，行格式 `bucket\x1fkey`（对齐 `check_failed.txt`）。**喂回 `-check-file` 不会真正检查**：HEAD 不带分段边界，这些行会落到 `mp.txt`（任何 `multipart_check_mode` 下都是），要检查需人工补 part 边界。配套 `list_parse_failed.log`（根目录 slog，字段 `bucket/key/owner/size/etag_len/etag`，完整 ETag 无截断）。**与 mp.txt 的区别**：mp.txt 是 mode=0 主动关闭 / check-file 类型漂移的未校验 multipart；list_parse_failed 是 mode=offset 下 ETag 本应解析但失败的对象。
   - **契约**：整个工具的行格式都基于 `\x1f`（ASCII Unit Separator）分隔（`bkt\x1fkey\x1fpartcnt\x1foff...` / `prefix\x1ftoken` / `bkt\x1fkey`），server 字段（key/prefix/token）写入时 `url.QueryEscape`、读取时 `QueryUnescape`，含 `\x1f`、`%`、`+`、`/` 的 key 都能逐字节往返。bucket 字段来自 CLI 不转义，数字字段（partcnt/offsets）不转义。**为什么弃用 pipe `|`**：S3 key 可合法包含 `|`，旧 pipe 分隔会把含 `|` 的 key 静默错切。旧的 `invalid_keys.txt` 机制（拦截含 `|` 的 key）已整体移除——`\x1f`+转义让任何 key 都能往返，拦截成死代码。
   - **stats 字段**：`ParseFailed`（输入解析失败计数）、`ListParseFailed`（mode=offset ETag 解析失败计数）。summary 中 ModeListCheck 打 `list_parse_failed`，ModeCheckFile/ModeBackup 打 `parse_failed`。**无 `InvalidKeys`**——机制已移除，含 `|` 的 key 走正常路径。
 
@@ -113,7 +112,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 12. **V1/V2 分页协议对 caller 透明**：`S3Client.listPageOnce` 按 `cfg.ListAPIVersion` 分派 `s3.ListObjects`（V1，marker 游标）或 `s3.ListObjectsV2`（V2，continuation token）。两条路径都归一化进 `listResult{contents, commonPrefixes, next}`，`next` 作为下一次 `ListPage` 的 `continuationToken` 参数回传。V1 无 delimiter 且 `IsTruncated=true` 但 `NextMarker` 为空时，回退到最后一个 Contents key 作 marker；有 delimiter 时 S3 返回 `NextMarker`。caller（lister/main 根分页）只需把 `next` 喂回 `continuationToken`，不感知 V1/V2 差异。`S3Client.api` 是 `awsS3API` 接口（非 `*s3.Client`）以支持测试注入。aws SDK 所有 API 带首参 ctx——本工具没有任何路径取消它，调用方一律传 `context.Background()`；单次调用的超时由各方法自己的 `WithTimeout` 兜底，LIST 没有单次超时，靠 `dial_timeout` / `response_header_timeout` 配置兜底）。
 
-13. **多段分段检查的失败分流**（mode=1/2 与 -check-file 共用路径）：分段 RangeGet 报错走 `mp_check_failed` 路径（`WriteMpCheckFailed` + `IncrMpCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，主扫描仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）；`-check-file` 恒写（见不变量 17）。**ok_mp.txt 行格式同 corrupted_mp.txt**（`WriteMultipartOk(ownerID, key, offsets)` 接收 task.Offsets）：mode=1 与文件输入模式写 `bkt\x1fkey\x1fpartcnt\x1foff...`，mode=2 写纯 key 行。**corrupted_mp.txt 行格式按模式**：mode=1 与文件输入模式写 `bkt\x1fkey\x1fpartcnt\x1foff0\x1foff1\x1f...`（offsets 是真实 part 边界，文件可直喂 -backup-file/-check-file）；mode=2 写 `bucket\x1f<escaped-key>`——固定分段的 [0,seg,2*seg,...] 是合成边界，**绝不能**当 part 边界写出（否则备份中转按错误边界分段，ETag 必 mismatch）。**mp_check_failed.txt 行格式对齐 corrupted_mp.txt**：mode=1 与文件输入模式写 `bkt\x1fkey\x1fpartcnt\x1foff0\x1f...`（`WriteMpCheckFailed(key, offsets)` 接收 task.Offsets），同样可直喂 -backup-file/-check-file 补跑。**check_failed.txt 行格式 `bkt\x1fkey`**（`WriteCheckFailed(key)` 内部拼 `o.bucket + rowSep + url.QueryEscape(key)`，rowSep=`\x1f`），对齐 -check-file/-backup-file 普通对象 2 字段输入，可直喂补跑（不需要 ETag/Size：check-file 会 HEAD 重取，backup 中转也会 HEAD）。**owner 不写入** check_failed/mp_check_failed（文件输入模式不读 owner，输出走全局 root 不按 owner 分桶）。
+13. **多段分段检查的失败分流**（mode=1 与 -check-file 共用路径）：分段 RangeGet 报错走 `mp_check_failed` 路径（`WriteMpCheckFailed` + `IncrMpCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，主扫描仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）；`-check-file` 恒写（见不变量 17）。**ok_mp.txt 行格式同 corrupted_mp.txt**（`WriteMultipartOk(ownerID, key, offsets)` 接收 task.Offsets）：`bkt\x1fkey\x1fpartcnt\x1foff...`。**corrupted_mp.txt 行格式**：`bkt\x1fkey\x1fpartcnt\x1foff0\x1foff1\x1f...`（offsets 是真实 part 边界，文件可直喂 -backup-file/-check-file）。**mp_check_failed.txt 行格式对齐 corrupted_mp.txt**：`bkt\x1fkey\x1fpartcnt\x1foff0\x1f...`（`WriteMpCheckFailed(key, offsets)` 接收 task.Offsets），同样可直喂 -backup-file/-check-file 补跑。**check_failed.txt 行格式 `bkt\x1fkey`**（`WriteCheckFailed(key)` 内部拼 `o.bucket + rowSep + url.QueryEscape(key)`，rowSep=`\x1f`），对齐 -check-file/-backup-file 普通对象 2 字段输入，可直喂补跑（不需要 ETag/Size：check-file 会 HEAD 重取，backup 中转也会 HEAD）。**owner 不写入** check_failed/mp_check_failed（文件输入模式不读 owner，输出走全局 root 不按 owner 分桶）。
 
 14. **统计字段命名**（display name / Go 字段）：`list_obj` (`ListedObjects`) / `list_mp` (`ListedMp`) / `list_all` (`ListedAll=list_obj+list_mp`) / `ok_obj` (`OkObjects`) / `corrupt_obj` (`CorruptedObjects`) / `ok_mp` (`OkMp`) / `corrupt_mp` (`CorruptedMp`) / `list_failed` (`ListFailed`) / `list_parse_failed` (`ListParseFailed`，mode=offset ETag 解析失败计数) / `check_failed` (`CheckFailed`) / `mp_check_failed` (`MpCheckFailed`) / `read` (`ReadLines`，文件输入模式的累计已读输入行数，每读一行 +1 含坏行；**不统计总行数**——预扫描整个输入文件不值得)。**关键语义**：`ok_mp` 只在 `multipart_check_mode!=0` 且通过分段检查时 +1；mode=0 时多段对象只计 `list_mp`，**不**计 `ok_mp`——未校验不能谎称干净（mode=1 的 list_parse_failed 回落对象同理只计 `list_mp`）。`is_check=false`（list-only）时 `ok_obj`/`corrupt_obj`/`ok_mp`/`corrupt_mp`/`check_failed`/`mp_check_failed`/`list_parse_failed` 全部为 0，summary 不输出这些字段。**无 `invalid_keys` 字段**——`invalid_keys.txt`/`InvalidKeys` 已整体移除（`\x1f`+转义让任何 key 都能往返，拦截成死代码）。**窗口化延迟**：`stats.listLatency *LatencyTracker`（latency.go）按 `latency_window_sec`（默认 60s）维护滑动窗口，每窗口重置；`AddListCall` 双写全局计数（`ListCalls`/`ListAvgLatencyMs`）与窗口（`ListLatencyAvgMs`/`ListLatencyMaxMs`）。summary 用全局 `list_avg_ms`，progress 默认分支用窗口 `latency_avg_ms`/`latency_max_ms`——长跑全局平均会被早期 spike 稀释、掩盖当前批次健康，窗口化暴露当前批次。
 
@@ -190,8 +189,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 | `encoding_type_url` | `false` | true 时 LIST 请求带 `EncodingType=url`（V1/V2 都带）。wire 上 server 字段（key/prefix/marker）URL 编码，保护 XML 反序列化免受 `\x1f` 等 XML 1.0 非法控制字符撕裂。出口由 `wireDecoder` 统一 `QueryUnescape` 解码（边界 A，见不变量 23）；V2 `NextContinuationToken` 是不透明 base64 不解码。Wire decode 失败保留原值 best-effort，warn 一次/页到 `list_failed.log`。**在目标服务器上启用前必须先探测**——某些 S3 实现不支持该参数或解码行为不同（见 `memory/encoding-type-marker-semantics.md`） |
 | `debug_log` | `false` | true 时每次 LIST 请求打三行 Debug 级诊断（`list-page req`/`list-page err`/`list-page resp`）到 run.log，记录 marker/token/delim/maxKeys/req_id/next/truncated/nContents/nCP。便于追 marker 游标漂移与短响应 quirk。nil 守卫——无 logger 时不打。详见不变量 27 |
 | `latency_window_sec` | `60` | progress 行 `latency_avg_ms`/`latency_max_ms` 的滑动窗口秒数。每窗口重置，反映**当前批次**的 LIST 延迟健康（全局 `list_avg_ms` 会被早期 spike 稀释、掩盖当前批次问题）。0=用默认 60s；负值启动报错。详见不变量 26 |
-| `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 mp.txt 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，多段 ETag 返回 `<md5>-<partcnt>-<off0>|<off1>|...`——服务端 ETag 内部分隔符仍是 `|`，由服务端生成不可改，按真实 part 边界逐段检查；解析不出 offsets 回落 list_parse_failed.txt，**不再**写 mp.txt。**优先级高于 mode=2**）；`2`=固定分段检查（旧模式待废弃，必须配 `multipart_segment_size > 0`）。非法值启动报错 |
-| `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
+| `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 mp.txt 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，多段 ETag 返回 `<md5>-<partcnt>-<off0>|<off1>|...`——服务端 ETag 内部分隔符仍是 `|`，由服务端生成不可改，按真实 part 边界逐段检查；解析不出 offsets 回落 list_parse_failed.txt，**不再**写 mp.txt）。非法值启动报错 |
 | `whole_object_probe_threshold` | `1024` | 小对象全读阈值（字节）。`0<Size<=该值` 时走快路径：单次 `RangeGetAt(0, thr)` 读全对象：开头命中 `chunkSigRe`（`;chunk-signature=` 强特征）即损坏，或以 chunk 长度行开头且命中 `trailerRe`（`0\r\nx-amz-checksum-<algo>:<value>\r\n\r\n`）才损坏，1 请求覆盖段首+段尾两种损坏；超过该值走多探测：普通对象先读 head@0，head 以 chunk 长度行 `<hexlen>\r\n` 开头才再读 tail@Size-128（否则 1 请求即判干净）；多段每个 part offset 一次探测（无 tail probe）。`0`=禁用快路径恒走多探测。负值启动报错 |
 | `is_multipart_success_log` | `false` | 主扫描是否记录干净的多段对象到 `<ownerID>/ok_mp.txt`。`-check-file` 模式恒记录，不受此项控制 |
 | `node_isolate_threshold` | `3` | 节点隔离阈值：进程级累积的节点故障数（连接错误/超时/5xx，4xx 业务错误不计）达到该值才隔离节点；`1`=旧的首次故障即隔离。计数无时间衰减，跨 worker 共享 |
@@ -212,9 +210,9 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 | 文件 | 内容 | 何时写 |
 |---|---|---|
 | `corrupted_objects.txt` | 损坏普通对象 key | Range GET 命中 chunk-signature/trailer（`is_check=true`） |
-| `mp.txt` | 多段对象 key（仅 key） | `multipart_check_mode=0` 时所有多段对象；`-check-file` 时普通行 HEAD 判多段的漂移对象（无 offsets 不认干净）；`mode=segment + Size==0`（无法合成 offset）。`mode=offset` 的 ETag 解析失败**不**写 mp.txt（改写 list_parse_failed.txt） |
-| `corrupted_mp.txt` | 损坏多段对象 key | `multipart_check_mode=1/2` 或文件检查模式（-check-file）分段检查命中。mode=1 与文件输入模式行带 `bkt\|key\|partcnt\|off0\|off1\|...`（真实 part 边界，可直喂 -backup-file/-check-file）；mode=2 行 `bucket\x1f<escaped-key>` |
-| `ok_mp.txt` | 干净多段对象 key | 主扫描：`multipart_check_mode=1/2` 且 `is_multipart_success_log=true`；`-check-file`：恒写。行格式同 `corrupted_mp.txt`：mode=1 与文件检查模式 `bkt\x1fkey\x1fpartcnt\x1foff0\x1f...`，mode=2 `bucket\x1f<escaped-key>` |
+| `mp.txt` | 多段对象 key（仅 key） | `multipart_check_mode=0` 时所有多段对象；`-check-file` 时普通行 HEAD 判多段的漂移对象（无 offsets 不认干净）。`mode=offset` 的 ETag 解析失败**不**写 mp.txt（改写 list_parse_failed.txt） |
+| `corrupted_mp.txt` | 损坏多段对象 key | `multipart_check_mode=1` 或文件检查模式（-check-file）分段检查命中。行带 `bkt\|key\|partcnt\|off0\|off1\|...`（真实 part 边界，可直喂 -backup-file/-check-file） |
+| `ok_mp.txt` | 干净多段对象 key | 主扫描：`multipart_check_mode=1` 且 `is_multipart_success_log=true`；`-check-file`：恒写。行格式同 `corrupted_mp.txt`：`bkt\x1fkey\x1fpartcnt\x1foff0\x1f...` |
 | `ok_objects.txt` | 正常普通对象 key | `is_success_log=true`；`-check-file` 模式恒写 |
 
 ### 处理文件（全局，根目录 `<output_dir>/<filename>`）
@@ -227,7 +225,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 | `list_parse_failed.txt` | mode=offset 下 ETag 解析失败的 multipart 对象 `bucket\x1fkey` | **仅 mode=offset + S3 LIST**：服务端未实现 header / ETag 格式不符 / offset > Size。行格式对齐 check_failed.txt；喂回 `-check-file` 只会落到 `mp.txt`（HEAD 不带分段边界），要检查需人工补 part 边界。配套 `list_parse_failed.log`（slog，bucket/key/owner/size/etag_len/etag，完整 ETag 无截断） |
 | `check_failed.txt` | 普通对象校验失败 `bkt\x1fkey` | checker 普通对象 RangeGet/HEAD 失败；可直喂 `-check-file`/`-backup-file` 普通对象输入补跑 |
 | `check_failed.log` | 校验失败结构化错误（slog text，req_id/key/http_code/s3_code/err） | 同上 |
-| `mp_check_failed.txt` | 多段分段检查失败 `bkt\x1fkey\x1fpartcnt\x1foff0\x1f...` | `multipart_check_mode=1/2`（或文件检查模式）时分段 RangeGet/HEAD 失败；可直喂 -check-file/-backup-file 补跑 |
+| `mp_check_failed.txt` | 多段分段检查失败 `bkt\x1fkey\x1fpartcnt\x1foff0\x1f...` | `multipart_check_mode=1`（或文件检查模式）时分段 RangeGet/HEAD 失败；可直喂 -check-file/-backup-file 补跑 |
 | `mp_check_failed.log` | 多段分段检查失败结构化错误（slog text） | 同上 |
 | `backup_ok.txt` | 备份成功的原始输入行 | `-backup-file`：中转 + ETag 终验通过 |
 | `backup_failed.txt` | 备份失败的原始输入行（可自喂重试） | `-backup-file`：HEAD 失败（stage=head）/中转失败（stage=upload）/ETag 终验失败（stage=etag，坏副本保留） |
@@ -239,7 +237,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 ### 结果文件行格式
 
-所有结果/处理文件统一用 `\x1f` 分隔、server 字段（key/prefix/token）`url.QueryEscape` 转义（见不变量 23）。per-owner 结果文件行格式 `bucket\x1f<escaped-key>`（bucket 来自 CLI 不转义）；`corrupted_mp.txt`、`ok_mp.txt` 在 mode=1/文件输入模式带真实 offsets（`bkt\x1fkey\x1fpartcnt\x1foff0\x1f...`），mode=2 回落到 `bucket\x1f<escaped-key>`。处理文件（`list_failed`/`parse_failed`/`check_failed`/`mp_check_failed` 的 .txt 与 .log）按各自补跑链路需要的 `\x1f` 分隔格式写入：
+所有结果/处理文件统一用 `\x1f` 分隔、server 字段（key/prefix/token）`url.QueryEscape` 转义（见不变量 23）。per-owner 结果文件行格式 `bucket\x1f<escaped-key>`（bucket 来自 CLI 不转义）；`corrupted_mp.txt`、`ok_mp.txt` 带真实 offsets（`bkt\x1fkey\x1fpartcnt\x1foff0\x1f...`）。处理文件（`list_failed`/`parse_failed`/`check_failed`/`mp_check_failed` 的 .txt 与 .log）按各自补跑链路需要的 `\x1f` 分隔格式写入：
 - `list_failed.txt` = `prefix\x1ftoken`（token 为空时单字段 prefix）— `-resume-list` 解析此格式
 - `parse_failed.txt` = 原始输入行（整行，不切分）
 - `check_failed.txt` = `bkt\x1fkey` — 对齐 `-backup-file` 普通对象 2 字段输入
@@ -274,7 +272,9 @@ Go 1.27 二进制路径：`/Users/gengyuanzhe/sdk/go1.27.1/bin/go`（若不在 P
 
 ### 7.1 端到端冒烟（本地 minio + 真实多段对象）
 
-用于改动后回归：验证 list/check/分段检查/owner 分桶/per-owner 行格式/run.log 全链路。整个流程在 `/tmp/chunked-e2e/` 下，**非仓库内容**，可随改随丢。
+用于改动后回归：验证 list/check、多段对象的逐 part 检查、owner 分桶、per-owner 行格式、run.log 全链路。整个流程在 `/tmp/chunked-e2e/` 下，**非仓库内容**，可随改随丢。2026-11-27 按本节步骤实跑通过（脚本执行，期望值取自那次运行）。
+
+本地 minio 不识别 `internal-list-mp-offset`，主扫描在 minio 上拿不到 part 边界：多段对象要么进 `mp.txt`（`multipart_check_mode=0`），要么进 `list_parse_failed.txt`（`multipart_check_mode=1`）。逐 part 检查用 `-check-file` 喂入边界来验证（步骤 7）。
 
 **前置**：`/opt/homebrew/bin/{minio,mc}` 已装。minio data dir 与 seed 脚本都放 `/tmp/chunked-e2e/`。
 
@@ -299,14 +299,15 @@ printf '1000;chunk-signature=000000000000000000000000000000000000000000000000000
 head -c 65536 /dev/urandom >> /tmp/chunked-e2e/seed/corrupted.bin
 /opt/homebrew/bin/mc cp /tmp/chunked-e2e/seed/corrupted.bin local/testbucket/corrupted/corrupted.bin
 
-# 4. seed 2 个多段对象（用 minio-go，partSize=5MiB 触发 multipart）
-#    mp/clean.bin   — 6MB 正常 body（ETag <hex>-2）
-#    mp/corrupt.bin — 首段开头 128 字节是 chunk-sig 头（ETag <hex>-2，分段检查命中）
-mkdir -p /tmp/chunked-e2e/mp-seed
-#    见 /tmp/chunked-e2e/mp-seed/main.go（仓库外 helper，用 minio-go v7）
-cd /tmp/chunked-e2e/mp-seed && go run .
+# 4. seed 2 个多段对象，各 2 个 part（5MiB + 1MiB，共 6MB）
+#    mp/clean.bin   — 正常 body（ETag <hex>-2）
+#    mp/corrupt.bin — 第 1 个 part 的开头是 chunk-sig 头（ETag <hex>-2）
+#    helper 代码见本节末尾，存成 /tmp/chunked-e2e/mp-seed/main.go；
+#    从仓库目录运行，借用仓库的 SDK 依赖
+cd /Users/gengyuanzhe/code/S3/golang/chunked_check_tool/chunked_check_tool
+go run /tmp/chunked-e2e/mp-seed/main.go 127.0.0.1:9100 testbucket
 
-# 5. 写 cfg（is_check=true, multipart_check_mode=2, segment_size=5242880）
+# 5. 写 cfg（is_check=true；多段检查关闭，主扫描把多段对象记进 mp.txt）
 cat > /tmp/chunked-e2e/cfg.yaml <<'EOF'
 endpoints:
   - 127.0.0.1:9100
@@ -317,35 +318,45 @@ list_type: 2
 list_concurrency: 2
 check_concurrency: 4
 output_dir: /tmp/chunked-e2e/out
+output_dir_timestamp: false
 is_check: true
 is_success_log: true
-multipart_check_mode: 2
-multipart_segment_size: 5242880
-is_multipart_success_log: true
+multipart_check_mode: 0
+max_keys: 1000
 progress_interval: 2
 EOF
 
-# 6. 编译并跑
-cd /Users/gengyuanzhe/code/S3/golang/chunked_check_tool/chunked_check_tool
+# 6. 编译并跑主扫描
 go build -o /tmp/chunked_check_tool .
 /tmp/chunked_check_tool -c /tmp/chunked-e2e/cfg.yaml -bkt testbucket
 ```
 
-**期望结果**（testbucket 8 对象）：
+**期望结果**（testbucket 8 对象）。`<ownerID>` 是 LIST 响应里的 Owner.ID，随 minio 版本和登录用户而不同（2026-11-27 本机是一串 64 位十六进制）；为空时落 `_unknown/`。
 
 | 输出 | 内容 |
 |---|---|
-| `out/run.log`（=== summary === 段） | `list_all: 8 (list_obj: 6 list_mp: 2)` `ok_obj: 5 corrupt_obj: 1 ok_mp: 1 corrupt_mp: 1 list_failed: 0 check_failed: 0 mp_check_failed: 0` |
-| `out/minio/corrupted_objects.txt` | `testbucket\x1fcorrupted/corrupted.bin` |
-| `out/minio/ok_objects.txt` | 5 行 `testbucket\x1fdata/2026/01/file_0N.bin` |
-| `out/minio/corrupted_mp.txt` | `testbucket\x1fmp/corrupt.bin` |
-| `out/minio/ok_mp.txt` | `testbucket\x1fmp/clean.bin` |
+| `out/run.log`（=== summary === 段） | `list_all: 8 (list_obj: 6 list_mp: 2)` `ok_obj: 5 corrupt_obj: 1 ok_mp: 0 corrupt_mp: 0 list_failed: 0 list_parse_failed: 0 check_failed: 0 mp_check_failed: 0` |
+| `out/<ownerID>/corrupted_objects.txt` | `testbucket\x1fcorrupted%2Fcorrupted.bin` |
+| `out/<ownerID>/ok_objects.txt` | 5 行 `testbucket\x1fdata%2F2026%2F01%2Ffile_0N.bin` |
+| `out/<ownerID>/mp.txt` | 2 行：`testbucket\x1fmp%2Fclean.bin`、`testbucket\x1fmp%2Fcorrupt.bin` |
 | `out/{list_failed,check_failed,mp_check_failed}.txt` | 空 |
 | `out/run.log` | 含配置快照（ak/sk `***`）+ 进度行 + summary |
 
-`out/minio/` 路径名里的 `minio` 是 LIST 响应 Owner 字段（root 用户 → OwnerID=`minio`）；空 OwnerID 会落到 `_unknown/`。
+```bash
+# 7. 多段对象的逐 part 检查：-check-file 喂入两个多段对象的 part 边界（\x1f 分隔）
+printf 'testbucket\x1fmp/clean.bin\x1f2\x1f0\x1f5242880\ntestbucket\x1fmp/corrupt.bin\x1f2\x1f0\x1f5242880\n' \
+  > /tmp/chunked-e2e/mp-check.txt
+/tmp/chunked_check_tool -c /tmp/chunked-e2e/cfg.yaml -bkt testbucket -check-file /tmp/chunked-e2e/mp-check.txt
+```
 
-**multipart_check_mode=1 负向验证**（本地 minio 不识别 `internal-list-mp-offset`，正好验证回落路径）：cfg 改 `multipart_check_mode: 1`（删 segment_size）重跑——minio 返回普通 `<md5>-<N>` ETag → 解析失败 → 两个多段对象都落 `out/minio/mp.txt`，summary `ok_mp: 0 corrupt_mp: 0`，corrupted_mp/ok_mp 文件为空或不创建。header 实际已发出（`TestMpOffsetTransportMinioList` 单测覆盖）。**正向路径**（offset 检查全链路）需服务端实现该 header 后在真实集群验证：corrupted_mp.txt 行 `bkt|key|partcnt|off0|...` 可直喂 `-backup-file`。
+期望 summary：`read: 2` + `ok_mp: 1 corrupt_mp: 1 check_failed: 0 mp_check_failed: 0`。结果落在 `out/_unknown/`（输入行不带 owner）：
+
+| 文件 | 内容 |
+|---|---|
+| `out/_unknown/corrupted_mp.txt` | `testbucket\x1fmp%2Fcorrupt.bin\x1f2\x1f0\x1f5242880` |
+| `out/_unknown/ok_mp.txt` | `testbucket\x1fmp%2Fclean.bin\x1f2\x1f0\x1f5242880` |
+
+**multipart_check_mode=1 负向验证**（本地 minio 不识别 `internal-list-mp-offset`，正好验证回落路径）：cfg 改 `multipart_check_mode: 1` 重跑主扫描——minio 返回普通 `<md5>-<N>` ETag → 解析失败 → 两个多段对象都落 `out/list_parse_failed.txt`（根目录），summary `list_parse_failed: 2`；不创建 `mp.txt`、`corrupted_mp.txt`、`ok_mp.txt`。header 实际已发出（`TestMpOffsetHeaderListOnly` 单测覆盖）。**正向路径**（offset 检查全链路）需服务端实现该 header 后在真实集群验证：corrupted_mp.txt 行 `bkt\x1fkey\x1fpartcnt\x1foff0\x1f...` 可直喂 `-backup-file`。
 
 **断点续跑**：`output_dir` 是 append 模式，重跑会累加。想干净跑就换 `output_dir`（`sed 's#out#out2#'`）。
 
@@ -355,7 +366,84 @@ pkill -f 'minio server.*127.0.0.1:9100'
 # /tmp/chunked-e2e 视情况删；权限系统可能拒绝 rm -rf，必要时用 rm 逐文件
 ```
 
-**mp-seed helper**（`/tmp/chunked-e2e/mp-seed/main.go`，非仓库代码）：用 `github.com/minio/minio-go/v7` 上传两个 5MiB+ 对象触发 multipart，partSize 必须是 `5*1024*1024`（minio 最小 part size）。`mp/corrupt.bin` 的首段前 128 字节是 `1000;chunk-signature=...` 头，其余是 filler——分段检查在段 0 offset 0 命中。helper 无独立 go.mod，从仓库目录 `go run /tmp/chunked-e2e/mp-seed2/main.go`（借仓库模块上下文解析 minio-go）。
+**mp-seed helper**（`/tmp/chunked-e2e/mp-seed/main.go`，非仓库代码）：用仓库的 aws-sdk-go-v2 依赖直接调 CreateMultipartUpload / UploadPart / CompleteMultipartUpload。minio 要求非末段 ≥5MiB，所以两个 part 取 5MiB + 1MiB。`mp/corrupt.bin` 的第 1 个 part 以 `1000;chunk-signature=...` 头开头，其余是 filler——逐 part 检查在 part 1 的 offset 0 命中。helper 没有独立 go.mod，从仓库目录 `go run`。
+
+```go
+// Seeds the two multipart objects of the AGENTS §7.1 smoke test on a local
+// minio:
+//
+//	mp/clean.bin   — 6MB of plain filler, in two parts (5MiB + 1MiB)
+//	mp/corrupt.bin — the same, but the first part opens with a chunk-signature
+//	                 header, as a corrupted upload leaves it on the private
+//	                 storage
+//
+// Run it from the repo directory, which supplies the SDK:
+//
+//	go run /tmp/chunked-e2e/mp-seed/main.go 127.0.0.1:9100 testbucket
+package main
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+)
+
+func main() {
+	endpoint, bucket := os.Args[1], os.Args[2]
+	c := s3.New(s3.Options{
+		Region:       "us-east-1",
+		BaseEndpoint: aws.String("http://" + endpoint),
+		UsePathStyle: true,
+		Credentials:  credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin123", ""),
+	})
+	// minio rejects a non-last part smaller than 5MiB.
+	partSizes := []int{5 * 1024 * 1024, 1024 * 1024}
+	sig := "1000;chunk-signature=" + strings.Repeat("0", 64) + "\r\n"
+	for _, o := range []struct{ key, head string }{
+		{"mp/clean.bin", ""},
+		{"mp/corrupt.bin", sig},
+	} {
+		ctx := context.Background()
+		created, err := c.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String(bucket), Key: aws.String(o.key)})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, o.key, "CreateMultipartUpload:", err)
+			os.Exit(1)
+		}
+		var parts []types.CompletedPart
+		for i, n := range partSizes {
+			head := ""
+			if i == 0 {
+				head = o.head
+			}
+			part, err := c.UploadPart(ctx, &s3.UploadPartInput{
+				Bucket: aws.String(bucket), Key: aws.String(o.key), UploadId: created.UploadId,
+				PartNumber: aws.Int32(int32(i + 1)),
+				Body:       bytes.NewReader([]byte(head + strings.Repeat("x", n-len(head)))),
+			})
+			if err != nil {
+				fmt.Fprintln(os.Stderr, o.key, "UploadPart:", err)
+				os.Exit(1)
+			}
+			parts = append(parts, types.CompletedPart{PartNumber: aws.Int32(int32(i + 1)), ETag: part.ETag})
+		}
+		if _, err := c.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+			Bucket: aws.String(bucket), Key: aws.String(o.key), UploadId: created.UploadId,
+			MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, o.key, "CompleteMultipartUpload:", err)
+			os.Exit(1)
+		}
+		fmt.Println(o.key, "ok")
+	}
+}
+```
 
 ### 7.2 -check-file / -backup-file 冒烟（复用 7.1 环境）
 

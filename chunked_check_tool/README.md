@@ -165,8 +165,8 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 - HEAD/中转失败 → 原始输入行写入 `backup_failed.txt`，`backup_failed.log` 记录失败阶段（head/upload/etag）与错误；多段中转失败会 AbortMultipartUpload 清理未完成分片
 - 坏行（格式错误/bkt 不匹配）与文件模式一致：写入 `parse_failed.txt` 并跳过
 - 复用 `check_concurrency` 作为备份 worker 数；节点故障轮询仅覆盖请求发起阶段——流式中转一旦开始，中途故障不重试（流不可重放），整对象记为失败
-- S3 多段约束：非末段必须 ≥5MB。输入行语义是原始 part 边界（原上传本来合规）；若喂入"固定分段"格式（段 <5MB）会被 S3 拒绝（EntityTooSmall）→ `backup_failed`
-- `mp.txt`（mode=0/2 未验证多段、`-check-file` 时普通行 HEAD 判多段的漂移对象）**无 offsets，无法自动中转**（ETag 终验对不上），需人工补 part 边界后走 `-check-file`/`-backup-file`。mode=1 ETag 解析失败的对象落到根目录 `list_parse_failed.txt`（同样无 offsets，无法自动中转）
+- S3 多段约束：非末段必须 ≥5MB。输入行语义是原始 part 边界（原上传本来合规）；喂入非末段小于 5MB 的行会被 S3 拒绝（EntityTooSmall）→ `backup_failed`
+- `mp.txt`（mode=0 未验证多段、`-check-file` 时普通行 HEAD 判多段的漂移对象）**无 offsets，无法自动中转**（ETag 终验对不上），需人工补 part 边界后走 `-check-file`/`-backup-file`。mode=1 ETag 解析失败的对象落到根目录 `list_parse_failed.txt`（同样无 offsets，无法自动中转）
 - 观测指标（无 S3 LIST，不显示 `list_*`）：进度行 `[progress] read=X list_failed=… backup_ok=… backup_failed=… backup_mismatch=… get_calls=… get_avg_ms=… (backed=N) q=obj:… lf:… bok:… bfail:… mm:…`；汇总 `read: X` + `list_failed` + `get_calls` + `backup_ok: N backup_failed: N backup_mismatch: N`
 - **中断恢复**：进程不拦截信号，Ctrl-C / kill 都是立即退出；重跑同一输入文件即可（探测/中转幂等，重复中转 = 覆盖写）。输入很大时用差集只重跑没备份成功的对象，见下方「kill -9 后的续跑」
 
@@ -266,9 +266,9 @@ join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
 └── <ownerID>/                  # OwnerID 为空（含全部文件输入模式）时落到 _unknown/
     ├── corrupted_objects.txt   # 损坏普通对象 key（Range GET 命中 chunk-signature/trailer）
     ├── ok_objects.txt          # 正常普通对象 key（主扫描 is_success_log=true 时；-check-file 恒写）
-    ├── mp.txt                  # 多段对象 key（multipart_check_mode=0 时全部多段；mode=2 时大小为 0 的多段对象；-check-file 时普通行 HEAD 判多段的漂移对象）
+    ├── mp.txt                  # 多段对象 key（multipart_check_mode=0 时全部多段；-check-file 时普通行 HEAD 判多段的漂移对象）
     ├── corrupted_mp.txt        # 损坏多段对象 key（分段检查命中）
-    └── ok_mp.txt               # 干净多段对象（主扫描 is_multipart_success_log=true 时；-check-file 恒写）；行格式同 corrupted_mp.txt：multipart_check_mode=1 与 -check-file 带 partcnt+offsets，mode=2 只有 key
+    └── ok_mp.txt               # 干净多段对象（主扫描 is_multipart_success_log=true 时；-check-file 恒写）；行格式同 corrupted_mp.txt：multipart_check_mode=1 与 -check-file 带 partcnt+offsets
 ```
 
 > **行分隔与转义**：所有 `bkt|key|partcnt|off...` 形式的行格式实际用 ASCII Unit Separator `\x1f`（`<US>`）作字段分隔——S3 key 可合法包含 `|`，旧 pipe 分隔会静默错切。Server 字段（key/prefix/token）写入文件时 `url.QueryEscape` 转义，读取侧 `QueryUnescape` 还原；含 `\x1f`、`%`、`+`、`/` 的 key 都能逐字节往返。bucket 字段来自 CLI，不转义；partcnt 与 offsets 是纯数字，不转义；owner 非空时为 `[a-z0-9]+`，不转义。
@@ -286,7 +286,7 @@ join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
 | `mismatch.txt` | 对象在检查后被改写（类型漂移），检查结果过期 | 是 | `-check-file mismatch.txt` 重查当前状态 |
 | `backup_failed.txt` | 备份中转失败 | 是 | `-backup-file backup_failed.txt` 自喂重试 |
 | `list_parse_failed.txt` | mode=offset 多段 ETag 解析失败（服务端未返回 `internal-list-mp-offset` 或 ETag 格式不合法） | 否 | 人工补 part 边界后走 `-check-file`/`-backup-file`（直喂 `-check-file` 只会落到 `mp.txt`：HEAD 不带分段边界，不会真正检查） |
-| `mp.txt` | 未验证多段（mode=0/2、`-check-file` 时普通行 HEAD 判多段的漂移对象） | 否 | 人工补 part 边界后走 `-check-file`/`-backup-file` |
+| `mp.txt` | 未验证多段（mode=0、`-check-file` 时普通行 HEAD 判多段的漂移对象） | 否 | 人工补 part 边界后走 `-check-file`/`-backup-file` |
 
 `list_failed.txt` 行格式 `prefix\x1ftoken`：token 是失败页的 continuationToken（V1 是上一页最后一个 key，V2 是服务端返回的不透明 token）。第一页就失败时 token 为空，整行就是单字段 `prefix`。补跑时 `-resume-list` 读这些行，把 `(prefix, token)` 作为初始状态 seed 进 BFS 队列，`processPrefix` 从该 token 续页，避免重复枚举已成功的前几页。**仅 Mode 2 支持**——Mode 1 的根/子前缀游标语义不可区分，其列举失败重试 = 原命令重跑（幂等，跨轮并集吸收重复）。
 

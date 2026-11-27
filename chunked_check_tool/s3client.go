@@ -68,7 +68,7 @@ func trimETagQuotes(s string) string {
 // signature verification).
 //
 // RangeGetAt fetches `length` bytes starting at `offset` (for multipart
-// segment signature verification — each segment's first 128 bytes are
+// part signature verification — each part's first 128 bytes are
 // inspected in turn). offset is a byte offset into the object body.
 //
 // HeadObject returns the object's ETag (quotes stripped) and size via a
@@ -593,7 +593,7 @@ func (c *S3Client) RangeGet(ctx context.Context, key string) ([]byte, error) {
 }
 
 // RangeGetAt fetches `length` bytes starting at byte `offset` of an object,
-// used by the multipart segment check (each segment's first 128 bytes are
+// used by the multipart part check (each part's first 128 bytes are
 // inspected for the chunked-upload signature). Same node-failover retry
 // semantics as RangeGet; AddGetCall is bumped once per public call.
 func (c *S3Client) RangeGetAt(ctx context.Context, key string, offset, length int64) ([]byte, error) {

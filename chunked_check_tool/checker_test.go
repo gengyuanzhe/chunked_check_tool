@@ -99,7 +99,7 @@ func TestCheckerHandleMultipartSkipsRangeGet(t *testing.T) {
 		t.Error("RangeGet should not be called for multipart")
 	}
 	if got := s.Snapshot().OkMp; got != 0 {
-		t.Errorf("ok_mp=%d want 0 (segment check off — not verified, must not claim clean)", got)
+		t.Errorf("ok_mp=%d want 0 (check off — not verified, must not claim clean)", got)
 	}
 }
 
@@ -190,111 +190,38 @@ func TestCheckerHandleCheckFailedLogsStructured(t *testing.T) {
 
 // chunkSigBody is a 128-byte body that matches chunkSigRe (the streaming
 // chunked-upload signature header). Used to simulate a corrupted multipart
-// segment. The trailing bytes after the regex match are filler.
+// part. The trailing bytes after the regex match are filler.
 var chunkSigBody = []byte("1000;chunk-signature=0000000000000000000000000000000000000000000000000000000000000000\r\n" + strings.Repeat("x", 128-72-2))
 
-// multipartCfg builds a Config with the multipart segment check enabled at
-// the given segment size. Used by the TestCheckerMultipartSegmentCheck* tests.
-func multipartCfg(dir string, segSize int64) *Config {
-	return &Config{
-		OutputDir:             dir,
-		IsCheck:               true,
-		MultipartCheckMode:    MultipartCheckModeSegment,
-		IsSuccessLog:          true,
-		IsMultipartSuccessLog: true,
-		MultipartSegmentSize:  segSize,
-	}
-}
-
-// TestCheckerMultipartSegmentCheckCorrupted: switch on, segment matches →
-// corrupted multipart file goes to <owner>/corrupted_mp.txt
-// (per-owner routing).
-func TestCheckerMultipartSegmentCheckCorrupted(t *testing.T) {
+// TestCheckerOffsetModeCleanMultipartWritesOkMp — offset mode: a multipart
+// object whose parts all probe clean is counted ok_mp and written to
+// <owner>/ok_mp.txt with its real part boundaries.
+func TestCheckerOffsetModeCleanMultipartWritesOkMp(t *testing.T) {
 	dir := t.TempDir()
-	cfg := multipartCfg(dir, 5*1024*1024)
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, IsMultipartSuccessLog: true}
 	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	s := NewStats()
-	worker := &FakeS3{Body: chunkSigBody}
+	// 2 parts of 5MiB, both clean.
+	worker := &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
+		return []byte("clean part body, no signature"), nil
+	}}
 	c := NewChecker(worker, out, s, cfg)
-	// multipart etag + Size=10MB → 2 segments at offset 0 and 5MB. Body
-	// matches at offset 0, so it's flagged immediately as corrupted.
-	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5 * 1024 * 1024}})
-	if got := s.Snapshot().CorruptedMp; got != 1 {
-		t.Errorf("corrupted_mp=%d want 1", got)
-	}
-	if got := s.Snapshot().OkMp; got != 0 {
-		t.Errorf("ok_mp=%d want 0 (corrupted multipart should not also count as clean)", got)
-	}
-	if err := out.Close(); err != nil {
-		t.Fatal(err)
-	}
-	// Per-owner file must exist with the key (default format <bucket>|<key>).
-	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "corrupted_mp.txt"))
-	if err != nil {
-		t.Fatalf("read corrupted_mp: %v", err)
-	}
-	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fk" {
-		t.Errorf("corrupted_mp.txt = %q, want %q", line, "test-bkt\x1fk")
-	}
-}
-
-func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
-	dir := t.TempDir()
-	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
-	s := NewStats()
-	worker := &FakeS3{Body: []byte("normal object body, no chunk signature here")}
-	c := NewChecker(worker, out, s, cfg)
-	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5 * 1024 * 1024}})
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5242880}})
 	if got := s.Snapshot().CorruptedMp; got != 0 {
 		t.Errorf("corrupted_mp=%d want 0", got)
 	}
 	if got := s.Snapshot().OkMp; got != 1 {
-		t.Errorf("ok_mp=%d want 1 (clean multipart passed segment check)", got)
+		t.Errorf("ok_mp=%d want 1 (clean multipart passed the part check)", got)
 	}
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// IsSuccessLog=true → clean multipart goes to <owner>/ok_mp.txt (bucket\x1fkey)
 	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "ok_mp.txt"))
 	if err != nil {
-		t.Fatalf("read ok_multipart: %v", err)
+		t.Fatalf("read ok_mp: %v", err)
 	}
-	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fk" {
-		t.Errorf("ok_mp.txt = %q, want %q", line, "test-bkt\x1fk")
-	}
-}
-
-// TestCheckerSegmentModeZeroSizeMultipartWritesMpTxt — main scan in segment
-// mode: a multipart object of Size 0 gets no synthesized offsets, so there is
-// nothing to probe. It must land in mp.txt unverified instead of vanishing:
-// mp.txt used to be disabled outside mode=off, which made that write a silent
-// no-op. The task comes from the real resolveOffsets, as in the lister.
-func TestCheckerSegmentModeZeroSizeMultipartWritesMpTxt(t *testing.T) {
-	dir := t.TempDir()
-	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
-	s := NewStats()
-	// Would match — but nothing must be probed.
-	c := NewChecker(&FakeS3{Body: chunkSigBody}, out, s, cfg)
-	task := resolveOffsets(ObjectInfo{Key: "empty", ETag: "0123456789abcdef0123456789abcdef-1", Size: 0, OwnerID: "owner-A"}, cfg)
-	if len(task.Offsets) != 0 {
-		t.Fatalf("Size 0 yields no synthesized offsets, got %v", task.Offsets)
-	}
-	c.Handle(task)
-	if snap := s.Snapshot(); snap.GetCalls != 0 || snap.OkMp != 0 || snap.CorruptedMp != 0 {
-		t.Errorf("zero-size multipart must be neither probed nor claimed: get_calls=%d ok_mp=%d corrupt_mp=%d",
-			snap.GetCalls, snap.OkMp, snap.CorruptedMp)
-	}
-	if err := out.Close(); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "mp.txt"))
-	if err != nil {
-		t.Fatalf("zero-size multipart is in no result file (mp.txt missing): %v", err)
-	}
-	if got, want := string(data), "test-bkt\x1fempty\n"; got != want {
-		t.Errorf("mp.txt = %q, want %q", got, want)
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fk\x1f2\x1f0\x1f5242880" {
+		t.Errorf("ok_mp.txt = %q, want %q (bucket\x1fkey\x1fpartcnt\x1foffsets)", line, "test-bkt\x1fk\x1f2\x1f0\x1f5242880")
 	}
 }
 
@@ -381,22 +308,23 @@ func TestCheckerCheckFileZeroSizeMultipartIsCleanWithoutProbe(t *testing.T) {
 	}
 }
 
-// TestCheckerMultipartSegmentCheckRangeError: segment RangeGet error →
-// writes to mp_check_failed.txt at the root (NOT check_failed), and
-// bumps MpCheckFailed (not CheckFailed).
-func TestCheckerMultipartSegmentCheckRangeError(t *testing.T) {
+// TestCheckerOffsetModeRangeErrorRoutesToMpCheckFailed — offset mode: a part
+// RangeGet error is written to mp_check_failed.txt at the root (NOT
+// check_failed), with the part boundaries kept for the -check-file retry,
+// and bumps MpCheckFailed (not CheckFailed).
+func TestCheckerOffsetModeRangeErrorRoutesToMpCheckFailed(t *testing.T) {
 	dir := t.TempDir()
-	cfg := multipartCfg(dir, 5*1024*1024)
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
 	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	s := NewStats()
 	worker := &FakeS3{Err: context.DeadlineExceeded}
 	c := NewChecker(worker, out, s, cfg)
-	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5 * 1024 * 1024}})
+	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5242880}})
 	if got := s.Snapshot().MpCheckFailed; got != 1 {
-		t.Errorf("mp_check_failed=%d want 1 (segment RangeGet error should bump MpCheckFailed)", got)
+		t.Errorf("mp_check_failed=%d want 1 (part RangeGet error should bump MpCheckFailed)", got)
 	}
 	if got := s.Snapshot().CheckFailed; got != 0 {
-		t.Errorf("check_failed=%d want 0 (segment errors go to mp_check_failed, not check_failed)", got)
+		t.Errorf("check_failed=%d want 0 (part errors go to mp_check_failed, not check_failed)", got)
 	}
 	if got := s.Snapshot().CorruptedMp; got != 0 {
 		t.Errorf("corrupted_mp=%d want 0", got)
@@ -501,11 +429,11 @@ func TestCheckerOffsetModeFallbackWritesListParseFailed(t *testing.T) {
 	}
 }
 
-// TestCheckerMultipartSegmentCheckDisabled: switch off → all multipart go to
-// <owner>/mp.txt (key only, no etag).
-func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
+// TestCheckerMultipartCheckOffWritesMpTxt: multipart check off → all
+// multipart objects go to <owner>/mp.txt (key only, no etag), unverified.
+func TestCheckerMultipartCheckOffWritesMpTxt(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOff, MultipartSegmentSize: 5 * 1024 * 1024}
+	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOff}
 	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
 	s := NewStats()
 	worker := &FakeS3{Body: chunkSigBody} // would match if we checked — but we don't
@@ -515,7 +443,7 @@ func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 		t.Errorf("corrupt_mp=%d want 0 (switch off)", got)
 	}
 	if got := s.Snapshot().OkMp; got != 0 {
-		t.Errorf("ok_mp=%d want 0 (switch off — segment check not performed, no clean claim)", got)
+		t.Errorf("ok_mp=%d want 0 (switch off — not verified, must not claim clean)", got)
 	}
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
@@ -526,32 +454,6 @@ func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 	}
 	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fk" {
 		t.Errorf("mp.txt = %q, want %q (bucket\x1fkey)", line, "test-bkt\x1fk")
-	}
-}
-
-// TestCheckerMultipartSegmentCheckSecondSegmentMatches verifies the "ANY
-// segment" semantics: when the first segment does NOT match but a later
-// one does, the object is still flagged as corrupted multipart. Uses
-// RangeGetHandler to return different bodies per offset.
-func TestCheckerMultipartSegmentCheckSecondSegmentMatches(t *testing.T) {
-	dir := t.TempDir()
-	cfg := multipartCfg(dir, 5*1024*1024)
-	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
-	defer out.Close()
-	s := NewStats()
-	cleanBody := []byte("clean segment, no signature")
-	worker := &FakeS3{
-		RangeGetHandler: func(offset, length int64) ([]byte, error) {
-			if offset == 0 {
-				return cleanBody, nil
-			}
-			return chunkSigBody, nil // second segment matches
-		},
-	}
-	c := NewChecker(worker, out, s, cfg)
-	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5 * 1024 * 1024}})
-	if got := s.Snapshot().CorruptedMp; got != 1 {
-		t.Errorf("corrupted_mp=%d want 1 (second segment should trigger)", got)
 	}
 }
 
@@ -1187,9 +1089,9 @@ func TestCheckerHeadFirstDriftToMultipartWritesMpTxt(t *testing.T) {
 // HEAD carries no part offsets, so under -check-file the object is unverified
 // whatever the mode and must land in mp.txt.
 func TestCheckerCheckFileMultipartWithoutOffsetsAlwaysWritesMpTxt(t *testing.T) {
-	for _, mode := range []int{MultipartCheckModeOff, MultipartCheckModeOffset, MultipartCheckModeSegment} {
+	for _, mode := range []int{MultipartCheckModeOff, MultipartCheckModeOffset} {
 		dir := t.TempDir()
-		cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: mode, MultipartSegmentSize: 5 * 1024 * 1024}
+		cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: mode}
 		out, _ := NewOutput(cfg, "mybucket", FileInputCheckFile)
 		worker := &FakeS3{Heads: map[string]HeadInfo{"k": {ETag: "0123456789abcdef0123456789abcdef-2", Size: 10}}}
 		NewChecker(worker, out, NewStats(), cfg).Handle(VerifyTask{Key: "k", HeadFirst: true})

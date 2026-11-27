@@ -60,8 +60,8 @@ type FakeS3 struct {
 	// Calls counts ListPage invocations.
 	Calls int
 	// RangeGetHandler, when non-nil, is invoked by RangeGetAt to return
-	// per-offset bodies. Used by multipart-segment-check tests to simulate
-	// "first segment clean, second segment matches the chunk signature".
+	// per-offset bodies. Used by multipart-check tests to give each part
+	// probe its own bytes.
 	// When nil, RangeGetAt returns Body (same as RangeGet).
 	RangeGetHandler func(offset, length int64) ([]byte, error)
 
