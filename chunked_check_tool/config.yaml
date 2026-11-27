@@ -113,11 +113,6 @@ obj_ch_capacity: 0
 # output writer channel 容量（每个结果/处理文件一个 channel）；0 走默认 1024
 output_ch_capacity: 0
 
-# 结果文件每行格式，支持 <bucket>/<key>/<owner> 占位符，其他字符按字面输出。
-# 仅影响 per-owner 结果文件（corrupted_objects/mp/corrupted_mp/ok_mp/ok_objects.txt）；
-# 处理文件（list_failed/check_failed/mp_check_failed 的 .txt）始终只存 key/prefix。
-result_line_format: <bucket>|<key>
-
 # 备份目标桶（-backup-file 模式必填，其他模式忽略）。
 # 备份流程：先上传输入列表文件到 backup_bucket 的 .backup_lists/<原名>_<时间戳>.txt，
 # 然后逐对象 HEAD 判型（普通/多段），与输入行声明的类型不一致 → mismatch.txt
