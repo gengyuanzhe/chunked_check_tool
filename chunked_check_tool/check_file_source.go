@@ -5,8 +5,7 @@ package main
 // regular/multipart format shared with -backup-file (parseMixedLine). The
 // intended inputs are the failure files a check run produced —
 // check_failed.txt (bkt|key), mp_check_failed.txt / mismatch.txt
-// (bkt|key|partcnt|off...) — or any manifest in that shape; a legacy
-// -list-file (multipart-only) is a valid subset.
+// (bkt|key|partcnt|off...) — or any manifest in that shape.
 //
 // On success returns a VerifyTask with HeadFirst=true: the checker HEADs the
 // object to fill ETag/Size and treats the HEAD ETag as the authoritative

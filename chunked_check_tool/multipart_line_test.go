@@ -1,16 +1,13 @@
-// list_file_source_test.go
+// multipart_line_test.go
 package main
 
 import (
-	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestParseListFileLine(t *testing.T) {
+func TestParseMultipartLine(t *testing.T) {
 	const bkt = "mybucket"
 	cases := []struct {
 		name     string
@@ -103,7 +100,7 @@ func TestParseListFileLine(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := parseListFileLine(c.line, bkt, 1)
+			_, err := parseMultipartLine(c.line, bkt, 1)
 			if c.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected err: %v", err)
@@ -124,8 +121,8 @@ func TestParseListFileLine(t *testing.T) {
 	}
 }
 
-func TestParseListFileLineSuccessFields(t *testing.T) {
-	task, err := parseListFileLine("mybucket\x1fpath%2Fobj\x1f3\x1f0\x1f5242880\x1f10485760", "mybucket", 42)
+func TestParseMultipartLineSuccessFields(t *testing.T) {
+	task, err := parseMultipartLine("mybucket\x1fpath%2Fobj\x1f3\x1f0\x1f5242880\x1f10485760", "mybucket", 42)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +130,7 @@ func TestParseListFileLineSuccessFields(t *testing.T) {
 		t.Errorf("Key=%q want path/obj", task.Key)
 	}
 	if !task.IsMultipart {
-		t.Errorf("IsMultipart=false, want true (list-file is always multipart)")
+		t.Errorf("IsMultipart=false, want true (a multipart line always yields a multipart task)")
 	}
 	if len(task.Offsets) != 3 {
 		t.Errorf("len(Offsets)=%d want 3", len(task.Offsets))
@@ -141,91 +138,21 @@ func TestParseListFileLineSuccessFields(t *testing.T) {
 	if task.Offsets[2] != 10485760 {
 		t.Errorf("Offsets[2]=%d want 10485760", task.Offsets[2])
 	}
-	// ETag/Size empty for list-file tasks (caller doesn't know them); the
-	// checker HEADs the object to fill them in (HeadFirst=true).
+	// ETag/Size empty for manifest tasks (the line does not carry them);
+	// the checker HEADs the object to fill them in (HeadFirst=true).
 	if task.ETag != "" || task.Size != 0 {
 		t.Errorf("ETag=%q Size=%d, want empty/0", task.ETag, task.Size)
 	}
 	if !task.HeadFirst {
-		t.Errorf("HeadFirst=false, want true (list-file tasks HEAD in Checker.Handle)")
+		t.Errorf("HeadFirst=false, want true (the checker HEADs in Checker.Handle)")
 	}
 }
 
-func TestListFileSourceRunEndToEnd(t *testing.T) {
-	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, IsCheck: true}
-	out, err := NewOutput(cfg, "mybucket", FileInputNone)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stats := NewStats()
-
-	// File: 2 valid lines + 1 malformed (offset0 != 0) + 1 valid.
-	content := "mybucket\x1fk1\x1f1\x1f0\n" +
-		"mybucket\x1fk2\x1f3\x1f0\x1f5242880\x1f10485760\n" +
-		"mybucket\x1fbad\x1f1\x1f100\n" +
-		"mybucket\x1fk3\x1f2\x1f0\x1f9999\n"
-	filePath := filepath.Join(dir, "list.txt")
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	src := newFileSource[VerifyTask](filePath, "mybucket", out, stats, parseListFileLine)
-	objCh := make(chan VerifyTask, 16)
-	go func() {
-		if err := src.Run(context.Background(), objCh); err != nil {
-			t.Logf("Run returned err: %v", err)
-		}
-		close(objCh)
-	}()
-
-	got := []VerifyTask{}
-	for task := range objCh {
-		got = append(got, task)
-	}
-	if len(got) != 3 {
-		t.Fatalf("got %d tasks, want 3 (malformed line skipped): %+v", len(got), got)
-	}
-	if got[0].Key != "k1" || got[1].Key != "k2" || got[2].Key != "k3" {
-		t.Errorf("keys in wrong order: %+v", got)
-	}
-	// list-file source must NOT bump listed counters (per spec §6).
-	if got := stats.Snapshot().ListedMp; got != 0 {
-		t.Errorf("ListedMp=%d want 0 (list-file source does not bump listed)", got)
-	}
-	if got := stats.Snapshot().ListedObjects; got != 0 {
-		t.Errorf("ListedObjects=%d want 0", got)
-	}
-	// Every line read (valid + malformed) bumps read for the read progress
-	// counter.
-	if got := stats.Snapshot().ReadLines; got != 4 {
-		t.Errorf("ReadLines=%d want 4 (all lines read, malformed included)", got)
-	}
-	// Malformed line → parse_failed + IncrParseFailed.
-	if got := stats.Snapshot().ParseFailed; got != 1 {
-		t.Errorf("ParseFailed=%d want 1 (one malformed line)", got)
-	}
-	// Malformed line written to parse_failed.txt with original content.
-	// out.Close flushes the parseFailed consumer goroutine.
-	if err := out.Close(); err != nil {
-		t.Fatalf("output close: %v", err)
-	}
-	parseFailedPath := filepath.Join(dir, "parse_failed.txt")
-	failedContent, err := os.ReadFile(parseFailedPath)
-	if err != nil {
-		t.Fatalf("read parse_failed.txt: %v", err)
-	}
-	if !strings.Contains(string(failedContent), "mybucket\x1fbad\x1f1\x1f100") {
-		t.Errorf("parse_failed.txt = %q, want substring %q", string(failedContent), "mybucket\x1fbad\x1f1\x1f100")
-	}
-}
-
-// TestParseListFileLineErrorFields asserts MalformedLineError.Line and
+// TestParseMultipartLineErrorFields asserts MalformedLineError.Line and
 // .LineNum are populated so the caller can write the original line to
-// list_failed for resumable debugging. A future refactor that drops these
-// fields would otherwise break silently.
-func TestParseListFileLineErrorFields(t *testing.T) {
-	_, err := parseListFileLine("mybucket\x1fbad\x1f1\x1f100", "mybucket", 42)
+// parse_failed for manual fixing.
+func TestParseMultipartLineErrorFields(t *testing.T) {
+	_, err := parseMultipartLine("mybucket\x1fbad\x1f1\x1f100", "mybucket", 42)
 	var mle *MalformedLineError
 	if !errors.As(err, &mle) {
 		t.Fatalf("expected *MalformedLineError, got %T: %v", err, err)

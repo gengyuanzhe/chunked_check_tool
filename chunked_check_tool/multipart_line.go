@@ -1,4 +1,5 @@
-// list_file_source.go — parser for the legacy -list-file input format.
+// multipart_line.go — parser for the multipart line of the mixed manifest
+// format shared by -check-file and -backup-file.
 package main
 
 import (
@@ -7,26 +8,24 @@ import (
 	"strings"
 )
 
-// parseListFileLine parses one line of the -list-file input.
+// parseMultipartLine parses one multipart manifest line:
 //
-// Format: bkt\x1fkey\x1fpartcnt\x1foffset0\x1foffset1\x1f... (key
-// URL-escaped at the write boundary; plain keys without special characters
-// are their own escape form, so handwritten lines keep working).
+//	bkt\x1fkey\x1fpartcnt\x1foffset0\x1foffset1\x1f...
 //
-// Semantic rules (per spec §3.2):
+// (key URL-escaped at the write boundary; plain keys without special
+// characters are their own escape form, so handwritten lines keep working).
+//
+// Semantic rules:
 //   - bkt must equal expectedBucket (CLI-provided, never escaped)
 //   - partcnt >= 1 and integer
 //   - exactly partcnt offsets follow
 //   - all offsets >= 0, strictly increasing
 //   - offset0 must be 0
 //
-// On success returns a VerifyTask with IsMultipart=true (list-file tasks are
-// always multipart), ETag="" and Size=0 (the file does not carry them) and
-// HeadFirst=true (the checker HEADs the object to fill them in before probing).
-//
-// -list-file is the legacy re-check vehicle; -check-file (parseCheckFileLine)
-// is its mixed-format successor and accepts these lines unchanged.
-func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyTask, error) {
+// On success returns a VerifyTask with IsMultipart=true and Offsets from the
+// line, ETag="" and Size=0 (the line does not carry them) and HeadFirst=true
+// (the checker HEADs the object to fill them in before probing).
+func parseMultipartLine(line, expectedBucket string, lineNum int) (VerifyTask, error) {
 	if strings.TrimSpace(line) == "" {
 		return VerifyTask{}, &MalformedLineError{Line: line, LineNum: lineNum, Reason: "empty line"}
 	}
@@ -81,6 +80,6 @@ func parseListFileLine(line string, expectedBucket string, lineNum int) (VerifyT
 		Key:         key,
 		IsMultipart: true,
 		Offsets:     offs,
-		HeadFirst:   true, // list-file lines omit ETag/Size — checker HEADs to fill them in
+		HeadFirst:   true, // manifest lines omit ETag/Size — the checker HEADs to fill them in
 	}, nil
 }

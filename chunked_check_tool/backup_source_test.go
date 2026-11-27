@@ -72,7 +72,7 @@ func TestParseBackupFileLine(t *testing.T) {
 			line:    "mybucket\x1f",
 			wantErr: "empty key",
 		},
-		// multipart validation errors are delegated to parseListFileLine —
+		// multipart validation errors are delegated to parseMultipartLine —
 		// spot-check the main rules to lock the delegation in place.
 		{
 			// The delegation must carry the empty-key rule too — a

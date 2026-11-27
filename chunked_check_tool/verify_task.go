@@ -8,10 +8,10 @@ package main
 //     mode with an unparseable ETag): do not probe, write to mp_all without
 //     claiming ok_mp
 //   - IsMultipart=true, Offsets=[...] → probe each offset (offset-etag,
-//     fixed-segment, or list-file sources)
+//     fixed-segment, or -check-file line sources)
 //
-// ETag/Size may be empty/zero for file-input tasks (-list-file /
-// -check-file); HeadFirst signals the checker to HEAD the object before
+// ETag/Size may be empty/zero for file-input tasks (-check-file);
+// HeadFirst signals the checker to HEAD the object before
 // probing to fill them in and to re-validate the object type against the
 // HEAD ETag (see Checker.Handle).
 type VerifyTask struct {
@@ -22,8 +22,8 @@ type VerifyTask struct {
 	IsMultipart bool
 	Offsets     []int64
 	// HeadFirst signals the checker to HEAD the object before probing. Set
-	// by the file-input sources (-list-file / -check-file: their input
-	// formats omit ETag/Size); left false by S3 LIST (which already has
+	// by the file-input source (-check-file: its input format omits
+	// ETag/Size); left false by S3 LIST (which already has
 	// both). Backup mode HEADs in its own Handle, so it does not set
 	// HeadFirst.
 	HeadFirst bool

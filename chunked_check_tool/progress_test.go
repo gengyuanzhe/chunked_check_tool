@@ -94,56 +94,6 @@ func TestProgressNoQueueLengthsWhenProvidersNil(t *testing.T) {
 	}
 }
 
-func TestProgressListFileMode(t *testing.T) {
-	s := NewStats()
-	for i := 0; i < 12000; i++ {
-		s.IncrReadLine()
-	}
-	s.IncrOkMp()
-	s.IncrCorruptedMp()
-	s.IncrCorruptedMp()
-	s.IncrMpCheckFailed()
-	s.IncrListFailed()
-	s.AddGetCall(2 * time.Millisecond)
-	var buf bytes.Buffer
-	pp := NewProgressPrinter(&buf, ModeListFile)
-	pp.SetQueueSnapshotProvider(func() QueueSnapshot {
-		return QueueSnapshot{
-			ObjCh: 42, OkMp: 2, CorruptedMp: 6, MpCheckFailed: 8, ListFailed: 3,
-			// bucket-mode-only fields: must NOT be printed in this mode.
-			Prefix: 7, CorruptedObjects: 1, CheckFailed: 4, OkObjects: 5,
-		}
-	})
-	pp.MaybePrint(s, "checked", 100)
-	out := buf.String()
-	for _, want := range []string{
-		`read=12000`,
-		`ok_mp=1`,
-		`corrupt_mp=2`,
-		`list_failed=1`,
-		`mp_check_failed=1`,
-		`get_calls=1`,
-		`(checked=100)`,
-		`q=obj:42`,
-		`cor_mp:6`,
-		`ok_mp:2`,
-		`mcf:8`,
-		`lf:3`,
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("list-file progress line missing %q\nfull line:\n%s", want, out)
-		}
-	}
-	// S3-listing fields are noise in list-file mode (no LIST happens). The
-	// leading space on " check_failed="/" cf:" avoids matching the legit
-	// mp_check_failed/mcf fields.
-	for _, notWant := range []string{"list_all=", "list_obj=", "ok_obj=", "corrupt_obj=", "list_calls=", " check_failed=", "pfx:", "cor_obj:", " cf:", "ok_o:"} {
-		if strings.Contains(out, notWant) {
-			t.Errorf("list-file progress line should not contain %q\nfull line:\n%s", notWant, out)
-		}
-	}
-}
-
 func TestProgressBackupMode(t *testing.T) {
 	s := NewStats()
 	for i := 0; i < 300; i++ {

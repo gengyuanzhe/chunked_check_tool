@@ -513,7 +513,7 @@ func (c *S3Client) listPageOnce(ctx context.Context, prefix, startAfter, continu
 
 // mpOffsetList reports whether this client's LIST requests must carry the
 // internal-list-mp-offset header (multipart_check_mode=offset in check
-// mode). Backup/list-file modes never issue LISTs, so their calls carrying
+// mode). Backup/check-file modes never issue LISTs, so their calls carrying
 // no option is harmless anyway.
 func (c *S3Client) mpOffsetList() bool {
 	return c.cfg != nil && c.cfg.IsCheck && c.cfg.MultipartCheckMode == MultipartCheckModeOffset

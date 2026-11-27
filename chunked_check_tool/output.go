@@ -25,8 +25,8 @@ import (
 const rowSep = "\x1f"
 
 // ownerLine pairs the ownerID (drives per-owner output routing) with the
-// object key and, for corrupted_mp lines in offset/list-file mode, the
-// object's part offsets (nil → render via renderLineFmt).
+// object key and, for corrupted_mp lines in offset mode and the file-input
+// mode, the object's part offsets (nil → render via renderLineFmt).
 type ownerLine struct {
 	ownerID string
 	key     string
@@ -34,8 +34,8 @@ type ownerLine struct {
 }
 
 // ownerRenderer renders one ownerLine to w. Per-owner result files use
-// renderLineFmt (bucket\x1f<escaped-key>); corrupted_mp in offset/list-file
-// mode uses renderMultipartOffsets (bucket\x1fkey\x1fpartcnt\x1foff0|...).
+// renderLineFmt (bucket\x1f<escaped-key>); corrupted_mp in offset mode and
+// the file-input mode uses renderMultipartOffsets (bucket\x1fkey\x1fpartcnt\x1foff0|...).
 type ownerRenderer func(w io.Writer, bucket string, ol ownerLine)
 
 // FileInputMode tells NewOutput which file-input mode (if any) is running,
@@ -48,9 +48,6 @@ type FileInputMode int
 const (
 	// FileInputNone: S3 list/check or list-only mode.
 	FileInputNone FileInputMode = iota
-	// FileInputListFile: legacy -list-file (multipart-only lines). Tasks
-	// always carry offsets, so mp.txt has no fallback role here.
-	FileInputListFile
 	// FileInputCheckFile: -check-file (mixed lines). mp.txt IS enabled: a
 	// regular line whose HEAD reveals a multipart object (type drift) has no
 	// offsets and must land unverified in mp.txt.
@@ -95,9 +92,9 @@ type Output struct {
 	// enable flags — each gates one writer goroutine + file
 	corruptedEnabled          bool // is_check
 	multipartAllEnabled       bool // is_check && (mode=off || check-file type drift)
-	corruptedMultipartEnabled bool // is_check && (mode!=off || list-file)
-	multipartOkEnabled        bool // is_check && (mode!=off || list-file) && is_success_log
-	mpCheckFailedEnabled      bool // is_check && (mode!=off || list-file)
+	corruptedMultipartEnabled bool // is_check && (mode!=off || file input)
+	multipartOkEnabled        bool // is_check && (mode!=off || file input) && is_success_log
+	mpCheckFailedEnabled      bool // is_check && (mode!=off || file input)
 	checkEnabled              bool // is_check
 	successEnabled            bool // is_check && is_success_log
 	backupEnabled             bool // backup mode: the three backup files
@@ -140,18 +137,15 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 	//     (not mp.txt), so mp.txt is disabled.
 	//   - mode=segment disables it (offsets always synthesized when Size>0;
 	//     Size==0 has no offsets and is silently dropped).
-	//   - -list-file tasks always carry offsets → no fallback role → off.
 	//   - -check-file accepts regular lines, and a regular line whose HEAD
 	//     reveals a multipart object (type drift) has no offsets → on.
 	// list_parse_failed.txt gating:
 	//   - mode=offset + S3 LIST only: the server returned a multipart ETag
-	//     whose offset suffix did not parse. File-input modes carry their
-	//     own offsets and never hit this path.
+	//     whose offset suffix did not parse. The file-input mode carries its
+	//     own offsets and never hits this path.
 	var multipartAll bool
 	var listParseFailed bool
 	switch fileInput {
-	case FileInputListFile:
-		multipartAll = false
 	case FileInputCheckFile:
 		multipartAll = isCheck
 	default:
@@ -527,7 +521,7 @@ func (o *Output) renderLineFmt(w io.Writer, bucket string, ol ownerLine) {
 }
 
 // renderMultipartOffsets writes bucket\x1fkey\x1fpartcnt\x1foff0\x1foff1... —
-// the exact -list-file / -backup-file input shape, so corrupted_mp.txt can
+// the exact -backup-file input shape, so corrupted_mp.txt can
 // be fed straight back for re-check or backup. The key is QueryEscape'd
 // (server field); bucket and offsets are tool-safe and raw. strconv.AppendInt
 // into a per-call stack buffer keeps it allocation-free apart from growth.
@@ -660,8 +654,9 @@ func (o *Output) WriteCorrupted(ownerID, key string) {
 
 // WriteCorruptedMultipart records a corrupted multipart object. offsets are
 // the part boundaries the probes ran at; the corrupted_mp renderer writes
-// them in offset/list-file mode (real part boundaries for re-check/backup),
-// or ignores them in segment mode (synthetic offsets → plain line).
+// them in offset mode and the file-input mode (real part boundaries for
+// re-check/backup), or ignores them in segment mode (synthetic offsets →
+// plain line).
 func (o *Output) WriteCorruptedMultipart(ownerID, key string, offsets []int64) {
 	if o.corruptedMultipartEnabled {
 		o.corruptedMultipartCh <- ownerLine{ownerID, key, offsets}
@@ -728,7 +723,7 @@ func (o *Output) WriteListFailedLog(prefix string, statusCode int, s3Code, reqID
 	o.listLogger.Error("list failed", attrs...)
 }
 
-// WriteParseFailed records a malformed input line from -list-file / -backup-file
+// WriteParseFailed records a malformed input line from -check-file / -backup-file
 // (e.g. too few fields, bucket mismatch, non-integer partcnt). Lines go to
 // parse_failed.txt — distinct from list_failed.txt (which is for S3 LIST
 // failures and is -resume-list compatible). parse_failed lines are not
@@ -758,7 +753,7 @@ func (o *Output) WriteListParseFailedLog(key, ownerID string, size int64, etag s
 // WriteListParseFailed records a multipart object whose S3-listed ETag did
 // not parse in mode=offset. Routed to root-level list_parse_failed.txt —
 // distinct from mp.txt (which is for mode=off / type drift) and from
-// parse_failed.txt (which is for malformed -list-file / -backup-file input
+// parse_failed.txt (which is for malformed -check-file / -backup-file input
 // lines). Line format `bucket\x1fkey` (key QueryEscape'd), aligned with
 // check_failed.txt / mp_check_failed.txt so the file can be fed back to
 // -check-file for retry (the retry HEADs the object and re-derives offsets
@@ -799,9 +794,9 @@ func (o *Output) WriteCheckFailedLog(key string, statusCode int, s3Code, reqID s
 
 // WriteMpCheckFailed records a failed RangeGet on a multipart object's probe.
 // Line format `bkt\x1fkey\x1fpartcnt\x1foff0\x1foff1...` (key QueryEscape'd,
-// numbers raw) — aligned with corrupted_mp.txt (mode=1 offset / list-file
-// mode) and -backup-file/-list-file multipart input, so the file can be fed
-// straight back for backup or re-check.
+// numbers raw) — aligned with corrupted_mp.txt (mode=1 offset / file-input
+// mode) and -backup-file multipart input, so the file can be fed straight
+// back for backup or re-check.
 func (o *Output) WriteMpCheckFailed(key string, offsets []int64) {
 	if !o.mpCheckFailedEnabled {
 		return

@@ -2,7 +2,6 @@
 # 用法:
 #   ./chunked_check_tool -c config.yaml -bkt <bucket> [-prefix <p>] [-nextmarker <key>]
 #   ./chunked_check_tool -c config.yaml -bkt <bucket> -check-file <path>   # 重查失败对象（check_failed/mp_check_failed/mismatch）
-#   ./chunked_check_tool -c config.yaml -bkt <bucket> -list-file <path>    # 旧模式：多段-only 按行校验
 #   ./chunked_check_tool -c config.yaml -bkt <bucket> -backup-file <path>  # 损坏对象备份（不校验直接中转；需配 backup_bucket）
 
 # S3 节点 ip:port 列表，至少 1 个；多个节点会做故障轮询隔离
@@ -66,7 +65,7 @@ multipart_check_mode: 0
 multipart_segment_size: 0
 
 # 是否记录干净的多段对象到 <ownerID>/ok_mp.txt
-# （multipart_check_mode != 0 或 -check-file/-list-file 模式时生效）
+# （multipart_check_mode != 0 或 -check-file 模式时生效）
 is_multipart_success_log: false
 
 # 节点隔离阈值：进程级累积的节点故障数（连接错误、超时、5xx；4xx 业务错误

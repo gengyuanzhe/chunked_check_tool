@@ -28,7 +28,6 @@ GOOS=linux GOARCH=arm64 go build -o chunked_check_tool-linux-arm64 .
 ./chunked_check_tool -c config.yaml -bkt mybucket -prefix data/2026/
 ./chunked_check_tool -c config.yaml -bkt mybucket -prefix data/2026/ -nextmarker data/2026/file_005
 ./chunked_check_tool -c config.yaml -bkt mybucket -check-file retry.txt   # 重查失败对象（check_failed/mp_check_failed/mismatch 的统一重试入口）
-./chunked_check_tool -c config.yaml -bkt mybucket -list-file list.txt    # 旧模式：跳过 S3 列举，按行校验（多段-only 格式）
 ./chunked_check_tool -c config.yaml -bkt mybucket -backup-file list.txt  # 损坏对象备份，不校验直接中转（见 ## backup-file 模式）
 ./chunked_check_tool -c config.yaml -bkt mybucket -resume-list <list_failed.txt>  # 从上次列举失败的断点续跑（仅 Mode 2）
 ```
@@ -43,7 +42,6 @@ GOOS=linux GOARCH=arm64 go build -o chunked_check_tool-linux-arm64 .
 | `-prefix` | 否 | 列举前缀，默认空（整个桶）                                         |
 | `-nextmarker` | 否 | start-after key，跳过该 key 之前的对象；**仅 list_type 为1时生效** |
 | `-check-file` | 否 | 重查文件路径；mixed 格式（`bkt\x1fkey` 普通行 / `bkt\x1fkey\x1fpartcnt\x1foff...` 多段行），即 check_failed.txt + mp_check_failed.txt + mismatch.txt 的统一重试载体；需 `is_check=true`（见 `## check-file 模式`） |
-| `-list-file` | 否 | 旧模式：多段-only 格式列表文件，跳过 S3 列举按行校验；与 `-check-file` 等四个文件 flag 互斥（见 `## list-file 模式`） |
 | `-backup-file` | 否 | 备份列表文件路径（mixed 格式）；HEAD 判型 + 中转 + ETag 终验，**不探测损坏**；需配置 `backup_bucket`（见 `## backup-file 模式`） |
 | `-resume-list` | 否 | 断点续跑文件路径（通常是上一轮的 `list_failed.txt`）；与其他文件 flag 互斥，仅 `list_type=2` 生效。每行格式 `prefix\x1ftoken`（第一页失败时为单字段 `prefix`），工具按 `(prefix, token)` 重新 seed 进 BFS 队列，从失败页的 continuation token 续页，避免重复枚举已成功的前几页 |
 
@@ -123,7 +121,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
     bkt\x1fkey                          # 普通对象（check_failed.txt 的行格式）
     bkt\x1fkey\x1fpartcnt\x1foffset0\x1foffset1\x1f...  # 多段对象（mp_check_failed.txt / corrupted_mp.txt 的行格式）
 
-典型输入 = 上一轮（或多轮）运行产出的 `check_failed.txt` + `mp_check_failed.txt` + `mismatch.txt` 的并集。旧 `-list-file` 的多段-only 文件是合法子集，可直接喂入。
+典型输入 = 上一轮（或多轮）运行产出的 `check_failed.txt` + `mp_check_failed.txt` + `mismatch.txt` 的并集。
 
 行为 = **重新检查对象当前状态**：
 
@@ -136,19 +134,6 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 - 进度行 `[progress] read=X ok_obj=… corrupt_obj=… ok_mp=… corrupt_mp=… check_failed=… mp_check_failed=… get_calls=… get_avg_ms=… (checked=N) q=obj:…`；汇总 `read: X` + `list_failed`（仅坏行）+ `get_calls` + `ok_obj/corrupt_obj/ok_mp/corrupt_mp/check_failed/mp_check_failed`
 
 **收敛重试**：本模式自己也会产出更小的 `check_failed.txt` / `mp_check_failed.txt`（瞬时故障恢复后重试即可清零），循环喂回直到为空。对象在检查后被改写导致的 `mismatch.txt`（backup 模式产出）同样喂本模式重查。
-
-## list-file 模式（旧）
-
-`-list-file <path>` 跳过 S3 列举，直接读文件按行校验。每行格式（字段分隔符 `\x1f`）：
-
-    bkt\x1fkey\x1fpartcnt\x1foffset0\x1foffset1\x1f...
-
-这是历史模式的输入格式：`multipart_check_mode=0/2` 时代多段对象无法在 list+check 内拿到真实 part 边界，需人工补 offset 后用本模式复检。`multipart_check_mode=1`（offset 检查）已让 list+check 自含校验，本模式保留仅为兼容既有流程，**新用法请用 `-check-file`**（mixed 格式，本模式文件是其合法子集）。
-
-- `bkt` 必须等于 `-bkt`；`partcnt` 个 offset，`offset0=0`，严格递增
-- 坏行（格式错误/bkt 不匹配）写入 `parse_failed.txt` 并跳过（计数 `parse_failed`）
-- 必须 `is_check=true`；无 S3 LIST，进度/汇总用 `read` 替代 `list_*`：`ok_mp/corrupt_mp/mp_check_failed`
-- 校验结果与 check-file 模式相同的 HEAD 权威判型规则（行恒声明多段，但 HEAD 判普通时按 head+tail 探测并路由到普通对象结果文件）；结果落在 `_unknown/` 子目录
 
 ## backup-file 模式
 
@@ -172,7 +157,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 
 约束与说明：
 
-- 四个文件 flag（`-check-file`/`-list-file`/`-backup-file`/`-resume-list`）互斥；配置必须含非空 `backup_bucket` 与 `backup_output_dir`
+- 四个文件 flag（`-check-file`/`-backup-file`/`-resume-list`/`-resume-journal`）互斥；配置必须含非空 `backup_bucket` 与 `backup_output_dir`
 - 三个备份结果文件（`backup_ok.txt`/`backup_failed.txt`/`mismatch.txt`）均写入**原始输入行**（`bkt\x1fkey` 或 `bkt\x1fkey\x1fpartcnt\x1foffset…`），与输入文件同构：`backup_failed.txt` 可直接作为 `-backup-file` 输入重试失败对象（行内自带 offsets）；`.log` 文件保持结构化（key + 错误详情）
 - HEAD/中转失败 → 原始输入行写入 `backup_failed.txt`，`backup_failed.log` 记录失败阶段（head/upload/etag）与错误；多段中转失败会 AbortMultipartUpload 清理未完成分片
 - 坏行（格式错误/bkt 不匹配）与文件模式一致：写入 `parse_failed.txt` 并跳过
@@ -192,7 +177,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 ├── run.log                     # 进程运行日志
 ├── list_failed.txt             # 列举失败 `prefix\x1ftoken`；token 是失败页的 continuationToken（第一页失败/未启动时为单字段 prefix）。未配 `-prefix` 时根 prefix 失败写空行（合法条目，可喂 `-resume-list` 续跑）
 ├── list_failed.log             # 列举失败结构化错误
-├── parse_failed.txt            # -check-file / -list-file / -backup-file / -resume-list 输入解析失败的原始行（坏行、bkt 不匹配、whitespace-only 行、无效 %XX 转义）；不可自动续跑，需人工修输入文件
+├── parse_failed.txt            # -check-file / -backup-file / -resume-list 输入解析失败的原始行（坏行、bkt 不匹配、whitespace-only 行、无效 %XX 转义）；不可自动续跑，需人工修输入文件
 ├── check_failed.txt            # 普通对象 RangeGet 失败 `bkt\x1fkey`（可直喂 -check-file / -backup-file 普通对象输入）
 ├── check_failed.log            # 普通对象 RangeGet 失败结构化错误
 ├── mp_check_failed.txt         # 多段分段 RangeGet 失败 `bkt\x1fkey\x1fpartcnt\x1foff0\x1f...`（可直喂 -check-file / -backup-file 多段输入）

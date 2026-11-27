@@ -139,37 +139,42 @@ func TestStatsPrintSummaryListOnlyMode(t *testing.T) {
 	}
 }
 
-func TestStatsPrintSummaryListFileMode(t *testing.T) {
+func TestStatsPrintSummaryCheckFileMode(t *testing.T) {
 	s := NewStats()
 	for i := 0; i < 4; i++ {
 		s.IncrReadLine()
 	}
+	s.IncrOkObjects()
+	s.IncrCorruptedObjects()
 	s.IncrOkMp()
 	s.IncrOkMp()
 	s.IncrCorruptedMp()
 	s.IncrMpCheckFailed()
+	s.IncrCheckFailed()
+	s.IncrParseFailed()
 	s.IncrListFailed()
 	s.AddGetCall(10 * time.Millisecond)
 	s.SetTotalDuration(20 * time.Second)
 	var buf strings.Builder
-	s.PrintSummary(&buf, ModeListFile)
+	s.PrintSummary(&buf, ModeCheckFile)
 	out := buf.String()
 	for _, want := range []string{
 		"=== summary ===",
 		"read: 4 total_sec: 20.00",
 		"list_failed: 1",
 		"get_calls: 1",
-		"ok_mp: 2 corrupt_mp: 1 mp_check_failed: 1",
+		"ok_obj: 1 corrupt_obj: 1 ok_mp: 2 corrupt_mp: 1 check_failed: 1 mp_check_failed: 1",
+		"parse_failed: 1",
 	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("list-file summary missing %q\nfull:\n%s", want, out)
+			t.Errorf("check-file summary missing %q\nfull:\n%s", want, out)
 		}
 	}
-	// No S3 LIST happens in list-file mode — list_* lines are all-zero noise.
-	// The leading space on " check_failed:" avoids matching mp_check_failed.
-	for _, notWant := range []string{"list_all:", "list_obj:", "list_calls:", "ok_obj:", "corrupt_obj:", " check_failed:", "backup_ok:"} {
+	// No S3 LIST happens in check-file mode — list_* lines are all-zero
+	// noise. (ok_obj:/corrupt_obj: are check outcomes, not list_*.)
+	for _, notWant := range []string{"list_all:", "list_obj:", "list_mp:", "list_calls:", "backup_ok:"} {
 		if strings.Contains(out, notWant) {
-			t.Errorf("list-file summary should not contain %q\nfull:\n%s", notWant, out)
+			t.Errorf("check-file summary should not contain %q\nfull:\n%s", notWant, out)
 		}
 	}
 }

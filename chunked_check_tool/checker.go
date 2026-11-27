@@ -121,9 +121,9 @@ func (c *Checker) SetJournal(j *JournalTracker) {
 // Handle routes task to verify. The size==0 normal-object shortcut stays
 // here (RangeGet on an empty body returns 416 → would misclassify as
 // check_failed). Listed-counter bumps (list_obj/list_mp) are NOT done here —
-// the S3 lister bumps them in check mode before pushing the task. File-input
-// modes (-list-file / -check-file) do not bump them either (no S3 LIST);
-// their summary reports read instead of list_all.
+// the S3 lister bumps them in check mode before pushing the task. The
+// file-input mode (-check-file) does not bump them either (no S3 LIST);
+// its summary reports read instead of list_all.
 //
 // HeadFirst (set by the file-input sources) HEADs the object to fill ETag/Size
 // before probing — file input lines omit them, and Size is needed by
@@ -250,7 +250,7 @@ const (
 // probes); any probe matching a corruption regex → probeCorrupted.
 // Regex selection by task shape (matchFunc): single PUT runs chunkSigRe ||
 // trailerRe; multipart runs chunkSigRe only. Shared by list-check and the
-// file-input check modes (-list-file / -check-file). Backup mode does not
+// file-input check mode (-check-file). Backup mode does not
 // probe. threshold is WholeObjectProbeThreshold from cfg.
 func runProbes(ctx context.Context, worker S3API, task VerifyTask, threshold int) (probeResult, error) {
 	match := matchFunc(task)
@@ -300,7 +300,7 @@ func (c *Checker) buildProbes(task VerifyTask) []probeSpec {
 }
 
 // buildProbesStatic is the package-level probe planner shared by list-check
-// and the file-input check modes (-list-file / -check-file). threshold is
+// and the file-input check mode (-check-file). threshold is
 // WholeObjectProbeThreshold (0 disables the small-object fast-path).
 func buildProbesStatic(task VerifyTask, threshold int) []probeSpec {
 	thr := int64(threshold)

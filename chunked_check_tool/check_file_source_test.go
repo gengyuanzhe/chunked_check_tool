@@ -13,7 +13,7 @@ import (
 // TestParseCheckFileLine — the mixed format shared with -backup-file: 2
 // fields → regular task (no offsets, HEAD decides), ≥3 fields → multipart
 // task with the line's offsets. Malformed cases are inherited from
-// parseMixedLine/parseListFileLine via delegation.
+// parseMixedLine/parseMultipartLine via delegation.
 func TestParseCheckFileLine(t *testing.T) {
 	const bkt = "mybucket"
 	cases := []struct {
@@ -171,6 +171,12 @@ func TestCheckFileSourceRunEndToEnd(t *testing.T) {
 	if got := stats.Snapshot().ParseFailed; got != 1 {
 		t.Errorf("ParseFailed=%d want 1", got)
 	}
+	// A file source performs no S3 LIST — it must not bump the listed
+	// counters (the summary reports read instead of list_all).
+	snap := stats.Snapshot()
+	if snap.ListedMp != 0 || snap.ListedObjects != 0 {
+		t.Errorf("ListedMp=%d ListedObjects=%d, want 0/0 (file source does not bump listed)", snap.ListedMp, snap.ListedObjects)
+	}
 	if err := out.Close(); err != nil {
 		t.Fatalf("output close: %v", err)
 	}
@@ -180,18 +186,5 @@ func TestCheckFileSourceRunEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "mybucket\x1fbad\x1f1\x1f100") {
 		t.Errorf("parse_failed.txt = %q, want substring %q", string(data), "mybucket\x1fbad\x1f1\x1f100")
-	}
-}
-
-// TestCheckFileSourceLegacyListFileCompat — a legacy -list-file
-// (multipart-only) is a valid -check-file subset: every line parses.
-func TestCheckFileSourceLegacyListFileCompat(t *testing.T) {
-	line := "mybucket\x1fmp1\x1f3\x1f0\x1f5242880\x1f10485760"
-	task, err := parseCheckFileLine(line, "mybucket", 1)
-	if err != nil {
-		t.Fatalf("legacy list-file line must parse as check-file input: %v", err)
-	}
-	if !task.IsMultipart || len(task.Offsets) != 3 || !task.HeadFirst {
-		t.Errorf("task = %+v, want multipart with 3 offsets and HeadFirst", task)
 	}
 }

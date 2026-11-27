@@ -83,9 +83,9 @@ func TestOutputCorruptedMultipartPerOwner(t *testing.T) {
 }
 
 // TestOutputOffsetModeCorruptedMultipartCarriesOffsets — offset mode:
-// corrupted_mp.txt lines carry partcnt+offsets in the -list-file/
-// -backup-file input shape (bkt\x1fkey\x1fpartcnt\x1foff0\x1foff1\x1f...) so
-// the file can be fed straight back into -backup-file.
+// corrupted_mp.txt lines carry partcnt+offsets in the -backup-file input
+// shape (bkt\x1fkey\x1fpartcnt\x1foff0\x1foff1\x1f...) so the file can be fed
+// straight back into -backup-file.
 func TestOutputOffsetModeCorruptedMultipartCarriesOffsets(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset}
@@ -147,13 +147,14 @@ func TestOutputOffsetModeMpCheckFailedEnabled(t *testing.T) {
 	}
 }
 
-// TestOutputListFileModeCorruptedMultipartCarriesOffsets — list-file mode:
-// input lines carry real part boundaries, so corrupted_mp.txt preserves
-// them (list-file → backup-file loop without re-deriving offsets).
-func TestOutputListFileModeCorruptedMultipartCarriesOffsets(t *testing.T) {
+// TestOutputCheckFileModeCorruptedMultipartCarriesOffsets — check-file mode
+// with multipart_check_mode=0: input lines carry real part boundaries, so
+// corrupted_mp.txt preserves them (check-file → backup-file loop without
+// re-deriving offsets).
+func TestOutputCheckFileModeCorruptedMultipartCarriesOffsets(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOff}
-	o, _ := NewOutput(cfg, "test-bkt", FileInputListFile)
+	o, _ := NewOutput(cfg, "test-bkt", FileInputCheckFile)
 	o.WriteCorruptedMultipart("owner-A", "mp/k1", []int64{0, 5242880})
 	o.Close()
 	data, _ := os.ReadFile(ownerSub(dir, "owner-A", "corrupted_mp.txt"))
@@ -399,39 +400,38 @@ func assertFileContentUnordered(t *testing.T, dir, name, want string) {
 	}
 }
 
-// TestNewOutputListFileModeEnablesMultipartResults — list-file tasks always
-// carry explicit offsets, so verification results must route to the
-// multipart result files even when multipart_check_mode=0 (that mode only
-// governs offset synthesis in bucket mode).
-func TestNewOutputListFileModeEnablesMultipartResults(t *testing.T) {
+// TestNewOutputCheckFileModeEnablesMultipartResults — check-file lines carry
+// explicit offsets, so verification results must route to the multipart
+// result files even when multipart_check_mode=0 (that mode only governs
+// offset synthesis in bucket mode). mp.txt stays on: a regular line whose
+// HEAD reveals a multipart object has no offsets and lands there unverified.
+func TestNewOutputCheckFileModeEnablesMultipartResults(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true, IsMultipartSuccessLog: true}
-	o, err := NewOutput(cfg, "test-bkt", FileInputListFile)
+	o, err := NewOutput(cfg, "test-bkt", FileInputCheckFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	o.WriteCorruptedMultipart("", "mp-bad", []int64{0, 1024})
 	o.WriteMultipartOk("", "mp-ok")
 	o.WriteMpCheckFailed("mp-err", []int64{0, 1024})
-	o.WriteMultipartAll("", "mp-all") // catalog path — must stay gated OFF
+	o.WriteMultipartAll("", "mp-drift") // type-drift fallback — enabled here
 	if err := o.Close(); err != nil {
 		t.Fatal(err)
 	}
 	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "test-bkt\x1fmp-bad\x1f2\x1f0\x1f1024\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "test-bkt\x1fmp-ok\n")
 	assertFileContent(t, dir, "mp_check_failed.txt", "test-bkt\x1fmp-err\x1f2\x1f0\x1f1024\n")
-	if _, err := os.Stat(filepath.Join(dir, "_unknown", "mp.txt")); !os.IsNotExist(err) {
-		t.Errorf("mp.txt should not be written in list-file mode")
-	}
+	assertFileContent(t, dir, filepath.Join("_unknown", "mp.txt"), "test-bkt\x1fmp-drift\n")
 }
 
-// TestNewOutputListFileModeOkMpOptIn — ok_mp.txt stays opt-in via
+// TestNewOutputCheckFileModeOkMpOptIn — ok_mp.txt stays opt-in via
 // is_multipart_success_log (default false), matching bucket-mode
 // philosophy; corrupted/failed results are unconditional.
-func TestNewOutputListFileModeOkMpOptIn(t *testing.T) {
+func TestNewOutputCheckFileModeOkMpOptIn(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, IsCheck: true}
-	o, err := NewOutput(cfg, "test-bkt", FileInputListFile)
+	o, err := NewOutput(cfg, "test-bkt", FileInputCheckFile)
 	if err != nil {
 		t.Fatal(err)
 	}

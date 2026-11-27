@@ -30,7 +30,6 @@ func main() {
 	bucket := flag.String("bkt", "", "bucket name")
 	prefix := flag.String("prefix", "", "list prefix")
 	startAfter := flag.String("nextmarker", "", "start-after key (Mode 1 root pagination only)")
-	listFile := flag.String("list-file", "", "list file path: lines of bkt<US>key<US>partcnt<US>offset0<US>offset1<US>... (US=\x1f field separator, key URL-escaped; legacy multipart-only re-check; bypasses S3 listing; requires is_check=true)")
 	checkFile := flag.String("check-file", "", "check file path: mixed lines of bkt<US>key (regular) or bkt<US>key<US>partcnt<US>offset0<US>... (multipart; US=\x1f, key URL-escaped); re-checks the failure files of a prior run (check_failed.txt / mp_check_failed.txt / mismatch.txt); requires is_check=true")
 	backupFile := flag.String("backup-file", "", "backup list file path: mixed lines of bkt<US>key (regular) or bkt<US>key<US>partcnt<US>offset0<US>... (multipart; US=\x1f, key URL-escaped); heads each object, validates the type against the HEAD ETag, and relays it into backup_bucket without probing")
 	resumeList := flag.String("resume-list", "", "resume file path: lines of prefix<US>token (or prefix; US=\x1f, fields URL-escaped) from a prior run's list_failed.txt; re-enumerates from each failed page's cursor. Mode 2 only; mutually exclusive with the other file flags")
@@ -39,7 +38,6 @@ func main() {
 
 	if *cfgPath == "" || *bucket == "" {
 		fmt.Fprintln(os.Stderr, "usage: -c config.yaml -bkt <bucket> [-prefix p] [-nextmarker key]")
-		fmt.Fprintln(os.Stderr, "       -c config.yaml -bkt <bucket> -list-file <path>    (legacy multipart-only re-check)")
 		fmt.Fprintln(os.Stderr, "       -c config.yaml -bkt <bucket> -check-file <path>   (re-check failed objects from a prior run)")
 		fmt.Fprintln(os.Stderr, "       -c config.yaml -bkt <bucket> -backup-file <path>  (requires backup_bucket in config)")
 		fmt.Fprintln(os.Stderr, "       -c config.yaml -bkt <bucket> -resume-list <path>  (Mode 2 only; resumes from list_failed.txt)")
@@ -51,19 +49,19 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	// The five file flags are mutually exclusive input sources.
+	// The four file flags are mutually exclusive input sources.
 	fileFlags := 0
-	for _, s := range []string{*listFile, *checkFile, *backupFile, *resumeList, *resumeJournal} {
+	for _, s := range []string{*checkFile, *backupFile, *resumeList, *resumeJournal} {
 		if s != "" {
 			fileFlags++
 		}
 	}
 	if fileFlags > 1 {
-		fmt.Fprintln(os.Stderr, "usage: -list-file / -check-file / -backup-file / -resume-list / -resume-journal are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "usage: -check-file / -backup-file / -resume-list / -resume-journal are mutually exclusive")
 		os.Exit(2)
 	}
-	if (*listFile != "" || *checkFile != "") && !cfg.IsCheck {
-		fmt.Fprintln(os.Stderr, "usage: -list-file / -check-file require -c config with is_check=true")
+	if *checkFile != "" && !cfg.IsCheck {
+		fmt.Fprintln(os.Stderr, "usage: -check-file requires -c config with is_check=true")
 		os.Exit(2)
 	}
 	// -resume-list is list_type=2 only — Mode 1 mixes a delimiter'd root
@@ -112,12 +110,12 @@ func main() {
 	mwErr := io.MultiWriter(os.Stderr, runLog)
 	log.SetOutput(mwErr)
 
-	printConfig(mwOut, *cfgPath, cfg, *bucket, *prefix, *startAfter, *listFile, *checkFile, *backupFile, *resumeList, *resumeJournal, runLogPath)
+	printConfig(mwOut, *cfgPath, cfg, *bucket, *prefix, *startAfter, *checkFile, *backupFile, *resumeList, *resumeJournal, runLogPath)
 
 	listCtx, hardCtx, stopSignals := installSignalHandler()
 	defer stopSignals()
 
-	if err := run(listCtx, hardCtx, cfg, *bucket, *prefix, *startAfter, *listFile, *checkFile, *backupFile, *resumeList, *resumeJournal, mwOut); err != nil {
+	if err := run(listCtx, hardCtx, cfg, *bucket, *prefix, *startAfter, *checkFile, *backupFile, *resumeList, *resumeJournal, mwOut); err != nil {
 		log.Fatalf("run: %v", err)
 	}
 }
@@ -171,13 +169,12 @@ func installSignalHandler() (listCtx, hardCtx context.Context, stop func()) {
 // run.log (which persists) doesn't leak the secret; ak is shown in clear.
 // Each line is indented 4 spaces for readability against the progress/summary
 // lines that surround it in run.log.
-func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, startAfter, listFile, checkFile, backupFile, resumeList, resumeJournal, runLogPath string) {
+func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, startAfter, checkFile, backupFile, resumeList, resumeJournal, runLogPath string) {
 	fmt.Fprintf(w, "=== config ===\n")
 	fmt.Fprintf(w, "    config: %s\n", cfgPath)
 	fmt.Fprintf(w, "    bucket: %s\n", bucket)
 	fmt.Fprintf(w, "    prefix: %s\n", orEmpty(prefix))
 	fmt.Fprintf(w, "    nextmarker: %s\n", orEmpty(startAfter))
-	fmt.Fprintf(w, "    list_file: %s\n", orEmpty(listFile))
 	fmt.Fprintf(w, "    check_file: %s\n", orEmpty(checkFile))
 	fmt.Fprintf(w, "    backup_file: %s\n", orEmpty(backupFile))
 	fmt.Fprintf(w, "    resume_list: %s\n", orEmpty(resumeList))
@@ -265,7 +262,7 @@ func drainQueuedPrefixes(listCtx context.Context, q *Queue, out *Output, stats *
 // The two contexts come from installSignalHandler: listCtx stops listing
 // (graceful drain begins), hardCtx aborts in-flight work (see Checker /
 // BackupChecker / Lister comments).
-func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAfter, listFile, checkFile, backupFile, resumeList, resumeJournal string, stdout io.Writer) error {
+func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAfter, checkFile, backupFile, resumeList, resumeJournal string, stdout io.Writer) error {
 	// Backup mode: an entirely separate pipeline (HEAD + type gate + relay);
 	// see runBackup. Dispatched before any list/check wiring.
 	if backupFile != "" {
@@ -287,11 +284,8 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 	}
 
 	fileInput := FileInputNone
-	switch {
-	case checkFile != "":
+	if checkFile != "" {
 		fileInput = FileInputCheckFile
-	case listFile != "":
-		fileInput = FileInputListFile
 	}
 	out, err := NewOutput(cfg, bucket, fileInput)
 	if err != nil {
@@ -303,8 +297,6 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 	switch {
 	case fileInput == FileInputCheckFile:
 		mode = ModeCheckFile
-	case fileInput == FileInputListFile:
-		mode = ModeListFile
 	case !cfg.IsCheck:
 		mode = ModeListOnly
 	}
@@ -386,20 +378,14 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 		}
 	}
 
-	// File-input source (-list-file legacy / -check-file): bypass S3 listing
-	// entirely. Read the file line-by-line, push tasks to objCh. No list
-	// workers, no queue, no Lister. is_check must be true (validated in
-	// main). A signal stops the read (listCtx); queued tasks drain through
-	// the check workers, and the retry is re-running the same input file.
+	// File-input source (-check-file): bypasses S3 listing entirely. Read
+	// the file line-by-line, push tasks to objCh. No list workers, no
+	// queue, no Lister. is_check must be true (validated in main). A signal
+	// stops the read (listCtx); queued tasks drain through the check
+	// workers, and the retry is re-running the same input file.
 	if fileInput != FileInputNone {
-		srcPath := listFile
-		parse := parseListFileLine
-		if fileInput == FileInputCheckFile {
-			srcPath = checkFile
-			parse = parseCheckFileLine
-		}
 		listStart := time.Now()
-		src := newFileSource[VerifyTask](srcPath, bucket, out, stats, parse)
+		src := newFileSource[VerifyTask](checkFile, bucket, out, stats, parseCheckFileLine)
 		go func() {
 			if err := src.Run(listCtx, objCh); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("file source: %v", err)

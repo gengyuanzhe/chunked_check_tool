@@ -84,7 +84,7 @@ func readResumeList(path string, out *Output, stats *Stats) ([]resumeEntry, erro
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
-	const maxLineLen = 1 << 20 // 1 MiB, same as listFileSource
+	const maxLineLen = 1 << 20 // 1 MiB, same as fileSource
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineLen)
 	var entries []resumeEntry
 	for scanner.Scan() {

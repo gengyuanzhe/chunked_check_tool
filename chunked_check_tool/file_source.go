@@ -1,5 +1,5 @@
 // file_source.go — shared line-file reader for the file-input modes
-// (-list-file, -check-file, -backup-file).
+// (-check-file, -backup-file).
 package main
 
 import (
@@ -23,10 +23,9 @@ func (e *MalformedLineError) Error() string {
 }
 
 // fileSource reads a line-per-task input file and pushes parsed tasks to ch.
-// It is the shared skeleton of the three file-input modes; the only
+// It is the shared skeleton of the two file-input modes; the only
 // mode-specific part is the parse function:
 //
-//	-list-file:   parseListFileLine  (multipart-only, legacy)
 //	-check-file:  parseCheckFileLine (mixed regular/multipart)
 //	-backup-file: parseMixedLine     (mixed regular/multipart)
 //

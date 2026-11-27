@@ -51,7 +51,7 @@ func withMpOffsetListHeader(o *s3.Options) {
 
 // parseMultipartOffsetETag parses the offset-carrying multipart ETag
 // <32hex-md5>-<partcnt>-<off0>|<off1>|... into its part offsets. Validation
-// mirrors parseListFileLine's rules so both offset sources are
+// mirrors parseMultipartLine's rules so both offset sources are
 // interchangeable downstream: md5 is a 32-char lowercase hex (isNormalETag
 // strictness), partcnt >= 1 and equals the offset count, offsets are
 // non-negative, strictly increasing, and the first is 0.

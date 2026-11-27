@@ -690,9 +690,9 @@ func TestCheckerSinglePutRunsTrailerRe(t *testing.T) {
 }
 
 // TestRunProbesThreeStates — runProbes returns probeClean / probeCorrupted
-// / probeFailed directly so list-check / -list-file / -backup-file all share
-// the same detection. This test pins the three return paths independently of
-// any routing.
+// / probeFailed directly so list-check and -check-file share the same
+// detection. This test pins the three return paths independently of any
+// routing.
 func TestRunProbesThreeStates(t *testing.T) {
 	t.Run("clean", func(t *testing.T) {
 		f := &FakeS3{Body: []byte("nothing signature-like in here")}

@@ -12,7 +12,6 @@ type RunMode int
 const (
 	ModeListCheck RunMode = iota // bucket LIST + check (is_check=true)
 	ModeListOnly                 // bucket LIST only (is_check=false)
-	ModeListFile                 // -list-file: verify tasks read from a local file (legacy, multipart-only)
 	ModeCheckFile                // -check-file: verify tasks read from a local file (mixed format)
 	ModeBackup                   // -backup-file: HEAD + relay (no probing)
 )
@@ -42,7 +41,7 @@ type Stats struct {
 	backupFailedCount     atomic.Int64
 	backupMismatchCount   atomic.Int64
 
-	// Input-file consumption for -list-file / -check-file / -backup-file:
+	// Input-file consumption for -check-file / -backup-file:
 	// every line read (valid or malformed) bumps readLines. read=X is the
 	// cumulative progress counter for the file modes, replacing the bucket
 	// modes' list_all (no total is counted — a full pre-scan of the input
@@ -176,14 +175,14 @@ func (s *Stats) Snapshot() StatsSnapshot {
 
 // PrintSummary writes the final === summary === block. The metric set is
 // mode-specific: the bucket modes print list_* + check outcomes, while
-// -list-file / -check-file / -backup-file print input consumption (read)
-// plus only the outcomes those modes can produce — no S3 LIST happens, so
+// -check-file / -backup-file print input consumption (read) plus only the
+// outcomes those modes can produce — no S3 LIST happens, so
 // list_all/list_calls would be all-zero noise.
 func (s *Stats) PrintSummary(w io.Writer, mode RunMode) {
 	snap := s.Snapshot()
 	fmt.Fprintf(w, "=== summary ===\n")
 	switch mode {
-	case ModeListFile, ModeCheckFile, ModeBackup:
+	case ModeCheckFile, ModeBackup:
 		fmt.Fprintf(w, "read: %d total_sec: %.2f\n", snap.ReadLines, snap.TotalSec)
 		fmt.Fprintf(w, "list_failed: %d\n", snap.ListFailed)
 		// get_calls stays: verification goes through RangeGetAt (and HEAD
@@ -191,9 +190,6 @@ func (s *Stats) PrintSummary(w io.Writer, mode RunMode) {
 		fmt.Fprintf(w, "get_calls: %d avg_latency_ms: %.2f get_total_sec: %.2f\n",
 			snap.GetCalls, snap.GetAvgLatencyMs, snap.GetTotalSec)
 		switch mode {
-		case ModeListFile:
-			fmt.Fprintf(w, "ok_mp: %d corrupt_mp: %d mp_check_failed: %d parse_failed: %d\n",
-				snap.OkMp, snap.CorruptedMp, snap.MpCheckFailed, snap.ParseFailed)
 		case ModeCheckFile:
 			fmt.Fprintf(w, "ok_obj: %d corrupt_obj: %d ok_mp: %d corrupt_mp: %d check_failed: %d mp_check_failed: %d parse_failed: %d\n",
 				snap.OkObjects, snap.CorruptedObjects, snap.OkMp, snap.CorruptedMp,

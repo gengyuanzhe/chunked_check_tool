@@ -48,7 +48,7 @@ func unescapeKey(field, line string, lineNum int) (string, error) {
 //   - bkt must equal expectedBucket (both forms; bucket is CLI-provided
 //     and never escaped)
 //   - regular: key must be non-empty
-//   - multipart: all parseListFileLine rules (partcnt>=1, offset0==0,
+//   - multipart: all parseMultipartLine rules (partcnt>=1, offset0==0,
 //     strictly increasing, offset count == partcnt) via delegation
 func parseMixedLine(line string, expectedBucket string, lineNum int) (BackupTask, error) {
 	if strings.TrimSpace(line) == "" {
@@ -73,7 +73,7 @@ func parseMixedLine(line string, expectedBucket string, lineNum int) (BackupTask
 		}
 		return BackupTask{Key: key, RawLine: line, IsMultipart: false}, nil
 	}
-	task, err := parseListFileLine(line, expectedBucket, lineNum)
+	task, err := parseMultipartLine(line, expectedBucket, lineNum)
 	if err != nil {
 		return BackupTask{}, err
 	}

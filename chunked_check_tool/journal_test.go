@@ -928,7 +928,7 @@ func TestJournalEnabledOnlyMode2S3List(t *testing.T) {
 		_ = args
 		listCtx, cancel := context.WithCancel(context.Background())
 		cancel() // pre-cancelled: no network, no listing, run returns errInterrupted
-		_ = run(listCtx, context.Background(), cfg, "mybucket", "", "", "", "", "", "", "", &buf)
+		_ = run(listCtx, context.Background(), cfg, "mybucket", "", "", "", "", "", "", &buf)
 		return cfg.OutputDir
 	}
 
@@ -958,7 +958,7 @@ func TestJournalEnabledOnlyMode2S3List(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), context.Background(), cfg, "mybucket", "", "", checkPath, "", "", "", "", &buf); err != nil {
+	if err := run(context.Background(), context.Background(), cfg, "mybucket", "", "", checkPath, "", "", "", &buf); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(cfg.OutputDir, "journal.txt")); !os.IsNotExist(err) {
