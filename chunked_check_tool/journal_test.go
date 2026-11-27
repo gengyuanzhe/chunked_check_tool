@@ -1041,73 +1041,28 @@ func TestCheckpointPostSeedTrigger(t *testing.T) {
 	}
 }
 
-// TestJournalIntervalFromEnv — the smoke-runbook override lever
-// JOURNAL_INTERVAL_SEC: unset keeps the default, a positive integer (seconds)
-// overrides, anything else is a loud error — a bad value must never be
-// silently ignored (that would silently change the kill -9 loss bound).
-func TestJournalIntervalFromEnv(t *testing.T) {
-	def := 10 * time.Minute
-	cases := []struct {
-		env    string
-		want   time.Duration
-		wantEr bool
-	}{
-		{"", def, false},
-		{"3", 3 * time.Second, false},
-		{"1", 1 * time.Second, false},
-		{"0", 0, true},
-		{"-1", 0, true},
-		{"abc", 0, true},
-		{"3.5", 0, true},
+// TestRunJournalZeroIntervalUsesDefault — a Config built without LoadConfig
+// (as tests do) leaves journal_checkpoint_interval_sec at zero. A zero
+// interval would panic the ticker and take the process down, so run() falls
+// back to the default and the run completes.
+func TestRunJournalZeroIntervalUsesDefault(t *testing.T) {
+	dir := t.TempDir()
+	// The endpoint refuses connections, so the listing fails fast and the
+	// run returns on its own.
+	cfg := &Config{
+		Endpoints: []string{"127.0.0.1:1"},
+		Scheme:    "http",
+		AK:        "test",
+		SK:        "test",
+		ListType:  2,
+		OutputDir: dir,
+		IsCheck:   true,
 	}
-	for _, c := range cases {
-		got, err := journalIntervalFromEnv(func(string) string { return c.env }, def)
-		if c.wantEr {
-			if err == nil {
-				t.Errorf("env %q: err = nil, want error", c.env)
-			}
-			continue
-		}
-		if err != nil {
-			t.Errorf("env %q: err = %v, want nil", c.env, err)
-		}
-		if got != c.want {
-			t.Errorf("env %q: interval = %v, want %v", c.env, got, c.want)
-		}
+	var buf bytes.Buffer
+	if err := run(cfg, "mybucket", "", "", "", "", "", "", &buf); err != nil {
+		t.Fatalf("run: %v", err)
 	}
-}
-
-// TestResolveJournalInterval — the interval between two checkpoints comes
-// from journal_checkpoint_interval_sec; JOURNAL_INTERVAL_SEC overrides it
-// when set, and a bad env value is a loud error.
-func TestResolveJournalInterval(t *testing.T) {
-	cases := []struct {
-		name   string
-		cfg    int64
-		env    string
-		want   time.Duration
-		wantEr bool
-	}{
-		{"config, no env", 600, "", 600 * time.Second, false},
-		{"config, smaller", 30, "", 30 * time.Second, false},
-		{"env overrides config", 600, "1", time.Second, false},
-		{"bad env", 600, "abc", 0, true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got, err := resolveJournalInterval(&Config{JournalCheckpointIntervalSec: c.cfg}, func(string) string { return c.env })
-			if c.wantEr {
-				if err == nil {
-					t.Fatalf("env %q: err = nil, want error", c.env)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("env %q: err = %v, want nil", c.env, err)
-			}
-			if got != c.want {
-				t.Errorf("env %q: interval = %v, want %v", c.env, got, c.want)
-			}
-		})
+	if _, err := os.Stat(filepath.Join(dir, "journal.txt")); err != nil {
+		t.Errorf("journal.txt missing after the run: %v", err)
 	}
 }

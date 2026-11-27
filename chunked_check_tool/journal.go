@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -375,31 +374,6 @@ func (t *JournalTracker) trackedPrefixes() int {
 	return len(t.states)
 }
 
-// journalIntervalFromEnv resolves JOURNAL_INTERVAL_SEC (seconds) on top of
-// def, the configured interval. Unset or empty keeps def. Anything but a
-// positive integer is a loud error: a bad value must never be silently
-// ignored, since it silently changes the kill -9 loss bound.
-func journalIntervalFromEnv(getenv func(string) string, def time.Duration) (time.Duration, error) {
-	v := getenv("JOURNAL_INTERVAL_SEC")
-	if v == "" {
-		return def, nil
-	}
-	sec, err := strconv.Atoi(v)
-	if err != nil || sec < 1 {
-		return 0, fmt.Errorf("JOURNAL_INTERVAL_SEC=%q: want an integer >= 1 (seconds)", v)
-	}
-	return time.Duration(sec) * time.Second, nil
-}
-
-// resolveJournalInterval is the time between two journal checkpoints: a
-// kill -9 loses at most that much scan progress. It is
-// journal_checkpoint_interval_sec from the config, which JOURNAL_INTERVAL_SEC
-// overrides when set — the kill -9 smoke runbook uses the override because
-// local-minio scans finish in seconds, long before a 10-minute tick.
-func resolveJournalInterval(cfg *Config, getenv func(string) string) (time.Duration, error) {
-	return journalIntervalFromEnv(getenv, time.Duration(cfg.JournalCheckpointIntervalSec)*time.Second)
-}
-
 // runJournalCheckpoints persists scan progress to journalPath until ctx is
 // cancelled, then once more (final state) and returns. One checkpoint runs
 // IMMEDIATELY at start, before any tick — but production wiring starts this
@@ -421,8 +395,7 @@ func resolveJournalInterval(cfg *Config, getenv func(string) string) (time.Durat
 // Lifecycle: cancel ctx after listing and checking have fully finished and
 // BEFORE out.Close() — FlushAndWait must never meet closed channels.
 //
-// interval is the time between two ticks: journal_checkpoint_interval_sec
-// as resolved by resolveJournalInterval.
+// interval is the time between two ticks: journal_checkpoint_interval_sec.
 func runJournalCheckpoints(ctx context.Context, tr *JournalTracker, out *Output, journalPath string, trigger <-chan chan struct{}, interval time.Duration) {
 	f, err := os.OpenFile(journalPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {

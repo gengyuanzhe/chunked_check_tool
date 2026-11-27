@@ -190,17 +190,13 @@ func run(cfg *Config, bucket, prefix, startAfter, checkFile, backupFile, resumeL
 	pool := NewNodePool(cfg)
 	startNodeRecovery(context.Background(), pool, cfg, bucket)
 
-	// Journal checkpoint interval: journal_checkpoint_interval_sec, which
-	// the JOURNAL_INTERVAL_SEC env var overrides (smoke runbook lever — see
-	// resolveJournalInterval). Resolved before anything starts so a bad
-	// value fails the run cleanly.
-	var journalInterval time.Duration
-	if cfg.ListType == 2 {
-		d, err := resolveJournalInterval(cfg, os.Getenv)
-		if err != nil {
-			return err
-		}
-		journalInterval = d
+	// Journal checkpoint interval. LoadConfig defaults it and rejects
+	// negatives; a Config built without LoadConfig leaves it zero, and a
+	// zero interval would panic the ticker, so that falls back to the
+	// default too.
+	journalInterval := time.Duration(cfg.JournalCheckpointIntervalSec) * time.Second
+	if journalInterval <= 0 {
+		journalInterval = time.Duration(defaultJournalCheckpointIntervalSec) * time.Second
 	}
 
 	fileInput := FileInputNone

@@ -26,6 +26,10 @@ const (
 	MultipartCheckModeSegment = 2
 )
 
+// defaultJournalCheckpointIntervalSec is journal_checkpoint_interval_sec
+// when the config leaves it out: 10 minutes.
+const defaultJournalCheckpointIntervalSec = 600
+
 type Config struct {
 	Endpoints          []string `yaml:"endpoints"`
 	Scheme             string   `yaml:"scheme"`
@@ -211,10 +215,10 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.LatencyWindowSec < 0 {
 		return nil, fmt.Errorf("latency_window_sec must be >= 1 seconds (got %d)", cfg.LatencyWindowSec)
 	}
-	// Journal checkpoint interval in seconds; absent (0) = 600 (10 minutes).
+	// Journal checkpoint interval in seconds; absent (0) = the default.
 	// Negative is meaningless and rejected.
 	if cfg.JournalCheckpointIntervalSec == 0 {
-		cfg.JournalCheckpointIntervalSec = 600
+		cfg.JournalCheckpointIntervalSec = defaultJournalCheckpointIntervalSec
 	}
 	if cfg.JournalCheckpointIntervalSec < 0 {
 		return nil, fmt.Errorf("journal_checkpoint_interval_sec must be >= 1 seconds (got %d)", cfg.JournalCheckpointIntervalSec)
