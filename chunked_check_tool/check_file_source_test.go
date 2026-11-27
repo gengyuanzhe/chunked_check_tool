@@ -2,7 +2,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -143,7 +142,7 @@ func TestCheckFileSourceRunEndToEnd(t *testing.T) {
 	src := newFileSource[VerifyTask](filePath, "mybucket", out, stats, parseCheckFileLine)
 	objCh := make(chan VerifyTask, 16)
 	go func() {
-		if err := src.Run(context.Background(), objCh); err != nil {
+		if err := src.Run(objCh); err != nil {
 			t.Logf("Run returned err: %v", err)
 		}
 		close(objCh)

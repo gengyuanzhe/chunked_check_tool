@@ -2,7 +2,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -171,7 +170,7 @@ func TestBackupSourceRunEndToEnd(t *testing.T) {
 	src := newFileSource[BackupTask](filePath, "mybucket", out, stats, parseMixedLine)
 	ch := make(chan BackupTask, 16)
 	go func() {
-		if err := src.Run(context.Background(), ch); err != nil {
+		if err := src.Run(ch); err != nil {
 			t.Logf("Run returned err: %v", err)
 		}
 		close(ch)
@@ -227,34 +226,6 @@ func TestBackupSourceRunEndToEnd(t *testing.T) {
 
 // TestBackupSourceRunCancel — a cancelled context makes Run return
 // ctx.Err() promptly instead of pushing the remaining lines.
-func TestBackupSourceRunCancel(t *testing.T) {
-	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir}
-	out, err := NewOutput(cfg, "mybucket", FileInputNone)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stats := NewStats()
-
-	content := "mybucket\x1freg1\nmybucket\x1freg2\n"
-	filePath := filepath.Join(dir, "backup.txt")
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	src := newFileSource[BackupTask](filePath, "mybucket", out, stats, parseMixedLine)
-	ch := make(chan BackupTask, 16)
-	err = src.Run(ctx, ch)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run err = %v, want context.Canceled", err)
-	}
-	if err := out.Close(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestBackupSourceRunOpenError(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir}
@@ -264,7 +235,7 @@ func TestBackupSourceRunOpenError(t *testing.T) {
 	}
 	defer out.Close()
 	src := newFileSource[BackupTask](filepath.Join(dir, "nope.txt"), "mybucket", out, NewStats(), parseMixedLine)
-	err = src.Run(context.Background(), make(chan BackupTask, 1))
+	err = src.Run(make(chan BackupTask, 1))
 	if err == nil || !strings.Contains(err.Error(), "nope.txt") {
 		t.Fatalf("Run err = %v, want open error mentioning path", err)
 	}

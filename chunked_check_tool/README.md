@@ -168,7 +168,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 - S3 多段约束：非末段必须 ≥5MB。输入行语义是原始 part 边界（原上传本来合规）；若喂入"固定分段"格式（段 <5MB）会被 S3 拒绝（EntityTooSmall）→ `backup_failed`
 - `mp.txt`（mode=0/2 未验证多段、`-check-file` 时普通行 HEAD 判多段的漂移对象）**无 offsets，无法自动中转**（ETag 终验对不上），需人工补 part 边界后走 `-check-file`/`-backup-file`。mode=1 ETag 解析失败的对象落到根目录 `list_parse_failed.txt`（同样无 offsets，无法自动中转）
 - 观测指标（无 S3 LIST，不显示 `list_*`）：进度行 `[progress] read=X list_failed=… backup_ok=… backup_failed=… backup_mismatch=… get_calls=… get_avg_ms=… (backed=N) q=obj:… lf:… bok:… bfail:… mm:…`；汇总 `read: X` + `list_failed` + `get_calls` + `backup_ok: N backup_failed: N backup_mismatch: N`
-- **中断恢复**：信号到达时停止读输入、排空已入队对象；重跑同一输入文件即可（探测/中转幂等，重复中转 = 覆盖写）。输入很大时用差集只重跑没备份成功的对象，见下方「kill -9 后的续跑」
+- **中断恢复**：进程不拦截信号，Ctrl-C / kill 都是立即退出；重跑同一输入文件即可（探测/中转幂等，重复中转 = 覆盖写）。输入很大时用差集只重跑没备份成功的对象，见下方「kill -9 后的续跑」
 
 ### kill -9 后的续跑（`-check-file` / `-backup-file`）
 
@@ -279,7 +279,7 @@ join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
 
 | 文件 | 触发场景 | 是否可自动补跑 | 补跑方式 |
 |---|---|---|---|
-| `list_failed.txt` | S3 LIST 调用失败（节点故障/5xx/超时/中断未启动） | 是 | `-resume-list <list_failed.txt>`（Mode 2 BFS，从失败页 token 续页） |
+| `list_failed.txt` | S3 LIST 调用失败（节点故障/5xx/超时） | 是 | `-resume-list <list_failed.txt>`（Mode 2 BFS，从失败页 token 续页） |
 | `parse_failed.txt` | 输入文件解析失败（坏行/bkt 不匹配/whitespace-only 行/无效 %XX 转义） | 否 | 人工修输入文件后重跑 |
 | `check_failed.txt` | 普通对象 RangeGet 失败（状态未知） | 是 | `-check-file check_failed.txt` 重查；确认损坏后再 `-backup-file` |
 | `mp_check_failed.txt` | 多段对象分段 RangeGet 失败（状态未知） | 是 | `-check-file mp_check_failed.txt` 重查 |
@@ -288,15 +288,13 @@ join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
 | `list_parse_failed.txt` | mode=offset 多段 ETag 解析失败（服务端未返回 `internal-list-mp-offset` 或 ETag 格式不合法） | 否 | 人工补 part 边界后走 `-check-file`/`-backup-file`（直喂 `-check-file` 只会落到 `mp.txt`：HEAD 不带分段边界，不会真正检查） |
 | `mp.txt` | 未验证多段（mode=0/2、`-check-file` 时普通行 HEAD 判多段的漂移对象） | 否 | 人工补 part 边界后走 `-check-file`/`-backup-file` |
 
-`list_failed.txt` 行格式 `prefix\x1ftoken`：token 是失败页的 continuationToken（V1 是上一页最后一个 key，V2 是服务端返回的不透明 token）。第一页就失败或该 prefix 从未启动时 token 为空，整行就是单字段 `prefix`。补跑时 `-resume-list` 读这些行，把 `(prefix, token)` 作为初始状态 seed 进 BFS 队列，`processPrefix` 从该 token 续页，避免重复枚举已成功的前几页。**仅 Mode 2 支持**——Mode 1 的根/子前缀游标语义不可区分，其列举失败重试 = 原命令重跑（幂等，跨轮并集吸收重复）。
+`list_failed.txt` 行格式 `prefix\x1ftoken`：token 是失败页的 continuationToken（V1 是上一页最后一个 key，V2 是服务端返回的不透明 token）。第一页就失败时 token 为空，整行就是单字段 `prefix`。补跑时 `-resume-list` 读这些行，把 `(prefix, token)` 作为初始状态 seed 进 BFS 队列，`processPrefix` 从该 token 续页，避免重复枚举已成功的前几页。**仅 Mode 2 支持**——Mode 1 的根/子前缀游标语义不可区分，其列举失败重试 = 原命令重跑（幂等，跨轮并集吸收重复）。
 
-### 信号与断点续传
+### 停止与断点续传
 
-**收到 SIGINT/SIGTERM**：停止列举/读输入，**排空**已入队的检查/中转任务；进行中的前缀把剩余页的游标写入 `list_failed.txt`，队列里未启动的前缀也写入（裸 prefix；`-resume-list` 种子带原 token 精确往返）。效果：**run 目录成为完备检查点**——每个 prefix 要么列完且每个对象都有终态，要么带可续游标；进程以非零退出（`interrupted: graceful drain complete`）。
+工具不拦截任何信号。Ctrl-C、kill、`kill -9` 效果一样：进程立即退出，不执行收尾代码——不打印汇总，结果文件可能缺最后 3 秒的行，末行可能是半行。
 
-**之后的信号不再有动作**：进程里没有强停路径，排空一定跑完（第一次信号时日志会提示用 kill -9）。
-
-**kill -9 / 崩溃**：没处理的部分不留记录，按运行模式续跑：
+被杀之后按运行模式续跑：
 
 - `list_type=2` 扫描：`-resume-journal <被杀那一轮的目录>/journal.txt`，最多重做 10 分钟的进度
 - `-check-file` / `-backup-file`：重跑原输入文件，或用结果文件求差集只跑没有定论的对象（见上文「kill -9 后的续跑」）

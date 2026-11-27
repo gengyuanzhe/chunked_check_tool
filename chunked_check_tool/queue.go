@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"sync"
 )
 
@@ -29,51 +28,13 @@ func (q *Queue) Push(s string) {
 	q.mu.Unlock()
 }
 
-func (q *Queue) Pop(ctx context.Context) (string, bool) {
-	// 先尝试非阻塞
-	q.mu.Lock()
-	if len(q.items) > 0 {
-		s := q.items[0]
-		q.items[0] = ""
-		q.items = q.items[1:]
-		q.mu.Unlock()
-		return s, true
-	}
-	if q.closed {
-		q.mu.Unlock()
-		return "", false
-	}
-	q.mu.Unlock()
-
-	// ctx 已取消直接返回
-	select {
-	case <-ctx.Done():
-		return "", false
-	default:
-	}
-
-	// 阻塞等待：启动一个唤醒 goroutine，ctx 取消时 Broadcast
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-ctx.Done():
-			q.mu.Lock()
-			q.cond.Broadcast()
-			q.mu.Unlock()
-		case <-stop:
-		}
-	}()
-
+// Pop returns the next queued item, blocking until one arrives or the queue
+// is closed. ok is false once the queue is closed and empty.
+func (q *Queue) Pop() (string, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for len(q.items) == 0 && !q.closed {
 		q.cond.Wait()
-		select {
-		case <-ctx.Done():
-			return "", false
-		default:
-		}
 	}
 	if len(q.items) == 0 {
 		return "", false
@@ -89,18 +50,6 @@ func (q *Queue) Close() {
 	q.closed = true
 	q.cond.Broadcast()
 	q.mu.Unlock()
-}
-
-// Drain returns all queued items and empties the queue. Call only after all
-// producers and consumers have stopped (list workers exited) — it does not
-// coordinate with concurrent Push/Pop beyond the internal mutex. Used by the
-// graceful-shutdown path to record never-started prefixes into list_failed.
-func (q *Queue) Drain() []string {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	items := q.items
-	q.items = nil
-	return items
 }
 
 func (q *Queue) Len() int {

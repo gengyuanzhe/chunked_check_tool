@@ -2,28 +2,17 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
-
-// errInterrupted is returned when the process received a signal and
-// completed its graceful drain. The run directory is a complete checkpoint:
-// every prefix is either fully listed (with every listed object probed or
-// recorded in check_failed / mp_check_failed) or carries a resume cursor in
-// list_failed.txt; the file-input modes resume by re-running the same input
-// file. main logs this and exits non-zero so the operator knows to resume.
-var errInterrupted = errors.New("interrupted: graceful drain complete, output is a resumable checkpoint")
 
 func main() {
 	cfgPath := flag.String("c", "", "config yaml path")
@@ -112,47 +101,9 @@ func main() {
 
 	printConfig(mwOut, *cfgPath, cfg, *bucket, *prefix, *startAfter, *checkFile, *backupFile, *resumeList, *resumeJournal, runLogPath)
 
-	listCtx, stopSignals := installSignalHandler()
-	defer stopSignals()
-
-	if err := run(listCtx, cfg, *bucket, *prefix, *startAfter, *checkFile, *backupFile, *resumeList, *resumeJournal, mwOut); err != nil {
+	if err := run(cfg, *bucket, *prefix, *startAfter, *checkFile, *backupFile, *resumeList, *resumeJournal, mwOut); err != nil {
 		log.Fatalf("run: %v", err)
 	}
-}
-
-// installSignalHandler wires the SIGINT/SIGTERM shutdown.
-//
-// The signal cancels listCtx: S3 listing and input-file reading stop.
-// In-flight pages record their resume cursor into list_failed.txt; prefixes
-// still queued are recorded by drainQueuedPrefixes; every task already
-// emitted finishes through the workers. The run directory becomes a
-// complete checkpoint — nothing that was listed is left without a terminal
-// state, nothing unlisted is left without a resume cursor.
-//
-// There is no second stage: later signals are swallowed and the drain runs
-// to completion. Stopping earlier means kill -9, which records nothing for
-// the unprocessed remainder — a Mode 2 scan resumes from journal.txt
-// (-resume-journal); the file-input modes re-run their input minus the
-// objects that already have a result (AGENTS §7.4). The output writer
-// goroutines flush every outputFlushInterval, so a kill loses at most one
-// interval of tail lines per file (the failure files are the resume
-// inputs) instead of the full 64KB bufio buffer.
-func installSignalHandler() (listCtx context.Context, stop func()) {
-	listCtx, listCancel := context.WithCancel(context.Background())
-	// Capacity 1 keeps a repeated signal swallowed after the handler has
-	// taken the first one, instead of letting it reach the process.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		log.Printf("signal received: stopping listing, draining in-flight work (to stop now: kill -9)")
-		listCancel()
-	}()
-	stop = func() {
-		signal.Stop(sigCh)
-		listCancel()
-	}
-	return listCtx, stop
 }
 
 // printConfig writes a config snapshot to w at startup. sk is masked so the
@@ -206,30 +157,11 @@ func orEmpty(s string) string {
 	return s
 }
 
-// drainQueuedPrefixes records every prefix still sitting in the BFS queue
-// when listing was interrupted (listCtx cancelled): the workers exited via
-// cancellation without popping them, so nothing under those prefixes was
-// listed this run. Bare prefixes are written as-is (resume = full re-list);
-// -resume-list seeds ("prefix\x00token") round-trip their cursor so the
-// retry continues from where the previous run failed. No-op on normal
-// completion (the queue is closed and empty by then).
-func drainQueuedPrefixes(listCtx context.Context, q *Queue, out *Output, stats *Stats) {
-	if listCtx.Err() == nil {
-		return
-	}
-	err := fmt.Errorf("interrupted before listing started: %w", listCtx.Err())
-	for _, item := range q.Drain() {
-		prefix, token := item, ""
-		if i := strings.IndexByte(item, '\x00'); i >= 0 {
-			prefix, token = item[:i], item[i+1:]
-		}
-		out.WriteListFailed(prefix, token)
-		out.WriteListFailedLog(prefix, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
-		stats.IncrListFailed()
-	}
-}
-
 // run wires NodePool, Output, Stats, Lister, and Checker workers together.
+//
+// The process installs no signal handler: a Ctrl-C or kill ends it at once,
+// and resuming is up to the periodic snapshot (journal.txt, Mode 2) or the
+// result files (file-input modes) — see AGENTS §7.4 / §7.5.
 //
 // Seeding:
 //   - Mode 1: main paginates the root prefix WITH delimiter in a loop. Each
@@ -243,20 +175,15 @@ func drainQueuedPrefixes(listCtx context.Context, q *Queue, out *Output, stats *
 //     pagination).
 //
 // Termination: list workers exit when the shared Lister's inflight counter
-// drops to zero (which closes the queue). listWg.Wait then drains any
-// interrupted-but-unstarted prefixes into list_failed and closes objCh,
+// drops to zero (which closes the queue). listWg.Wait then closes objCh,
 // which unblocks check workers. If nothing was seeded (e.g. Mode 1 root
 // pagination returned no sub-prefixes), the queue is closed explicitly so
 // list workers exit immediately.
-//
-// listCtx comes from installSignalHandler: its cancellation stops listing
-// and starts the drain; work already emitted then finishes through the
-// workers (see the Lister comment).
-func run(listCtx context.Context, cfg *Config, bucket, prefix, startAfter, checkFile, backupFile, resumeList, resumeJournal string, stdout io.Writer) error {
+func run(cfg *Config, bucket, prefix, startAfter, checkFile, backupFile, resumeList, resumeJournal string, stdout io.Writer) error {
 	// Backup mode: an entirely separate pipeline (HEAD + type gate + relay);
 	// see runBackup. Dispatched before any list/check wiring.
 	if backupFile != "" {
-		return runBackup(listCtx, cfg, bucket, backupFile, stdout)
+		return runBackup(cfg, bucket, backupFile, stdout)
 	}
 
 	pool := NewNodePool(cfg)
@@ -370,14 +297,12 @@ func run(listCtx context.Context, cfg *Config, bucket, prefix, startAfter, check
 
 	// File-input source (-check-file): bypasses S3 listing entirely. Read
 	// the file line-by-line, push tasks to objCh. No list workers, no
-	// queue, no Lister. is_check must be true (validated in main). A signal
-	// stops the read (listCtx); queued tasks drain through the check
-	// workers, and the retry is re-running the same input file.
+	// queue, no Lister. is_check must be true (validated in main).
 	if fileInput != FileInputNone {
 		listStart := time.Now()
 		src := newFileSource[VerifyTask](checkFile, bucket, out, stats, parseCheckFileLine)
 		go func() {
-			if err := src.Run(listCtx, objCh); err != nil && !errors.Is(err, context.Canceled) {
+			if err := src.Run(objCh); err != nil {
 				log.Printf("file source: %v", err)
 			}
 			close(objCh)
@@ -389,9 +314,6 @@ func run(listCtx context.Context, cfg *Config, bucket, prefix, startAfter, check
 		}
 		stats.SetTotalDuration(time.Since(start))
 		stats.PrintSummary(stdout, mode)
-		if listCtx.Err() != nil {
-			return errInterrupted
-		}
 		return nil
 	}
 
@@ -403,7 +325,7 @@ func run(listCtx context.Context, cfg *Config, bucket, prefix, startAfter, check
 		workerS3 := newWorker(pool, i, cfg, bucket, stats, debugLogger, listLogger)
 		lc := &localCounter{interval: cfg.ProgressInterval, printer: printer}
 		onObject := func() { lc.incr(stats, "listed") }
-		go lister.Run(listCtx, &listWg, objCh, i, workerS3, onObject)
+		go lister.Run(&listWg, objCh, i, workerS3, onObject)
 	}
 
 	// Seeding.
@@ -419,7 +341,7 @@ func run(listCtx context.Context, cfg *Config, bucket, prefix, startAfter, check
 		sa := startAfter
 		continuationToken := ""
 		for {
-			objs, subprefixes, next, err := seedWorker.ListPage(listCtx, prefix, sa, continuationToken, true, int(cfg.MaxKeys))
+			objs, subprefixes, next, err := seedWorker.ListPage(context.Background(), prefix, sa, continuationToken, true, int(cfg.MaxKeys))
 			if err != nil {
 				out.WriteListFailed(prefix, continuationToken)
 				out.WriteListFailedLog(prefix, extractHTTPStatusCode(err), extractS3Code(err), extractRequestID(err), err)
@@ -494,12 +416,9 @@ func run(listCtx context.Context, cfg *Config, bucket, prefix, startAfter, check
 		q.Close()
 	}
 
-	// Close objCh once all list workers are done. On an interrupt, the
-	// never-started prefixes still queued are recorded to list_failed first
-	// (each with its resume cursor where one exists).
+	// Close objCh once all list workers are done.
 	go func() {
 		listWg.Wait()
-		drainQueuedPrefixes(listCtx, q, out, stats)
 		close(objCh)
 		stats.SetListDuration(time.Since(listStart))
 	}()
@@ -525,15 +444,7 @@ func run(listCtx context.Context, cfg *Config, bucket, prefix, startAfter, check
 	}
 	stats.SetTotalDuration(time.Since(start))
 	stats.PrintSummary(stdout, mode)
-	if seedErr != nil {
-		return seedErr
-	}
-	// An interrupted run (signal) is reported after the flush: the output is
-	// a valid checkpoint, but the scan did not complete.
-	if listCtx.Err() != nil {
-		return errInterrupted
-	}
-	return nil
+	return seedErr
 }
 
 // newWorker builds a per-worker S3API bound to a single node via NodePool
@@ -558,7 +469,7 @@ func newWorker(pool *NodePool, workerIdx int, cfg *Config, bucket string, stats 
 // backup bucket, then check_concurrency workers consume BackupTasks
 // (HEAD → type validation → relay). See BackupChecker for the per-task
 // routing.
-func runBackup(listCtx context.Context, cfg *Config, bucket, backupFile string, stdout io.Writer) error {
+func runBackup(cfg *Config, bucket, backupFile string, stdout io.Writer) error {
 	pool := NewNodePool(cfg)
 	startNodeRecovery(context.Background(), pool, cfg, bucket)
 	out, err := NewBackupOutput(cfg, bucket)
@@ -571,10 +482,8 @@ func runBackup(listCtx context.Context, cfg *Config, bucket, backupFile string, 
 
 	// The list archive is the record of what this run intended to back up,
 	// so it goes up FIRST — a run that dies mid-way still leaves its input
-	// archived. Abort before touching any object if this fails. It runs on
-	// listCtx: a signal during the archive upload aborts the run cleanly
-	// before any object is relayed.
-	if err := uploadBackupList(listCtx, pool, cfg, bucket, backupFile); err != nil {
+	// archived. Abort before touching any object if this fails.
+	if err := uploadBackupList(context.Background(), pool, cfg, bucket, backupFile); err != nil {
 		out.Close()
 		return err
 	}
@@ -615,7 +524,7 @@ func runBackup(listCtx context.Context, cfg *Config, bucket, backupFile string, 
 
 	src := newFileSource[BackupTask](backupFile, bucket, out, stats, parseMixedLine)
 	go func() {
-		if err := src.Run(listCtx, ch); err != nil && !errors.Is(err, context.Canceled) {
+		if err := src.Run(ch); err != nil {
 			log.Printf("backup source: %v", err)
 		}
 		close(ch)
@@ -627,13 +536,6 @@ func runBackup(listCtx context.Context, cfg *Config, bucket, backupFile string, 
 	}
 	stats.SetTotalDuration(time.Since(start))
 	stats.PrintSummary(stdout, ModeBackup)
-	// An interrupted run is reported after the flush; backup_failed.txt is
-	// the retry input (already-processed objects can be excluded with a
-	// comm diff against backup_ok/mismatch since every output line is the
-	// raw input line — the verified runbook is AGENTS §7.4).
-	if listCtx.Err() != nil {
-		return errInterrupted
-	}
 	return nil
 }
 

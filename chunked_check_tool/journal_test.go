@@ -558,7 +558,7 @@ func TestListerJournalRegistersPages(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		l.processPrefix(context.Background(), "root/", "", objCh, fake, nil)
+		l.processPrefix("root/", "", objCh, fake, nil)
 	}()
 	var tasks []VerifyTask
 	for len(tasks) < 4 {
@@ -614,7 +614,7 @@ func TestListerJournalPipeKeyFlowsNormally(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		l.processPrefix(context.Background(), "root/", "", objCh, fake, nil)
+		l.processPrefix("root/", "", objCh, fake, nil)
 	}()
 	got := map[string]bool{}
 	for i := 0; i < 2; i++ {
@@ -659,7 +659,7 @@ func TestListerJournalDiscoversBeforeEmission(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		l.processPrefix(context.Background(), "root/", "", objCh, fake, nil)
+		l.processPrefix("root/", "", objCh, fake, nil)
 	}()
 	var tasks []VerifyTask
 	for len(tasks) < 2 {
@@ -722,11 +722,18 @@ func TestListerJournalListOnlyTerminals(t *testing.T) {
 		},
 	}}
 	objCh := make(chan VerifyTask, 8)
-	l.processPrefix(context.Background(), "root/", "", objCh, fake, nil)
+	l.processPrefix("root/", "", objCh, fake, nil)
 
 	if snap := tr.Snapshot(); !containsString(snap.Dones, "root/") {
 		t.Errorf("done = false in list-only mode; snapshot: %+v", snap)
 	}
+}
+
+// queueItems returns a copy of what is still queued, for inspecting seeds.
+func queueItems(q *Queue) []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]string(nil), q.items...)
 }
 
 // TestSeedFromJournal — replayed states seed the BFS: done prefixes are
@@ -742,7 +749,7 @@ func TestSeedFromJournal(t *testing.T) {
 	if !seedFromJournal(states, l) {
 		t.Fatal("seedFromJournal = false, want true (something to seed)")
 	}
-	seeds := l.queue.Drain()
+	seeds := queueItems(l.queue)
 	if len(seeds) != 2 {
 		t.Fatalf("queue = %v, want 2 seeds", seeds)
 	}
@@ -818,7 +825,7 @@ func TestJournalResumeRoundTrip(t *testing.T) {
 	prefixDone := make(chan struct{})
 	go func() {
 		defer close(prefixDone)
-		l.processPrefix(context.Background(), "root/", "", objCh, fake, nil)
+		l.processPrefix("root/", "", objCh, fake, nil)
 	}()
 	// Checkers probe the first page's objects (terminals flow, page 0
 	// completes). The rest are emitted but never probed — the kill window.
@@ -851,7 +858,7 @@ func TestJournalResumeRoundTrip(t *testing.T) {
 	l2 := NewLister(NewQueue(), nil, NewStats(), &Config{ListType: 2, IsCheck: true})
 	seedFromJournal(states, l2)
 	seeds := map[string]bool{}
-	for _, s := range l2.queue.Drain() {
+	for _, s := range queueItems(l2.queue) {
 		seeds[s] = true
 	}
 	if !seeds["root/\x00tok2"] || !seeds["root/sub/"] || len(seeds) != 2 {
@@ -876,9 +883,9 @@ func TestJournalEnabledOnlyMode2S3List(t *testing.T) {
 		var buf bytes.Buffer
 		// args carries the mode-specific flag payload; unused here for Mode 1.
 		_ = args
-		listCtx, cancel := context.WithCancel(context.Background())
-		cancel() // pre-cancelled: no network, no listing, run returns errInterrupted
-		_ = run(listCtx, cfg, "mybucket", "", "", "", "", "", "", &buf)
+		// The endpoint refuses connections, so the listing fails fast and
+		// the run returns on its own.
+		_ = run(cfg, "mybucket", "", "", "", "", "", "", &buf)
 		return cfg.OutputDir
 	}
 
@@ -908,7 +915,7 @@ func TestJournalEnabledOnlyMode2S3List(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), cfg, "mybucket", "", "", checkPath, "", "", "", &buf); err != nil {
+	if err := run(cfg, "mybucket", "", "", checkPath, "", "", "", &buf); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(cfg.OutputDir, "journal.txt")); !os.IsNotExist(err) {

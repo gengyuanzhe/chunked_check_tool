@@ -4,7 +4,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -33,11 +32,6 @@ func (e *MalformedLineError) Error() string {
 // IncrParseFailed; processing continues. Every line read (valid or
 // malformed) bumps IncrReadLine — the cumulative progress counter for the
 // file modes.
-//
-// ctx cancels the read loop: a cancelled line is neither counted nor pushed.
-// The send to ch selects on ctx too — a task blocked mid-send when the
-// signal arrives is simply not pushed (file-mode retry is re-running the
-// same input file, so dropping a line costs nothing).
 type fileSource[T any] struct {
 	path   string
 	bucket string
@@ -50,7 +44,9 @@ func newFileSource[T any](path, bucket string, out *Output, stats *Stats, parse 
 	return &fileSource[T]{path: path, bucket: bucket, out: out, stats: stats, parse: parse}
 }
 
-func (s *fileSource[T]) Run(ctx context.Context, ch chan<- T) error {
+// Run reads the input file line by line and pushes each parsed task to ch,
+// blocking while the workers are busy. It returns when the file is exhausted.
+func (s *fileSource[T]) Run(ch chan<- T) error {
 	f, err := os.Open(s.path)
 	if err != nil {
 		return fmt.Errorf("open input file %q: %w", s.path, err)
@@ -64,11 +60,6 @@ func (s *fileSource[T]) Run(ctx context.Context, ch chan<- T) error {
 	for scanner.Scan() {
 		lineNum++
 		s.stats.IncrReadLine()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
 		// scanner.Text() allocates a fresh string per line, so task fields
 		// that alias it (Key, RawLine) are safe to retain.
 		line := scanner.Text()
@@ -86,11 +77,7 @@ func (s *fileSource[T]) Run(ctx context.Context, ch chan<- T) error {
 			s.stats.IncrParseFailed()
 			continue
 		}
-		select {
-		case ch <- task:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		ch <- task
 	}
 	return scanner.Err()
 }

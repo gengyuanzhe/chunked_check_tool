@@ -28,12 +28,6 @@ import (
 // inflight must be shared across all workers — if each worker owned its
 // own Lister (as Task 10's main.go does), per-instance counters would break
 // BFS termination. Run and processPrefix therefore take s3 as a parameter.
-//
-// Context (see main.go installSignalHandler): listCtx is cancelled by the
-// signal. Workers then stop popping new prefixes and in-flight ListPage
-// calls fail, which records the remaining pages of the in-flight prefix in
-// list_failed with a resume cursor; the objects of the page already fetched
-// are still sent, and are checked like every other task.
 type Lister struct {
 	queue    *Queue
 	out      *Output
@@ -83,23 +77,17 @@ func (l *Lister) SeedWithToken(prefix, token string) {
 }
 
 // Run is the worker loop. It pops prefixes off the queue and lists them
-// until either the context is cancelled or inflight drops to zero. The
-// worker that drives inflight to zero closes the queue, which unblocks any
-// list_sub workers waiting in Queue.Pop.
+// until inflight drops to zero. The worker that drives inflight to zero
+// closes the queue, which unblocks any workers waiting in Queue.Pop.
 //
 // onObject is invoked after each object is processed (sent to objCh in
 // check mode, classified locally in list-only mode). It is used by main to
 // drive per-worker progress printing. Pass nil to disable.
-func (l *Lister) Run(listCtx context.Context, wg *sync.WaitGroup, objCh chan<- VerifyTask, workerIdx int, s3 S3API, onObject func()) {
+func (l *Lister) Run(wg *sync.WaitGroup, objCh chan<- VerifyTask, workerIdx int, s3 S3API, onObject func()) {
 	defer wg.Done()
 	_ = workerIdx
 	for {
-		select {
-		case <-listCtx.Done():
-			return
-		default:
-		}
-		prefix, ok := l.queue.Pop(listCtx)
+		prefix, ok := l.queue.Pop()
 		if !ok {
 			return
 		}
@@ -111,7 +99,7 @@ func (l *Lister) Run(listCtx context.Context, wg *sync.WaitGroup, objCh chan<- V
 			initialToken = prefix[i+1:]
 			prefix = prefix[:i]
 		}
-		l.processPrefix(listCtx, prefix, initialToken, objCh, s3, onObject)
+		l.processPrefix(prefix, initialToken, objCh, s3, onObject)
 		// Every prefix that is popped accounts for one Add(-1). Seed and the
 		// Mode-2 sub-prefix enqueue path do the matching Add(+1).
 		if l.inflight.Add(-1) == 0 {
@@ -142,13 +130,12 @@ func (l *Lister) recordListFailure(prefix, token string, err error) {
 //
 // Failure recording: the continuationToken recorded is always the cursor of
 // the page that did NOT complete — the `next` of the last successful page
-// (empty when the first page failed). After the signal the failing ListPage
-// is the first page requested after it, so the pages completed before are
-// not re-listed on resume.
-func (l *Lister) processPrefix(listCtx context.Context, prefix, initialToken string, objCh chan<- VerifyTask, s3 S3API, onObject func()) {
+// (empty when the first page failed) — so a -resume-list round skips the
+// pages that already succeeded.
+func (l *Lister) processPrefix(prefix, initialToken string, objCh chan<- VerifyTask, s3 S3API, onObject func()) {
 	continuationToken := initialToken
 	for {
-		objs, prefixes, next, err := s3.ListPage(listCtx, prefix, "", continuationToken, l.delim(), int(l.cfg.MaxKeys))
+		objs, prefixes, next, err := s3.ListPage(context.Background(), prefix, "", continuationToken, l.delim(), int(l.cfg.MaxKeys))
 		if err != nil {
 			l.recordListFailure(prefix, continuationToken, err)
 			return

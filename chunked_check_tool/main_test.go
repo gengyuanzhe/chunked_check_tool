@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,10 +41,8 @@ func TestRunEndToEnd_smoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	var buf bytes.Buffer
-	if err := run(ctx, cfg, os.Getenv("S3_BUCKET"), os.Getenv("S3_PREFIX"), "", "", "", "", "", &buf); err != nil {
+	if err := run(cfg, os.Getenv("S3_BUCKET"), os.Getenv("S3_PREFIX"), "", "", "", "", "", &buf); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -82,7 +79,7 @@ func TestRunCheckFileDispatch(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err = run(context.Background(), cfg, "mybucket", "", "", checkPath, "", "", "", &buf)
+	err = run(cfg, "mybucket", "", "", checkPath, "", "", "", &buf)
 	if err != nil {
 		t.Fatalf("run returned err: %v (want nil)", err)
 	}
@@ -146,7 +143,7 @@ func TestRunCheckFileEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), cfg, "srcbucket", "", "", checkPath, "", "", "", &buf); err != nil {
+	if err := run(cfg, "srcbucket", "", "", checkPath, "", "", "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 
@@ -204,7 +201,7 @@ func TestRunCheckFileProgressLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := run(context.Background(), cfg, "srcbucket", "", "", checkPath, "", "", "", &buf); err != nil {
+	if err := run(cfg, "srcbucket", "", "", checkPath, "", "", "", &buf); err != nil {
 		t.Fatalf("run returned err: %v", err)
 	}
 	out := buf.String()
