@@ -256,7 +256,7 @@ join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
 ├── check_failed.log            # 普通对象 RangeGet 失败结构化错误
 ├── mp_check_failed.txt         # 多段分段 RangeGet 失败 `bkt\x1fkey\x1fpartcnt\x1foff0\x1f...`（可直喂 -check-file / -backup-file 多段输入）
 ├── mp_check_failed.log         # 多段分段 RangeGet 失败结构化错误
-├── list_parse_failed.txt       # mode=offset 多段 ETag 解析失败 `bkt\x1fkey`（无 offsets，无法自动中转；可直喂 -check-file 重查当前状态）
+├── list_parse_failed.txt       # mode=offset 多段 ETag 解析失败 `bkt\x1fkey`（无 offsets，无法自动中转；喂回 -check-file 只会落到 mp.txt，要检查需人工补 part 边界）
 ├── list_parse_failed.log       # mode=offset 多段 ETag 解析失败结构化诊断（key/owner/size/原始 ETag，不截断）
 ├── backup_ok.txt               # 备份成功的原始输入行（-backup-file 模式）
 ├── backup_failed.txt           # 备份失败的原始输入行（-backup-file 模式；可自喂重试）
@@ -285,7 +285,7 @@ join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
 | `mp_check_failed.txt` | 多段对象分段 RangeGet 失败（状态未知） | 是 | `-check-file mp_check_failed.txt` 重查 |
 | `mismatch.txt` | 对象在检查后被改写（类型漂移），检查结果过期 | 是 | `-check-file mismatch.txt` 重查当前状态 |
 | `backup_failed.txt` | 备份中转失败 | 是 | `-backup-file backup_failed.txt` 自喂重试 |
-| `list_parse_failed.txt` | mode=offset 多段 ETag 解析失败（服务端未返回 `internal-list-mp-offset` 或 ETag 格式不合法） | 否 | 人工补 part 边界后走 `-check-file`/`-backup-file`（也可直喂 `-check-file` 重查当前状态） |
+| `list_parse_failed.txt` | mode=offset 多段 ETag 解析失败（服务端未返回 `internal-list-mp-offset` 或 ETag 格式不合法） | 否 | 人工补 part 边界后走 `-check-file`/`-backup-file`（直喂 `-check-file` 只会落到 `mp.txt`：HEAD 不带分段边界，不会真正检查） |
 | `mp.txt` | 未验证多段（mode=0/2、`-check-file` 时普通行 HEAD 判多段的漂移对象） | 否 | 人工补 part 边界后走 `-check-file`/`-backup-file` |
 
 `list_failed.txt` 行格式 `prefix\x1ftoken`：token 是失败页的 continuationToken（V1 是上一页最后一个 key，V2 是服务端返回的不透明 token）。第一页就失败或该 prefix 从未启动时 token 为空，整行就是单字段 `prefix`。补跑时 `-resume-list` 读这些行，把 `(prefix, token)` 作为初始状态 seed 进 BFS 队列，`processPrefix` 从该 token 续页，避免重复枚举已成功的前几页。**仅 Mode 2 支持**——Mode 1 的根/子前缀游标语义不可区分，其列举失败重试 = 原命令重跑（幂等，跨轮并集吸收重复）。

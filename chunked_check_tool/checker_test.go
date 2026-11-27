@@ -947,3 +947,36 @@ func TestCheckerHeadFirstDriftToMultipartWritesMpTxt(t *testing.T) {
 		t.Errorf("mp.txt = %q, want %q", got, want)
 	}
 }
+
+// TestCheckerCheckFileMultipartWithoutOffsetsAlwaysWritesMpTxt — the same
+// drift for every multipart_check_mode. In offset mode the checker used to
+// route "multipart without offsets" to list_parse_failed.txt, which
+// -check-file mode never opens: the line then reached no .txt file at all.
+// HEAD carries no part offsets, so under -check-file the object is unverified
+// whatever the mode and must land in mp.txt.
+func TestCheckerCheckFileMultipartWithoutOffsetsAlwaysWritesMpTxt(t *testing.T) {
+	for _, mode := range []int{MultipartCheckModeOff, MultipartCheckModeOffset, MultipartCheckModeSegment} {
+		dir := t.TempDir()
+		cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: mode, MultipartSegmentSize: 5 * 1024 * 1024}
+		out, _ := NewOutput(cfg, "mybucket", FileInputCheckFile)
+		worker := &FakeS3{Heads: map[string]HeadInfo{"k": {ETag: "0123456789abcdef0123456789abcdef-2", Size: 10}}}
+		NewChecker(context.Background(), worker, out, NewStats(), cfg).Handle(VerifyTask{Key: "k", HeadFirst: true})
+		if err := out.Close(); err != nil {
+			t.Fatalf("mode=%d: output close: %v", mode, err)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, "_unknown", "mp.txt"))
+		if err != nil {
+			t.Errorf("mode=%d: the line is in no result file (mp.txt missing): %v", mode, err)
+			continue
+		}
+		if got, want := strings.TrimSpace(string(data)), "mybucket\x1fk"; got != want {
+			t.Errorf("mode=%d: mp.txt = %q, want %q", mode, got, want)
+		}
+		// Nothing failed to parse here (a manifest line simply has no
+		// offsets), so the parse-failure log must stay empty.
+		logData, _ := os.ReadFile(filepath.Join(dir, "list_parse_failed.log"))
+		if len(logData) != 0 {
+			t.Errorf("mode=%d: list_parse_failed.log should be empty, got %q", mode, logData)
+		}
+	}
+}

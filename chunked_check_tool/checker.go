@@ -177,15 +177,19 @@ func (c *Checker) Handle(task VerifyTask) {
 	c.verify(task)
 }
 
-// verify routes task to probe-and-route. Multipart + nil Offsets is the
-// "multipart check off / unparseable offset etag" path → write to mp_all
-// without claiming ok_mp. Otherwise buildProbes produces the probe plan
+// verify routes task to probe-and-route. Multipart + nil Offsets means there
+// are no part boundaries to probe at; where the object is recorded depends on
+// what the run opens. List+check in offset mode opens list_parse_failed.txt
+// (the ETag should have carried offsets but did not parse) and routes there.
+// Otherwise it goes to mp.txt unverified, without claiming ok_mp: off/segment
+// mode, and every mode under -check-file (HEAD never carries offsets).
+// With offsets, buildProbes produces the probe plan
 // for this object's shape (small-object fast-path / head+tail / head+
 // boundary+tail) and probeAndRoute runs each probe; first settled
 // (corrupted or failed) wins. All probes clean → ok_object / ok_mp.
 func (c *Checker) verify(task VerifyTask) {
 	if task.IsMultipart && len(task.Offsets) == 0 {
-		if c.cfg.MultipartCheckMode == MultipartCheckModeOffset {
+		if c.out.listParseFailedEnabled {
 			c.out.WriteListParseFailedLog(task.Key, task.OwnerID, task.Size, task.ETag)
 			c.out.WriteListParseFailed(task.Key)
 			c.stats.IncrListParseFailed()
