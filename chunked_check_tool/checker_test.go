@@ -41,9 +41,10 @@ func TestChunkSigRegex(t *testing.T) {
 		{";chunk-signature=abcdef\r\n", false},    // empty chunk size
 		{"1000;notchunk-signature=abc\r\n", false},
 		{"ff;chunk-signature=0000000000000000000000000000000000000000000000000000000000000000\n", false}, // bare \n not CRLF — protocol mandates CRLF
-		// De-anchored: matches mid-body, not just at byte 0. Boundary probes
-		// read [off-128, off+128] where the next part's head lands at byte 128.
-		{"garbage prefix 1000;chunk-signature=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\r\n", true},
+		// Anchored: the header must be the first bytes of the probe. Every
+		// probe starts at the object or at a part, where a corrupted body
+		// puts it; the same text inside a probe is object data.
+		{"garbage prefix 1000;chunk-signature=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789\r\n", false},
 	}
 	for _, c := range cases {
 		got := chunkSigRe.Match([]byte(c.body))
@@ -642,8 +643,8 @@ func TestCheckerMultipartProbeCatchesChunkSigInPartHead(t *testing.T) {
 	defer out.Close()
 	s := NewStats()
 	// 2 parts, part 1 starts at 5MiB. Its probe reads [5242880, 5243008)
-	// where the part head sits at byte 0 of the slice. The de-anchored
-	// chunkSigRe must match there (regression guard against re-anchoring).
+	// where the part head sits at byte 0 of the slice: the anchored
+	// chunkSigRe must match there.
 	boundary := int64(5242880)
 	worker := &FakeS3{RangeGetHandler: func(offset, length int64) ([]byte, error) {
 		if offset == boundary {
@@ -655,6 +656,61 @@ func TestCheckerMultipartProbeCatchesChunkSigInPartHead(t *testing.T) {
 	c.Handle(VerifyTask{Key: "k", OwnerID: "owner-A", IsMultipart: true, Size: 10 * 1024 * 1024, Offsets: []int64{0, 5242880}})
 	if got := s.Snapshot().CorruptedMp; got != 1 {
 		t.Errorf("corrupted_mp=%d want 1 (chunkSigRe should match part head)", got)
+	}
+}
+
+// TestCheckerChunkSignatureCountsOnlyAtPartStart — the chunk-signature
+// header is a verdict only at the first byte of the object (single PUT) or
+// of a part (multipart). The one-read plan covers a whole small object in a
+// single body, so a part head sits past byte 0 there: each is matched where
+// it starts, and the same header text inside a part is not a match.
+func TestCheckerChunkSignatureCountsOnlyAtPartStart(t *testing.T) {
+	const size int64 = 900
+	offs := []int64{0, 300, 600} // three equal parts, all inside one read
+	cases := []struct {
+		name    string
+		multi   bool
+		at      int64 // byte offset of the header text in the body
+		corrupt bool
+	}{
+		{"single PUT, header at byte 0", false, 0, true},
+		{"single PUT, header inside the body", false, 100, false},
+		{"multipart, header at a part head", true, 300, true},
+		{"multipart, header inside a part", true, 100, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := &Config{OutputDir: dir, IsCheck: true, MultipartCheckMode: MultipartCheckModeOffset, WholeObjectProbeThreshold: 1024}
+			out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+			defer out.Close()
+			s := NewStats()
+			body := make([]byte, size)
+			for i := range body {
+				body[i] = 'x'
+			}
+			copy(body[tc.at:], chunkSigBody)
+			count := 0
+			worker := &rangeGetCountingS3{FakeS3: &FakeS3{Body: body}, count: &count}
+			c := NewChecker(worker, out, s, cfg)
+			task := VerifyTask{Key: "k", Size: size}
+			if tc.multi {
+				task.IsMultipart, task.Offsets, task.OwnerID = true, offs, "owner-A"
+			}
+			c.Handle(task)
+
+			snap := s.Snapshot()
+			var want int64
+			if tc.corrupt {
+				want = 1
+			}
+			if got := snap.CorruptedObjects + snap.CorruptedMp; got != want {
+				t.Errorf("corrupted=%d want %d", got, want)
+			}
+			if count != 1 {
+				t.Errorf("RangeGetAt calls=%d want 1 (one read for the whole object)", count)
+			}
+		})
 	}
 }
 

@@ -13,9 +13,10 @@ import (
 // in object bodies when a client uploads via streaming SigV4 with chunked
 // transfer encoding. Format: <hex-size>;chunk-signature=<64-hex>\r\n
 // CRLF is mandatory (RFC 7230 chunked; the server writes the body verbatim).
-// Unanchored so it matches whether the header lands at byte 0 of a probe
-// slice or mid-slice.
-var chunkSigRe = regexp.MustCompile(`[0-9a-fA-F]+;chunk-signature=[0-9a-fA-F]{64}\r\n`)
+// Anchored: the header only counts at the first byte of the object or of a
+// part, where a corrupted body puts it. The same text elsewhere in a probe
+// is object data. matchFunc lines the anchor up with each part head.
+var chunkSigRe = regexp.MustCompile(`^[0-9a-fA-F]+;chunk-signature=[0-9a-fA-F]{64}\r\n`)
 
 // trailerRe matches the aws-chunked trailer end-structure of a
 // STREAMING-UNSIGNED-PAYLOAD-TRAILER upload:
@@ -247,8 +248,9 @@ const (
 // file-input check mode (-check-file). Backup mode does not
 // probe. threshold is WholeObjectProbeThreshold from cfg.
 func runProbes(ctx context.Context, worker S3API, task VerifyTask, threshold int) (probeResult, error) {
-	match := matchFunc(task)
-	for _, p := range buildProbesStatic(task, threshold) {
+	probes := buildProbesStatic(task, threshold)
+	match := matchFunc(task, probes)
+	for _, p := range probes {
 		body, err := worker.RangeGetAt(ctx, task.Key, p.start, p.length)
 		if err != nil {
 			return probeFailed, err
@@ -260,12 +262,29 @@ func runProbes(ctx context.Context, worker S3API, task VerifyTask, threshold int
 	return probeClean, nil
 }
 
-// matchFunc returns the corruption-match function for the task shape:
-// multipart → chunkSigRe only (multipart parts can't be trailer uploads on
-// private storage); single PUT → chunkSigRe || trailerRe.
-func matchFunc(task VerifyTask) func([]byte) bool {
+// matchFunc returns the corruption-match function for the probes planned
+// for task. chunkSigRe is anchored, so the header must be the first byte of
+// the object or of a part; this is what points the anchor at each part:
+//
+//   - multipart, one probe per part: every probe starts at its own part
+//     head, so the header is at byte 0. chunkSigRe only — multipart parts
+//     can't be trailer uploads on private storage.
+//   - multipart, the one-read plan: all part heads are inside the single
+//     body, each at its offset.
+//   - single PUT → chunkSigRe || trailerRe.
+func matchFunc(task VerifyTask, probes []probeSpec) func([]byte) bool {
 	if task.IsMultipart {
-		return chunkSigRe.Match
+		if len(probes) > 1 {
+			return chunkSigRe.Match
+		}
+		return func(body []byte) bool {
+			for _, off := range task.Offsets {
+				if off < int64(len(body)) && chunkSigRe.Match(body[off:]) {
+					return true
+				}
+			}
+			return false
+		}
 	}
 	return func(b []byte) bool { return chunkSigRe.Match(b) || trailerRe.Match(b) }
 }
