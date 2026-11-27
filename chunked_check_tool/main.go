@@ -209,7 +209,6 @@ func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, start
 	fmt.Fprintf(w, "    latency_window_sec: %d\n", cfg.LatencyWindowSec)
 	fmt.Fprintf(w, "    obj_ch_capacity: %d\n", cfg.ObjChCapacity)
 	fmt.Fprintf(w, "    output_ch_capacity: %d\n", cfg.OutputChCapacity)
-	fmt.Fprintf(w, "    result_line_format: %s\n", cfg.ResultLineFormat)
 	fmt.Fprintf(w, "    run_log: %s\n", runLogPath)
 	fmt.Fprintf(w, "=== end config ===\n")
 }

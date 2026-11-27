@@ -82,7 +82,6 @@ response_header_timeout: 0           # 等服务端响应头超时秒数（0=Go 
 progress_interval: 5000             # 进度记录间隔
 obj_ch_capacity: 0                  # lister→checker channel 容量；0=max(check_concurrency*4, 2000)
 output_ch_capacity: 0               # output writer channel 容量；0=1024
-result_line_format: <bucket>|<key>  # 结果文件每行格式，支持 <bucket>/<key>/<owner> 占位符
 backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填）
 ```
 
@@ -115,7 +114,6 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `progress_interval` | `5000` | stdout 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；0 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；0 走默认 |
-| `result_line_format` | `<bucket>\|<key>` | 结果文件每行格式，支持 `<bucket>`/`<key>`/`<owner>` 占位符；只影响 per-owner 结果文件，处理文件始终只存 key/prefix |
 | `backup_bucket` | 空 | 备份目标桶名；`-backup-file` 模式必填，其他模式忽略 |
 
 ## check-file 模式

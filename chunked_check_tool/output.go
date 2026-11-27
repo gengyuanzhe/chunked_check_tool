@@ -26,16 +26,16 @@ const rowSep = "\x1f"
 
 // ownerLine pairs the ownerID (drives per-owner output routing) with the
 // object key and, for corrupted_mp lines in offset/list-file mode, the
-// object's part offsets (nil → render via result_line_format).
+// object's part offsets (nil → render via renderLineFmt).
 type ownerLine struct {
 	ownerID string
 	key     string
 	offsets []int64
 }
 
-// ownerRenderer renders one ownerLine to w. Per-owner result files pick
-// either the configured result_line_format or, for corrupted_mp in
-// offset/list-file mode, the offset-carrying bkt|key|partcnt|off0|... shape.
+// ownerRenderer renders one ownerLine to w. Per-owner result files use
+// renderLineFmt (bucket\x1f<escaped-key>); corrupted_mp in offset/list-file
+// mode uses renderMultipartOffsets (bucket\x1fkey\x1fpartcnt\x1foff0|...).
 type ownerRenderer func(w io.Writer, bucket string, ol ownerLine)
 
 // FileInputMode tells NewOutput which file-input mode (if any) is running,
@@ -60,11 +60,6 @@ const (
 type Output struct {
 	dir    string
 	bucket string
-
-	// compiled result-line format (per-owner result files only). Process
-	// files (list_failed/check_failed/mp_check_failed) always write
-	// the raw key/prefix — the format only applies to per-owner result files.
-	lineFmt compiledLineFormat
 
 	// per-owner channels (each carries ownerID + key)
 	corruptedCh          chan ownerLine
@@ -163,18 +158,9 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 		multipartAll = isCheck && cfg.MultipartCheckMode == MultipartCheckModeOff
 		listParseFailed = isCheck && cfg.MultipartCheckMode == MultipartCheckModeOffset
 	}
-	format := cfg.ResultLineFormat
-	if format == "" {
-		format = "<bucket>|<key>"
-	}
-	lineFmt, err := parseLineFormat(format)
-	if err != nil {
-		return nil, err
-	}
 	o := &Output{
 		dir:                       cfg.OutputDir,
 		bucket:                    bucket,
-		lineFmt:                   lineFmt,
 		corruptedCh:               make(chan ownerLine, chCap),
 		multipartAllCh:            make(chan ownerLine, chCap),
 		corruptedMultipartCh:      make(chan ownerLine, chCap),
@@ -275,18 +261,9 @@ func NewBackupOutput(cfg *Config, bucket string) (*Output, error) {
 	if chCap <= 0 {
 		chCap = 1024
 	}
-	format := cfg.ResultLineFormat
-	if format == "" {
-		format = "<bucket>|<key>"
-	}
-	lineFmt, err := parseLineFormat(format)
-	if err != nil {
-		return nil, err
-	}
 	o := &Output{
 		dir:            cfg.BackupOutputDir,
 		bucket:         bucket,
-		lineFmt:        lineFmt,
 		listFailedCh:   make(chan string, chCap),
 		parseFailedCh:  make(chan string, chCap),
 		backupOkCh:     make(chan string, chCap),
@@ -538,9 +515,15 @@ func (o *Output) WriteShortResponseWarning(prefix, token string, returned, maxKe
 		slog.Int("max_keys", maxKeys))
 }
 
-// renderLineFmt renders via the configured result_line_format.
+// renderLineFmt writes bucket\x1f<escaped-key> — the per-owner result-file
+// line shape. key is QueryEscape'd (server field; may contain \x1f, |, \n);
+// bucket comes from the CLI and stays raw. Same separator and escape rule as
+// the process files (invariant 23) and renderMultipartOffsets, so all
+// per-owner result files share one line shape that survives hostile keys.
 func (o *Output) renderLineFmt(w io.Writer, bucket string, ol ownerLine) {
-	o.lineFmt.writeTo(w, bucket, ol.ownerID, ol.key)
+	w.Write([]byte(bucket))
+	w.Write([]byte(rowSep))
+	w.Write([]byte(url.QueryEscape(ol.key)))
 }
 
 // renderMultipartOffsets writes bucket\x1fkey\x1fpartcnt\x1foff0\x1foff1... —
@@ -676,9 +659,9 @@ func (o *Output) WriteCorrupted(ownerID, key string) {
 }
 
 // WriteCorruptedMultipart records a corrupted multipart object. offsets are
-// the part boundaries the probes ran at; the corrupted_mp renderer decides
-// whether they appear in the line (offset/list-file mode) or are ignored in
-// favor of result_line_format (segment mode — synthetic offsets).
+// the part boundaries the probes ran at; the corrupted_mp renderer writes
+// them in offset/list-file mode (real part boundaries for re-check/backup),
+// or ignores them in segment mode (synthetic offsets → plain line).
 func (o *Output) WriteCorruptedMultipart(ownerID, key string, offsets []int64) {
 	if o.corruptedMultipartEnabled {
 		o.corruptedMultipartCh <- ownerLine{ownerID, key, offsets}

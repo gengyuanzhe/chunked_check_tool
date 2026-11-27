@@ -232,8 +232,8 @@ func TestCheckerMultipartSegmentCheckCorrupted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read corrupted_mp: %v", err)
 	}
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|k" {
-		t.Errorf("corrupted_mp.txt = %q, want %q", line, "test-bkt|k")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fk" {
+		t.Errorf("corrupted_mp.txt = %q, want %q", line, "test-bkt\x1fk")
 	}
 }
 
@@ -254,13 +254,13 @@ func TestCheckerMultipartSegmentCheckClean(t *testing.T) {
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// IsSuccessLog=true → clean multipart goes to <owner>/ok_mp.txt (bucket|key)
+	// IsSuccessLog=true → clean multipart goes to <owner>/ok_mp.txt (bucket\x1fkey)
 	data, err := os.ReadFile(filepath.Join(dir, "owner-A", "ok_mp.txt"))
 	if err != nil {
 		t.Fatalf("read ok_multipart: %v", err)
 	}
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|k" {
-		t.Errorf("ok_mp.txt = %q, want %q", line, "test-bkt|k")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fk" {
+		t.Errorf("ok_mp.txt = %q, want %q", line, "test-bkt\x1fk")
 	}
 }
 
@@ -407,8 +407,8 @@ func TestCheckerMultipartSegmentCheckDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read mp: %v", err)
 	}
-	if line := strings.TrimSpace(string(data)); line != "test-bkt|k" {
-		t.Errorf("mp.txt = %q, want %q (bucket|key)", line, "test-bkt|k")
+	if line := strings.TrimSpace(string(data)); line != "test-bkt\x1fk" {
+		t.Errorf("mp.txt = %q, want %q (bucket\x1fkey)", line, "test-bkt\x1fk")
 	}
 }
 
@@ -906,7 +906,7 @@ func TestCheckerHeadFirstDriftToRegularProbesHeadTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read corrupted_objects.txt: %v", err)
 	}
-	if got, want := string(data), "mybucket|k\n"; got != want {
+	if got, want := string(data), "mybucket\x1fk\n"; got != want {
 		t.Errorf("corrupted_objects.txt = %q, want %q", got, want)
 	}
 }
@@ -943,7 +943,7 @@ func TestCheckerHeadFirstDriftToMultipartWritesMpTxt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read mp.txt: %v", err)
 	}
-	if got, want := string(data), "mybucket|k\n"; got != want {
+	if got, want := string(data), "mybucket\x1fk\n"; got != want {
 		t.Errorf("mp.txt = %q, want %q", got, want)
 	}
 }
