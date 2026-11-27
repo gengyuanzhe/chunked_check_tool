@@ -55,14 +55,7 @@ is_success_log: false
 #       服务端返回的多段 ETag 为 <md5>-<partcnt>-<off0>|<off1>|... 格式，
 #       按真实 part 边界逐段检查；ETag 解析不出 offsets 的对象回落 mp.txt
 #       （服务端未实现该特性时行为等同模式 0，优雅降级）
-#   2 = 固定分段检查（旧模式，未来准备废弃）：假设所有 part 等长，
-#       按 multipart_segment_size 合成 [0, seg, 2*seg, ...] 边界逐段检查；
-#       必须配 multipart_segment_size > 0 且与上传 part size 一致，
-#       否则 chunk-signature 不在段边界上会漏检
 multipart_check_mode: 0
-
-# 模式 2 的段长度（字节）。仅 multipart_check_mode: 2 时必填（>0），其他模式忽略。
-multipart_segment_size: 0
 
 # 是否记录干净的多段对象到 <ownerID>/ok_mp.txt
 # 主扫描里 multipart_check_mode != 0 时生效；-check-file 模式恒记录，不受此项控制
