@@ -153,7 +153,7 @@ func TestRunCheckFileEndToEnd(t *testing.T) {
 
 	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_objects.txt"), "srcbucket\x1fregcorrupt\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "corrupted_mp.txt"), "srcbucket\x1fmpcorrupt\x1f1\x1f0\n")
-	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "srcbucket\x1fmpclean\n")
+	assertFileContent(t, dir, filepath.Join("_unknown", "ok_mp.txt"), "srcbucket\x1fmpclean\x1f1\x1f0\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "ok_objects.txt"), "srcbucket\x1fdriftreg\n")
 	assertFileContent(t, dir, filepath.Join("_unknown", "mp.txt"), "srcbucket\x1fdriftmp\n")
 	assertFileContent(t, dir, "parse_failed.txt", "srcbucket\x1fbad\x1f1\x1f100\n")

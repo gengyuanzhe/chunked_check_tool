@@ -113,7 +113,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 12. **V1/V2 分页协议对 caller 透明**：`S3Client.listPageOnce` 按 `cfg.ListAPIVersion` 分派 `s3.ListObjects`（V1，marker 游标）或 `s3.ListObjectsV2`（V2，continuation token）。两条路径都归一化进 `listResult{contents, commonPrefixes, next}`，`next` 作为下一次 `ListPage` 的 `continuationToken` 参数回传。V1 无 delimiter 且 `IsTruncated=true` 但 `NextMarker` 为空时，回退到最后一个 Contents key 作 marker；有 delimiter 时 S3 返回 `NextMarker`。caller（lister/main 根分页）只需把 `next` 喂回 `continuationToken`，不感知 V1/V2 差异。`S3Client.api` 是 `awsS3API` 接口（非 `*s3.Client`）以支持测试注入。aws SDK 所有 API 带首参 ctx——`ListPage` 真正响应 ctx 取消，优雅中断能即时掐断在途 LIST）。
 
-13. **多段分段检查的失败分流**（mode=1/2 与 -check-file 共用路径）：分段 RangeGet 报错走 `mp_check_failed` 路径（`WriteMpCheckFailed` + `IncrMpCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）。**corrupted_mp.txt 行格式按模式**：mode=1 与文件输入模式写 `bkt\x1fkey\x1fpartcnt\x1foff0\x1foff1\x1f...`（offsets 是真实 part 边界，文件可直喂 -backup-file/-check-file）；mode=2 写 `bucket\x1f<escaped-key>`——固定分段的 [0,seg,2*seg,...] 是合成边界，**绝不能**当 part 边界写出（否则备份中转按错误边界分段，ETag 必 mismatch）。**mp_check_failed.txt 行格式对齐 corrupted_mp.txt**：mode=1 与文件输入模式写 `bkt\x1fkey\x1fpartcnt\x1foff0\x1f...`（`WriteMpCheckFailed(key, offsets)` 接收 task.Offsets），同样可直喂 -backup-file/-check-file 补跑。**check_failed.txt 行格式 `bkt\x1fkey`**（`WriteCheckFailed(key)` 内部拼 `o.bucket + rowSep + url.QueryEscape(key)`，rowSep=`\x1f`），对齐 -check-file/-backup-file 普通对象 2 字段输入，可直喂补跑（不需要 ETag/Size：check-file 会 HEAD 重取，backup 中转也会 HEAD）。**owner 不写入** check_failed/mp_check_failed（文件输入模式不读 owner，输出走全局 root 不按 owner 分桶）。
+13. **多段分段检查的失败分流**（mode=1/2 与 -check-file 共用路径）：分段 RangeGet 报错走 `mp_check_failed` 路径（`WriteMpCheckFailed` + `IncrMpCheckFailed`），**不走** `check_failed`。任一段命中 chunk-signature 即视为整段对象损坏，写 `<ownerID>/corrupted_mp.txt` 并 `IncrCorruptedMp`（同时**不** `IncrOkMp`）。干净的多段对象 `IncrOkMp`，仅 `is_multipart_success_log=true` 时写 `<ownerID>/ok_mp.txt`（与普通对象的 `is_success_log` 独立，互不影响）。**ok_mp.txt 行格式同 corrupted_mp.txt**（`WriteMultipartOk(ownerID, key, offsets)` 接收 task.Offsets）：mode=1 与文件输入模式写 `bkt\x1fkey\x1fpartcnt\x1foff...`，mode=2 写纯 key 行。**corrupted_mp.txt 行格式按模式**：mode=1 与文件输入模式写 `bkt\x1fkey\x1fpartcnt\x1foff0\x1foff1\x1f...`（offsets 是真实 part 边界，文件可直喂 -backup-file/-check-file）；mode=2 写 `bucket\x1f<escaped-key>`——固定分段的 [0,seg,2*seg,...] 是合成边界，**绝不能**当 part 边界写出（否则备份中转按错误边界分段，ETag 必 mismatch）。**mp_check_failed.txt 行格式对齐 corrupted_mp.txt**：mode=1 与文件输入模式写 `bkt\x1fkey\x1fpartcnt\x1foff0\x1f...`（`WriteMpCheckFailed(key, offsets)` 接收 task.Offsets），同样可直喂 -backup-file/-check-file 补跑。**check_failed.txt 行格式 `bkt\x1fkey`**（`WriteCheckFailed(key)` 内部拼 `o.bucket + rowSep + url.QueryEscape(key)`，rowSep=`\x1f`），对齐 -check-file/-backup-file 普通对象 2 字段输入，可直喂补跑（不需要 ETag/Size：check-file 会 HEAD 重取，backup 中转也会 HEAD）。**owner 不写入** check_failed/mp_check_failed（文件输入模式不读 owner，输出走全局 root 不按 owner 分桶）。
 
 14. **统计字段命名**（display name / Go 字段）：`list_obj` (`ListedObjects`) / `list_mp` (`ListedMp`) / `list_all` (`ListedAll=list_obj+list_mp`) / `ok_obj` (`OkObjects`) / `corrupt_obj` (`CorruptedObjects`) / `ok_mp` (`OkMp`) / `corrupt_mp` (`CorruptedMp`) / `list_failed` (`ListFailed`) / `list_parse_failed` (`ListParseFailed`，mode=offset ETag 解析失败计数) / `check_failed` (`CheckFailed`) / `mp_check_failed` (`MpCheckFailed`) / `read` (`ReadLines`，文件输入模式的累计已读输入行数，每读一行 +1 含坏行；**不统计总行数**——预扫描整个输入文件不值得)。**关键语义**：`ok_mp` 只在 `multipart_check_mode!=0` 且通过分段检查时 +1；mode=0 时多段对象只计 `list_mp`，**不**计 `ok_mp`——未校验不能谎称干净（mode=1 的 list_parse_failed 回落对象同理只计 `list_mp`）。`is_check=false`（list-only）时 `ok_obj`/`corrupt_obj`/`ok_mp`/`corrupt_mp`/`check_failed`/`mp_check_failed`/`list_parse_failed` 全部为 0，summary 不输出这些字段。**无 `invalid_keys` 字段**——`invalid_keys.txt`/`InvalidKeys` 已整体移除（`\x1f`+转义让任何 key 都能往返，拦截成死代码）。**窗口化延迟**：`stats.listLatency *LatencyTracker`（latency.go）按 `latency_window_sec`（默认 60s）维护滑动窗口，每窗口重置；`AddListCall` 双写全局计数（`ListCalls`/`ListAvgLatencyMs`）与窗口（`ListLatencyAvgMs`/`ListLatencyMaxMs`）。summary 用全局 `list_avg_ms`，progress 默认分支用窗口 `latency_avg_ms`/`latency_max_ms`——长跑全局平均会被早期 spike 稀释、掩盖当前批次健康，窗口化暴露当前批次。
 
@@ -215,7 +215,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 | `corrupted_objects.txt` | 损坏普通对象 key | Range GET 命中 chunk-signature/trailer（`is_check=true`） |
 | `mp.txt` | 多段对象 key（仅 key） | `multipart_check_mode=0` 时所有多段对象；`-check-file` 时普通行 HEAD 判多段的漂移对象（无 offsets 不认干净）；`mode=segment + Size==0`（无法合成 offset）。`mode=offset` 的 ETag 解析失败**不**写 mp.txt（改写 list_parse_failed.txt） |
 | `corrupted_mp.txt` | 损坏多段对象 key | `multipart_check_mode=1/2` 或文件检查模式（-check-file）分段检查命中。mode=1 与文件输入模式行带 `bkt\|key\|partcnt\|off0\|off1\|...`（真实 part 边界，可直喂 -backup-file/-check-file）；mode=2 行 `bucket\x1f<escaped-key>` |
-| `ok_mp.txt` | 干净多段对象 key | `multipart_check_mode=1/2`（或文件检查模式）且 `is_multipart_success_log=true`，行 `bucket\x1f<escaped-key>` |
+| `ok_mp.txt` | 干净多段对象 key | `multipart_check_mode=1/2`（或文件检查模式）且 `is_multipart_success_log=true`，行格式同 `corrupted_mp.txt`：mode=1 与文件检查模式 `bkt\x1fkey\x1fpartcnt\x1foff0\x1f...`，mode=2 `bucket\x1f<escaped-key>` |
 | `ok_objects.txt` | 正常普通对象 key | `is_success_log=true` |
 
 ### 处理文件（全局，根目录 `<output_dir>/<filename>`）
@@ -240,7 +240,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 
 ### 结果文件行格式
 
-所有结果/处理文件统一用 `\x1f` 分隔、server 字段（key/prefix/token）`url.QueryEscape` 转义（见不变量 23）。per-owner 结果文件行格式 `bucket\x1f<escaped-key>`（bucket 来自 CLI 不转义）；`corrupted_mp.txt` 在 mode=1/文件输入模式带真实 offsets（`bkt\x1fkey\x1fpartcnt\x1foff0\x1f...`），mode=2 回落到 `bucket\x1f<escaped-key>`。处理文件（`list_failed`/`parse_failed`/`check_failed`/`mp_check_failed` 的 .txt 与 .log）按各自补跑链路需要的 `\x1f` 分隔格式写入：
+所有结果/处理文件统一用 `\x1f` 分隔、server 字段（key/prefix/token）`url.QueryEscape` 转义（见不变量 23）。per-owner 结果文件行格式 `bucket\x1f<escaped-key>`（bucket 来自 CLI 不转义）；`corrupted_mp.txt`、`ok_mp.txt` 在 mode=1/文件输入模式带真实 offsets（`bkt\x1fkey\x1fpartcnt\x1foff0\x1f...`），mode=2 回落到 `bucket\x1f<escaped-key>`。处理文件（`list_failed`/`parse_failed`/`check_failed`/`mp_check_failed` 的 .txt 与 .log）按各自补跑链路需要的 `\x1f` 分隔格式写入：
 - `list_failed.txt` = `prefix\x1ftoken`（token 为空时单字段 prefix）— `-resume-list` 解析此格式
 - `parse_failed.txt` = 原始输入行（整行，不切分）
 - `check_failed.txt` = `bkt\x1fkey` — 对齐 `-backup-file` 普通对象 2 字段输入
@@ -387,7 +387,7 @@ EOF
 |---|---|
 | `corrupted_objects.txt` | `testbucket\x1fcorrupted/corrupted.bin` |
 | `corrupted_mp.txt` | `testbucket\x1fmp/corrupt.bin\x1f2\x1f0\x1f5242880`（带 offsets，可直喂 -backup-file） |
-| `ok_mp.txt` / `ok_objects.txt` | `mp/clean.bin` / `file_01.bin` |
+| `ok_mp.txt` / `ok_objects.txt` | `testbucket\x1fmp/clean.bin\x1f2\x1f0\x1f5242880`（带 offsets）/ `file_01.bin` |
 | `mp.txt` | `testbucket\x1fmp/clean.bin`（漂移行：普通行 + HEAD 多段 → 无 offsets 不认干净） |
 | `check_failed.txt` | `testbucket\x1fno-such-key`（普通行 HEAD 404 按行型分流） |
 | `parse_failed.txt` | `testbucket\x1fbad\x1f1\x1f100` |

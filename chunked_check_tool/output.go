@@ -25,8 +25,8 @@ import (
 const rowSep = "\x1f"
 
 // ownerLine pairs the ownerID (drives per-owner output routing) with the
-// object key and, for corrupted_mp lines in offset mode and the file-input
-// mode, the object's part offsets (nil → render via renderLineFmt).
+// object key and, for corrupted_mp and ok_mp lines in offset mode and the
+// file-input mode, the object's part offsets (nil → render via renderLineFmt).
 type ownerLine struct {
 	ownerID string
 	key     string
@@ -34,8 +34,8 @@ type ownerLine struct {
 }
 
 // ownerRenderer renders one ownerLine to w. Per-owner result files use
-// renderLineFmt (bucket\x1f<escaped-key>); corrupted_mp in offset mode and
-// the file-input mode uses renderMultipartOffsets (bucket\x1fkey\x1fpartcnt\x1foff0|...).
+// renderLineFmt (bucket\x1f<escaped-key>); corrupted_mp and ok_mp in offset
+// mode and the file-input mode use renderMultipartOffsets (bucket\x1fkey\x1fpartcnt\x1foff0|...).
 type ownerRenderer func(w io.Writer, bucket string, ol ownerLine)
 
 // FileInputMode tells NewOutput which file-input mode (if any) is running,
@@ -125,11 +125,11 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 	}
 	isCheck := cfg.IsCheck
 	mpOutputs := cfg.MultipartCheckMode != MultipartCheckModeOff || fileInput != FileInputNone
-	// corrupted_mp lines carry partcnt+offsets when the offsets are real
-	// part boundaries: offset mode (etag-derived) and the file-input modes
-	// (input file carries them). Segment mode offsets are synthetic [0, seg,
-	// 2*seg, ...] guesses and must NOT be written as if they were part
-	// boundaries.
+	// corrupted_mp and ok_mp lines carry partcnt+offsets when the offsets are
+	// real part boundaries: offset mode (etag-derived) and the file-input
+	// mode (the input line carries them). Segment mode offsets are synthetic
+	// [0, seg, 2*seg, ...] guesses and must NOT be written as if they were
+	// part boundaries.
 	mpOffsetLines := cfg.MultipartCheckMode == MultipartCheckModeOffset || fileInput != FileInputNone
 	// mp.txt gating:
 	//   - mode=off writes every multipart here.
@@ -205,17 +205,17 @@ func NewOutput(cfg *Config, bucket string, fileInput FileInputMode) (*Output, er
 			return nil, err
 		}
 	}
+	mpRender := o.renderLineFmt
+	if mpOffsetLines {
+		mpRender = o.renderMultipartOffsets
+	}
 	if o.corruptedMultipartEnabled {
-		render := o.renderLineFmt
-		if mpOffsetLines {
-			render = o.renderMultipartOffsets
-		}
-		if err := o.openAndStartOwner("corrupted_mp.txt", o.corruptedMultipartCh, render); err != nil {
+		if err := o.openAndStartOwner("corrupted_mp.txt", o.corruptedMultipartCh, mpRender); err != nil {
 			return nil, err
 		}
 	}
 	if o.multipartOkEnabled {
-		if err := o.openAndStartOwner("ok_mp.txt", o.multipartOkCh, o.renderLineFmt); err != nil {
+		if err := o.openAndStartOwner("ok_mp.txt", o.multipartOkCh, mpRender); err != nil {
 			return nil, err
 		}
 	}
@@ -667,9 +667,14 @@ func (o *Output) WriteMultipartAll(ownerID, key string) {
 		o.multipartAllCh <- ownerLine{ownerID, key, nil}
 	}
 }
-func (o *Output) WriteMultipartOk(ownerID, key string) {
+
+// WriteMultipartOk records a multipart object that passed its per-part
+// check. offsets are the part boundaries the probes ran at; the ok_mp
+// renderer writes them in offset mode and the file-input mode (real part
+// boundaries), and omits them otherwise.
+func (o *Output) WriteMultipartOk(ownerID, key string, offsets []int64) {
 	if o.multipartOkEnabled {
-		o.multipartOkCh <- ownerLine{ownerID, key, nil}
+		o.multipartOkCh <- ownerLine{ownerID, key, offsets}
 	}
 }
 func (o *Output) WriteSuccess(ownerID, key string) {

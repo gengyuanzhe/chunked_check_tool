@@ -219,7 +219,7 @@ func (c *Checker) verify(task VerifyTask) {
 	case probeClean:
 		if task.IsMultipart {
 			if c.cfg.IsMultipartSuccessLog {
-				c.out.WriteMultipartOk(task.OwnerID, task.Key)
+				c.out.WriteMultipartOk(task.OwnerID, task.Key, task.Offsets)
 			}
 			c.stats.IncrOkMp()
 		} else {

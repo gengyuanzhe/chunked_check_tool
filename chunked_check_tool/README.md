@@ -127,7 +127,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 
 - 每行先 HEAD 填充 ETag/Size；**HEAD ETag 是权威判型**（输入行描述的是上一轮检查时的对象，期间可能被覆盖）：
   - HEAD 普通 → 按 head+tail 探测（行内 offsets 忽略）→ `corrupted_objects.txt` / `ok_objects.txt` / `check_failed.txt`
-  - HEAD 多段 + 行有 offsets → 每 part offset 一次探测 → `corrupted_mp.txt`（带 offsets）/ `ok_mp.txt` / `mp_check_failed.txt`
+  - HEAD 多段 + 行有 offsets → 每 part offset 一次探测 → `corrupted_mp.txt`（带 offsets）/ `ok_mp.txt`（带 offsets）/ `mp_check_failed.txt`
   - HEAD 多段 + 行无 offsets（普通行漂移成多段）→ 写 `mp.txt` 不认干净（无边界无法逐段验证）
 - HEAD 失败按**行声明的类型**分流：普通行 → `check_failed.txt`（`bkt\x1fkey`）；多段行 → `mp_check_failed.txt`（保留 offsets）——两个文件都可再喂回本模式循环重试
 - 无 S3 LIST，无需配 `multipart_check_mode`（offsets 来自输入行）；结果文件落在 `_unknown/` 子目录（行内无 owner）
@@ -194,7 +194,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
     ├── ok_objects.txt          # 正常普通对象 key（is_success_log=true 时）
     ├── mp.txt                  # 多段对象 key（multipart_check_mode=0 时全部多段；-check-file 时普通行 HEAD 判多段的漂移对象）
     ├── corrupted_mp.txt        # 损坏多段对象 key（分段检查命中）
-    └── ok_mp.txt               # 干净多段对象 key（is_multipart_success_log=true 时）
+    └── ok_mp.txt               # 干净多段对象（is_multipart_success_log=true 时）；行格式同 corrupted_mp.txt：multipart_check_mode=1 与 -check-file 带 partcnt+offsets，mode=2 只有 key
 ```
 
 > **行分隔与转义**：所有 `bkt|key|partcnt|off...` 形式的行格式实际用 ASCII Unit Separator `\x1f`（`<US>`）作字段分隔——S3 key 可合法包含 `|`，旧 pipe 分隔会静默错切。Server 字段（key/prefix/token）写入文件时 `url.QueryEscape` 转义，读取侧 `QueryUnescape` 还原；含 `\x1f`、`%`、`+`、`/` 的 key 都能逐字节往返。bucket 字段来自 CLI，不转义；partcnt 与 offsets 是纯数字，不转义；owner 非空时为 `[a-z0-9]+`，不转义。
