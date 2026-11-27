@@ -51,7 +51,7 @@ endpoints:              # ip:port 列表，至少 1 个
 scheme: http            # http 或 https（https 时忽略证书校验）；默认 http
 ak: <access-key>
 sk: <secret-key>
-list_type: 2            # 1=子目录+平铺 nextmarker, 2=递归 BFS delimiter, 3=递归+信号量
+list_type: 2            # 1=子目录+平铺 nextmarker, 2=递归 BFS delimiter
 list_concurrency: 8     # 列举并发度
 check_concurrency: 16   # 校验并发度
 output_dir: ./out       # 默认当前目录

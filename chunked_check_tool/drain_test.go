@@ -1,9 +1,8 @@
 // drain_test.go — tests for the two-stage shutdown / graceful-drain design:
 // Queue.Drain, drainQueuedPrefixes seed round-tripping, the lister's
 // graceful (next-page cursor) and hard (current-page cursor) abort
-// recordings, the walker's never-started prefix recording, and the run-level
-// integration (pre-cancelled listCtx → seeds land in list_failed, run
-// returns errInterrupted).
+// recordings, and the run-level integration (pre-cancelled listCtx → seeds
+// land in list_failed, run returns errInterrupted).
 package main
 
 import (
@@ -227,45 +226,6 @@ func TestListerHardAbortMidPageRecordsCurrentPageToken(t *testing.T) {
 	}
 }
 
-// TestWalkerCancelledBeforeStartRecordsPrefix — a Mode 3 walk that never
-// started (listCtx already cancelled) records the bare prefix: nothing under
-// it was listed, so the resume must re-list it whole.
-func TestWalkerCancelledBeforeStartRecordsPrefix(t *testing.T) {
-	dir := t.TempDir()
-	cfg := &Config{OutputDir: dir, ListType: 3, ListConcurrency: 2, IsCheck: true}
-	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
-	stats := NewStats()
-
-	listCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	fake := &drainFake{
-		scriptedS3: &scriptedS3{pages: map[string][]pageResult{
-			"root/": {{objs: []ObjectInfo{{Key: "root/a", ETag: "0123456789abcdef0123456789abcdef"}}}},
-		}},
-		listCtx: listCtx,
-	}
-
-	objCh := make(chan VerifyTask, 1)
-	runRecursiveWalk(listCtx, context.Background(), fake, "root/", objCh, out, stats, cfg, nil)
-	if err := out.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dir, "list_failed.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := string(data), "root%2F\n"; got != want {
-		t.Errorf("list_failed.txt = %q, want %q", got, want)
-	}
-	if got := stats.Snapshot().ListFailed; got != 1 {
-		t.Errorf("ListFailed = %d, want 1", got)
-	}
-	if len(objCh) != 0 {
-		t.Errorf("objCh = %d tasks, want 0 (nothing listed)", len(objCh))
-	}
-}
-
 // TestRunInterruptedDrainsQueue — run() with an already-cancelled listCtx:
 // whichever way the race resolves (a worker pops the seed and its ListPage
 // fails, or the seed stays queued and the closer goroutine drains it), the
@@ -306,4 +266,18 @@ func TestRunInterruptedDrainsQueue(t *testing.T) {
 	if !strings.Contains(buf.String(), "list_failed: 1") {
 		t.Errorf("summary missing list_failed: 1\nfull:\n%s", buf.String())
 	}
+}
+
+// waitFor polls cond until it returns true or the timeout elapses. Shared by
+// drain/journal tests that need to assert on async writer-goroutine output.
+func waitFor(t *testing.T, cond func() bool, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("waitFor: condition not met within timeout")
 }

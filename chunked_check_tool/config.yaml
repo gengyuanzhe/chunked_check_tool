@@ -17,7 +17,7 @@ scheme: http
 ak: <access-key>
 sk: <secret-key>
 
-# 列举模式：1=子目录+平铺 nextmarker, 2=递归 BFS delimiter（默认）, 3=递归+信号量
+# 列举模式：1=子目录+平铺 nextmarker, 2=递归 BFS delimiter（默认）
 list_type: 2
 
 # ListObjects API 版本：1=V1（marker 分页，默认）, 2=V2（continuation token）

@@ -66,12 +66,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: -list-file / -check-file require -c config with is_check=true")
 		os.Exit(2)
 	}
-	// -resume-list is list_type=2 only — Modes 1/3 have different pagination
-	// shapes (Mode 1 mixes a delimiter'd root loop with flat sub-prefix
-	// listings and the line format cannot say which loop a cursor belongs
-	// to; Mode 3's recursive walk exposes no per-prefix cursor). Listing
-	// failures under Mode 1/3 are retried by re-running the original scan
-	// (idempotent; the cross-run union absorbs duplicates).
+	// -resume-list is list_type=2 only — Mode 1 mixes a delimiter'd root
+	// loop with flat sub-prefix listings and the line format cannot say
+	// which loop a cursor belongs to. Listing failures under Mode 1 are
+	// retried by re-running the original scan (idempotent; the cross-run
+	// union absorbs duplicates).
 	if (*resumeList != "" || *resumeJournal != "") && cfg.ListType != 2 {
 		fmt.Fprintln(os.Stderr, "usage: -resume-list / -resume-journal require list_type=2 (BFS)")
 		os.Exit(2)
@@ -421,19 +420,14 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 	}
 
 	// Spawn list workers. They block on the queue until seeds arrive.
-	// Mode 3 skips this pool — it drives enumeration via runRecursiveWalk
-	// (see seeding section below), which caps concurrency with a semaphore
-	// instead of a fixed worker count.
 	var listWg sync.WaitGroup
 	listStart := time.Now()
-	if cfg.ListType != 3 {
-		for i := 0; i < cfg.ListConcurrency; i++ {
-			listWg.Add(1)
-			workerS3 := newWorker(pool, i, cfg, bucket, stats, debugLogger, listLogger)
-			lc := &localCounter{interval: cfg.ProgressInterval, printer: printer}
-			onObject := func() { lc.incr(stats, "listed") }
-			go lister.Run(listCtx, hardCtx, &listWg, objCh, i, workerS3, onObject)
-		}
+	for i := 0; i < cfg.ListConcurrency; i++ {
+		listWg.Add(1)
+		workerS3 := newWorker(pool, i, cfg, bucket, stats, debugLogger, listLogger)
+		lc := &localCounter{interval: cfg.ProgressInterval, printer: printer}
+		onObject := func() { lc.incr(stats, "listed") }
+		go lister.Run(listCtx, hardCtx, &listWg, objCh, i, workerS3, onObject)
 	}
 
 	// Seeding.
@@ -500,17 +494,6 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 			}
 			continuationToken = next
 		}
-	} else if cfg.ListType == 3 {
-		// Mode 3: recursive semaphore-bounded walk from the root. No queue,
-		// no list worker pool — one goroutine drives the walk and closes
-		// objCh when done. -nextmarker is ignored (same limitation as Mode 2).
-		walkS3 := newWorker(pool, cfg.ListConcurrency, cfg, bucket, stats, debugLogger, listLogger)
-		go func() {
-			runRecursiveWalk(listCtx, hardCtx, walkS3, prefix, objCh, out, stats, cfg, nil)
-			close(objCh)
-			stats.SetListDuration(time.Since(listStart))
-		}()
-		seeded = true
 	} else if resumeJournal != "" {
 		// Mode 2 + -resume-journal: replay the killed run's journal and seed
 		// the un-done frontier — done prefixes skipped, cursor entries
@@ -556,16 +539,13 @@ func run(listCtx, hardCtx context.Context, cfg *Config, bucket, prefix, startAft
 
 	// Close objCh once all list workers are done. On an interrupt, the
 	// never-started prefixes still queued are recorded to list_failed first
-	// (each with its resume cursor where one exists). Mode 3 closes objCh
-	// itself in the walk goroutine above, so skip this branch.
-	if cfg.ListType != 3 {
-		go func() {
-			listWg.Wait()
-			drainQueuedPrefixes(listCtx, q, out, stats)
-			close(objCh)
-			stats.SetListDuration(time.Since(listStart))
-		}()
-	}
+	// (each with its resume cursor where one exists).
+	go func() {
+		listWg.Wait()
+		drainQueuedPrefixes(listCtx, q, out, stats)
+		close(objCh)
+		stats.SetListDuration(time.Since(listStart))
+	}()
 
 	if cfg.IsCheck {
 		checkWg.Wait()

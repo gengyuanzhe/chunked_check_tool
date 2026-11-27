@@ -60,7 +60,7 @@ endpoints:
 scheme: http                        # http 或 https（后者忽略证书校验）
 ak: <access-key>
 sk: <secret-key>
-list_type: 2                        # 1=子目录+平铺 nextmarker, 2=递归 BFS delimiter, 3=递归+信号量
+list_type: 2                        # 1=子目录+平铺 nextmarker, 2=递归 BFS delimiter
 list_api_version: 1                 # 1=ListObjects V1 (marker 分页, 默认), 2=ListObjectsV2 (continuation token)
 list_concurrency: 8                 # 列举并发度
 check_concurrency: 16               # 检查并发度
@@ -90,9 +90,9 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `endpoints` | 必填 | S3 节点 ip:port 列表，至少 1 个 |
 | `scheme` | `http` | `https` 时跳过 TLS 证书校验 |
 | `ak` / `sk` | 必填 | 访问凭证（SigV4 静态凭证） |
-| `list_type` | `2` | 1=子目录+平铺 nextmarker, 2=递归 BFS delimiter, 3=递归+信号量 |
+| `list_type` | `2` | 1=子目录+平铺 nextmarker, 2=递归 BFS delimiter |
 | `list_api_version` | `1` | 1=ListObjects V1（marker 分页），2=ListObjectsV2（continuation token） |
-| `list_concurrency` | `8` | 列举 worker 数（Mode 3 为信号量容量） |
+| `list_concurrency` | `8` | 列举 worker 数 |
 | `check_concurrency` | `16` | 校验 worker 数 |
 | `output_dir` | `.` | 输出目录（自动创建） |
 | `output_dir_timestamp` | `true` | `true` 时在目录名后追加 `<YYYYMMDD_HHMMSS>` 后缀（`./out` → `./out_20260908_175201`），每次运行互不混写；`false` 时固定使用 `output_dir` 原样路径（断点续跑请显式设 `false`，否则每次重启进入新目录）。同时作用于 `backup_output_dir` |
@@ -229,7 +229,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `list_parse_failed.txt` | mode=offset 多段 ETag 解析失败（服务端未返回 `internal-list-mp-offset` 或 ETag 格式不合法） | 否 | 人工补 part 边界后走 `-check-file`/`-backup-file`（也可直喂 `-check-file` 重查当前状态） |
 | `mp.txt` | 未验证多段（mode=0/2、`-check-file` 时普通行 HEAD 判多段的漂移对象） | 否 | 人工补 part 边界后走 `-check-file`/`-backup-file` |
 
-`list_failed.txt` 行格式 `prefix\x1ftoken`：token 是失败页的 continuationToken（V1 是上一页最后一个 key，V2 是服务端返回的不透明 token）。第一页就失败或该 prefix 从未启动时 token 为空，整行就是单字段 `prefix`。补跑时 `-resume-list` 读这些行，把 `(prefix, token)` 作为初始状态 seed 进 BFS 队列，`processPrefix` 从该 token 续页，避免重复枚举已成功的前几页。**仅 Mode 2 支持**——Mode 1 的根/子前缀游标语义不可区分、Mode 3 递归无游标，这两类的列举失败重试 = 原命令重跑（幂等，跨轮并集吸收重复）。
+`list_failed.txt` 行格式 `prefix\x1ftoken`：token 是失败页的 continuationToken（V1 是上一页最后一个 key，V2 是服务端返回的不透明 token）。第一页就失败或该 prefix 从未启动时 token 为空，整行就是单字段 `prefix`。补跑时 `-resume-list` 读这些行，把 `(prefix, token)` 作为初始状态 seed 进 BFS 队列，`processPrefix` 从该 token 续页，避免重复枚举已成功的前几页。**仅 Mode 2 支持**——Mode 1 的根/子前缀游标语义不可区分，其列举失败重试 = 原命令重跑（幂等，跨轮并集吸收重复）。
 
 ### 信号与断点续传（两段式）
 
