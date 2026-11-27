@@ -128,14 +128,14 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 19. **失败文件即断点，不拦截信号**（断点续传的总体设计；设计文档 `docs/superpowers/specs/2026-11-27-remove-signal-handling-design.md`）：
   - **架构原则**：不做 per-object done-set（十亿级对象的逐对象记账是写放大灾难；probe 幂等；LIST 天然带 continuation token；append-only 文件 + 每轮新时间戳目录构成检查点。例外：Mode 2 的**页级** journal——1 行/1000 对象，见不变量 21）。**每个失败文件有且仅有一个补跑入口**：`list_failed.txt` → `-resume-list`（仅 Mode 2；Mode 1 根/子前缀游标语义在行内不可区分——其列举失败重试 = 原命令重跑，union 吸收重复）；`check_failed.txt`/`mp_check_failed.txt`/`mismatch.txt` → `-check-file`（循环喂回至收敛）；`list_parse_failed.txt` → 人工补 offsets（行格式 `bucket\x1fkey` 对齐 check_failed.txt，但喂回 `-check-file` 只会落到 `mp.txt`——HEAD 不带分段边界）；`backup_failed.txt` → `-backup-file` 自喂；`parse_failed.txt` → 人工；`mp.txt` → 人工补 offsets。跨轮逻辑结果 = 各 run 目录并集（`sort -u` 去重），收敛判据 = 最新一轮失败文件为空。
   - **进程不拦截任何信号**：没有 `signal.Notify`，Ctrl-C / kill / kill -9 效果相同——立即终止，不执行任何收尾代码（不刷输出缓冲、不写 journal 的最终检查点、不打印汇总）。没有“优雅停机”这一档；续跑能力只来自两样：Mode 2 的 `journal.txt` 快照，和文件输入模式的结果文件。
-  - **被杀之后怎么续跑**：Mode 2 扫描由 journal 兜底（不变量 21）——损失 ≤ 一个 checkpoint 间隔（默认 10 分钟工作量），恢复入口 `-resume-journal`；Mode 1 与文件输入模式是"未处理部分无记录"：Mode 1 的补救 = 原命令重跑（幂等 + union）；文件输入模式（`-check-file` / `-backup-file`）用结果文件按 key 求差集得到重跑输入（§7.4）。已写管线的尾部丢失由 writer 周期 Flush 兜底（`outputFlushInterval`=3s，见 §6）：被杀时每文件最多丢最后 ≤3s 的行，末行可能是半行（含失败文件即补跑输入本身）。无 fsync：write() 落 page cache 即扛进程死，fsync 只防整机断电（另一级耐久性，不需要）。
+  - **被杀之后怎么续跑**：Mode 2 扫描由 journal 兜底（不变量 21）——损失 ≤ 一个 checkpoint 间隔（`journal_checkpoint_interval_sec`，默认 600 秒的工作量），恢复入口 `-resume-journal`；Mode 1 与文件输入模式是"未处理部分无记录"：Mode 1 的补救 = 原命令重跑（幂等 + union）；文件输入模式（`-check-file` / `-backup-file`）用结果文件按 key 求差集得到重跑输入（§7.4）。已写管线的尾部丢失由 writer 周期 Flush 兜底（`outputFlushInterval`=3s，见 §6）：被杀时每文件最多丢最后 ≤3s 的行，末行可能是半行（含失败文件即补跑输入本身）。无 fsync：write() 落 page cache 即扛进程死，fsync 只防整机断电（另一级耐久性，不需要）。
 
 20. **Mode 2 journal：kill -9 断点续跑**（`journal.go`，spec `docs/superpowers/specs/2026-11-05-resume-journal-design.md`）：
   - **启用条件**：`list_type=2 ∧ 文件输入=无`——全新扫描、`-resume-list` 恢复轮、`-resume-journal` 恢复轮都记账（`-resume-list` 轮同样长跑、同样会被 kill）。`journal.txt` 落输出目录根，append-only；恢复后写新时间戳目录的新 journal。
   - **三行格式**（`\x1f` 分隔，server 字段 `QueryEscape` 转义——单版本策略，旧 `|` 格式不可读）：`discovered\x1f<prefix>` / `cursor\x1f<prefix>\x1f<token>` / `done\x1f<prefix>`。解析规则：discovered/done 的 prefix = `QueryUnescape` 余量；cursor 在余量按 `\x1f` 切分两个字段各 `QueryUnescape`（含 `|`/`\n` 的 token 也能逐字节往返）；重放取每 prefix 最后一条事件；末尾无换行的残行丢弃（kill 撕裂批次，安全方向）；其他坏行报错（机器写的文件，中间坏 = 真损坏）。
   - **"完成"的语义**（正确性核心）：prefix 的某页"完成" = 该页**全部**对象的结果行已推入输出 channel——不是"列举过"、不是"发射过"。页的待终态计数在 `ListPage` 成功时按 `len(objs)` **整页一次性登记**（只上报了一部分对象时该页永远不算完成 → 水位停在它前面）；`Terminal` 由 checker `Handle` 的 **defer** 上报（体 = 结果行已推 channel）；list-only 分类即终态。
   - **顺序不变量**（违反任意一条 = 覆盖漏洞）：① `AddDiscovered` 必须先于该页任何对象发射（否则"父页已终态、子前缀未记账"可同框快照，子树蒸发）；② checkpoint 固定顺序 = **快照 tracker → `Output.FlushAndWait` → 写批次（discovered 行在 cursor/done 行前；写短了回滚到批次前偏移，防撕裂残行被下批嫁接）→ Commit**——先快照后 flush 的因果：Terminal 在行推入 channel 之后才计数，快照里的每个终态的行必在该次 flush 覆盖内；③ `journalRun.Stop()`（同步等最终 checkpoint 完成）必须在 `out.Close()` **之前**——FlushAndWait 依赖 writer goroutine 存活。
-  - **checkpoint 时机**：种子落盘靠 **seeding 完成后立即触发的同步 checkpoint**（`JournalRunner.CheckpointNow`，main 在 seeding 分支链结束后调用）——checkpoint 循环先于 seeding 启动，其启动首检时刻 tracker 必为空；种子必须靠显式触发而非等首个 tick（否则头 10 分钟内 kill = 空 journal 不可恢复）。此后每 `journalCheckpointInterval`（10min 常量、包级 var）一次，ctx 取消时终检一次；环境变量 `JOURNAL_INTERVAL_SEC`（正整数秒，非法值启动报错）是 §7.5 烟囱专用覆盖杠杆——本地 minio 秒级跑完等不到首 tick。游标行按 `\x1f` 切分两个 `QueryEscape` 字段，V1 的 NextMarker 是真实 key 可能含 `|`/`\n`——转义让它们也能逐字节往返。恢复入口 `-resume-journal`：done 跳过、cursor 用 `SeedWithToken` 续、仅 discovered 裸列；**与 `-prefix` 互斥**（journal 即 scope）；空 journal 报错提示用原命令重跑（CheckpointNow 之后仍空 = 路径错/手工清空）。
+  - **checkpoint 时机**：种子落盘靠 **seeding 完成后立即触发的同步 checkpoint**（`JournalRunner.CheckpointNow`，main 在 seeding 分支链结束后调用）——checkpoint 循环先于 seeding 启动，其启动首检时刻 tracker 必为空；种子必须靠显式触发而非等首个 tick（否则头一个间隔内 kill = 空 journal 不可恢复）。此后每 `journal_checkpoint_interval_sec` 秒一次（配置项，默认 600；负数启动报错），ctx 取消时终检一次。环境变量 `JOURNAL_INTERVAL_SEC`（正整数秒，非法值启动报错）设置时覆盖该配置项，是 §7.5 烟囱专用的开关——本地 minio 秒级跑完等不到首 tick。间隔由 `resolveJournalInterval` 解析，作为参数传给 `StartJournalCheckpoints`；没有包级变量，测试直接传入自己要的间隔。游标行按 `\x1f` 切分两个 `QueryEscape` 字段，V1 的 NextMarker 是真实 key 可能含 `|`/`\n`——转义让它们也能逐字节往返。恢复入口 `-resume-journal`：done 跳过、cursor 用 `SeedWithToken` 续、仅 discovered 裸列；**与 `-prefix` 互斥**（journal 即 scope）；空 journal 报错提示用原命令重跑（CheckpointNow 之后仍空 = 路径错/手工清空）。
   - **内存**：Commit 后 done 前缀从内存 map 删除、水位以下簿记丢弃（journal 文件是权威全量）——活跃内存 = 一个周期的增量 + in-flight，不随桶规模增长。
   - **验收标准**：任何出错/竞态的后果只能是"恢复时多做工作"，不允许"有对象漏检"——单测钉死：`TestTrackerFrozenOnPartialPage`、`TestCheckpointOrderAndDurability`、`TestJournalResumeRoundTrip`、`TestSnapshotEmitsCursorWithPipeOrNewlineToken`（含 `|`/`\n` 的 token 往返）；端到端冒烟见 §7.5（kill -9 → 三态 journal → 续跑 → 并集完备性，2026-11-05 实跑通过）。
 
@@ -198,6 +198,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 | `node_recover_probe_interval` | `60` | 隔离节点恢复探测间隔（秒）。后台 goroutine 每隔该值对隔离节点 HEAD bucket，连续 2 次健康（`!isNodeFaultErr`，即任何正常 S3 应答）→ 恢复进轮询池并清零故障计数；`0`=禁用恢复（隔离在进程内永久，旧行为） |
 | `dial_timeout` | `10` | 单次 TCP 建连超时（秒）。建连阶段（SYN→SYN-ACK→ACK）上限。黑洞 IP（不路由、不回 RST）OS 默认 SYN 重试 ~75s（macOS）/ ~127s（Linux），默认 10s 兜底；`0`=Go net/http 默认（无超时，走 OS 默认）。负值启动报错。只控制建连阶段，不影响已建立连接上的请求/响应传输。所有 s3 client（含 `noderecovery.probeNode`）共用 |
 | `response_header_timeout` | `0` | 等服务端响应头超时（秒）。请求发出后等 HTTP 响应头（status line + headers）的上限，不含响应体传输。服务端 accept 了 TCP 但进程挂死不响应时，这是唯一能检测的兜底。默认 `0` 不兜底（Go net/http 默认 = 无超时），用户遇到挂死服务端时显式配。负值启动报错 |
+| `journal_checkpoint_interval_sec` | `600` | journal 快照间隔（秒）。`list_type=2` 扫描每隔该值把扫描进度写一次 `journal.txt`，被 kill -9 后最多重做一个间隔的进度（不变量 20）。调小更安全，写盘更频繁。负值启动报错。环境变量 `JOURNAL_INTERVAL_SEC` 设置时覆盖它（烟囱测试用） |
 | `progress_interval` | `5000` | 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；`0` 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；`0` 走默认 |
@@ -232,7 +233,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 | `backup_failed.txt` | 备份失败的原始输入行（可自喂重试） | `-backup-file`：HEAD 失败（stage=head）/中转失败（stage=upload）/ETag 终验失败（stage=etag，坏副本保留） |
 | `backup_failed.log` | 备份失败结构化错误（stage/head→upload→etag） | 同上 |
 | `mismatch.txt` | 输入类型校验失败的原始行（对象在检查后被改写） | `-backup-file`：行声明类型与 HEAD 判型不一致；可直喂 `-check-file` 重查当前状态 |
-| `journal.txt` | Mode 2 扫描进度三行格式：`discovered\x1f<prefix>` / `cursor\x1f<prefix>\x1f<token>` / `done\x1f<prefix>`（append-only，每 10 分钟 checkpoint 批次，批内 discovered 行先于 cursor/done；server 字段 `QueryEscape` 转义） | `list_type=2 ∧ 非文件输入`的运行（含 -resume-list/-resume-journal 恢复轮）；恢复 = `-resume-journal` 直喂，重放取每 prefix 最后一条；详见 §4.21 |
+| `journal.txt` | Mode 2 扫描进度三行格式：`discovered\x1f<prefix>` / `cursor\x1f<prefix>\x1f<token>` / `done\x1f<prefix>`（append-only，每 `journal_checkpoint_interval_sec` 秒一批 checkpoint（默认 600），批内 discovered 行先于 cursor/done；server 字段 `QueryEscape` 转义） | `list_type=2 ∧ 非文件输入`的运行（含 -resume-list/-resume-journal 恢复轮）；恢复 = `-resume-journal` 直喂，重放取每 prefix 最后一条；详见 §4.21 |
 
 `is_check=false` 时不校验普通对象，不写任何对象文件，不创建 owner 目录，仅写 `list_failed.*`。`is_check=true && multipart_check_mode=0`（非文件检查模式）时 `corrupted_mp.txt` / `ok_mp.txt` / `mp_check_failed.*` 不创建。文件输入模式的 owner 恒为空 → 结果全落 `_unknown/`。
 
@@ -540,8 +541,9 @@ join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
 #   —— mc cp --recursive . 会把 "." 目录本身嵌一层，实际键为 000multi/000multi/obj_*，无碍
 # cfg 需 is_check: true + is_success_log: true（完备性并集要 ok_objects.txt 的逐对象行）
 
-# 本地 minio 太快，10 分钟首 tick 永远等不到：JOURNAL_INTERVAL_SEC=1 缩短 checkpoint 间隔
-# （烟囱专用环境变量，非法值启动报错；不设 = 默认 10 分钟）
+# 本地 minio 太快，默认 600 秒的首个 tick 永远等不到：把 cfg-kill.yaml 的
+# journal_checkpoint_interval_sec 设为 1；或者像下面这样用环境变量 JOURNAL_INTERVAL_SEC=1
+# 临时覆盖（非法值启动报错；都不设 = 默认 600 秒）
 JOURNAL_INTERVAL_SEC=1 /tmp/chunked_check_tool -c cfg-kill.yaml -bkt testbucket > /tmp/chunked-e2e/kill.log 2>&1 &
 PID=$!; sleep 3; kill -9 $PID; wait $PID; echo "exit=$?"    # 期望 137
 
@@ -566,7 +568,7 @@ diff union.txt mckeys.txt      # 期望空（有 mp.txt 的配置把它也并进
 
 期望（实跑值）：
 
-- kill -9 退出码 137；journal 非空三态混合（实测 5 done + 8 discovered + 2 cursor；cursor 同前缀每 tick 重发一行，重放取最后一条）；不设 `JOURNAL_INTERVAL_SEC` 时 kill 落在首 tick 前则 journal 只有种子行（`CheckpointNow` 保证非空）——恢复退化为整轮重扫，损失 ≤ 一个间隔，设计内
+- kill -9 退出码 137；journal 非空三态混合（实测 5 done + 8 discovered + 2 cursor；cursor 同前缀每 tick 重发一行，重放取最后一条）；间隔保持默认 600 秒时 kill 落在首 tick 前则 journal 只有种子行（`CheckpointNow` 保证非空）——恢复退化为整轮重扫，损失 ≤ 一个间隔，设计内
 - 续跑轮 summary `list_failed: 0`；**完备性判据 = 两轮对象结果行（撕裂尾行丢弃后）去重并集 == `mc ls` 键集**（实测 17,006 == 17,006，diff 空）。**不要用"两轮 `list_all` 求和 == mc 数"**：恢复轮重列在途页会双计（实测两轮结果行 19,396 行，重叠 2,390）——这是 journal"冻结在半页前、恢复重列整页"设计的必然副作用
 - 数学自洽断言：续跑 `list_all` = 总对象数 −（cursor 前已终态页的对象数 + done 前缀的对象数）（实测 13,005 = 17,006 − 4,000 − 1）
 - done 跳过抽验：done 前缀的对象不出现在续跑轮任何输出文件（实测 corrupted/corrupted.bin）；cursor 续列抽验：撕裂行所属对象（如 obj_6391）出现在续跑轮 ok_objects.txt
@@ -591,7 +593,7 @@ diff union.txt mckeys.txt      # 期望空（有 mp.txt 的配置把它也并进
 - **M1（已解决 2026-11-24）：key 含 `\n` 或 `|` 破坏 journal 行格式**：已用 `\x1f` 分隔 + `QueryEscape`/`QueryUnescape` 转义统一解决（全工具规则，见不变量 23），`TestSnapshotEmitsCursorWithPipeOrNewlineToken` 是回归钉。
 - **N1：`FlushAndWait` 在 `out.Close()` 之后调用会永久阻塞**：写手 goroutine 已退出、flush 请求无人应答。现有接线不可达：不变量 ③（`journalRun.Stop()` 先于 `out.Close()`）锁死时序。**修复触发条件**：未来有人改动关停顺序或新增 FlushAndWait 调用点时，顺手加"Close 后返回而非阻塞"守卫。
 - **N2：journal.go 内存注释措辞过头**："不随桶规模增长"的精确说法是上限 = 一个 checkpoint 间隔内新发现的前缀量（发现速率 × 间隔），极端发现速率下也会不小。**修复触发条件**：下次改 journal.go 时顺带改一行注释，无需单独动。
-- **N3：测试直接改写包级 `journalCheckpointInterval` 的恢复纪律**：测试改小该变量观察 tick、靠 defer 恢复；Go 同包测试默认串行所以今天踩不到，但与 `t.Parallel()` 不兼容。**修复触发条件**：有测试要加 `t.Parallel()` 时，先把该变量改为 per-test 注入。
+- **N3（已解决 2026-11-27）：测试直接改写包级 `journalCheckpointInterval` 的恢复纪律**：快照间隔改为配置项后，`resolveJournalInterval` 解析出的间隔作为参数传给 checkpoint 循环，测试直接传入自己要的间隔。包级变量已删除，不再妨碍 `t.Parallel()`。
 
 ## 9. 工作流约定
 

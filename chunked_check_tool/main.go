@@ -144,6 +144,7 @@ func printConfig(w io.Writer, cfgPath string, cfg *Config, bucket, prefix, start
 	fmt.Fprintf(w, "    encoding_type_url: %t\n", cfg.EncodingTypeURL)
 	fmt.Fprintf(w, "    debug_log: %t\n", cfg.DebugLog)
 	fmt.Fprintf(w, "    latency_window_sec: %d\n", cfg.LatencyWindowSec)
+	fmt.Fprintf(w, "    journal_checkpoint_interval_sec: %d\n", cfg.JournalCheckpointIntervalSec)
 	fmt.Fprintf(w, "    obj_ch_capacity: %d\n", cfg.ObjChCapacity)
 	fmt.Fprintf(w, "    output_ch_capacity: %d\n", cfg.OutputChCapacity)
 	fmt.Fprintf(w, "    run_log: %s\n", runLogPath)
@@ -189,15 +190,17 @@ func run(cfg *Config, bucket, prefix, startAfter, checkFile, backupFile, resumeL
 	pool := NewNodePool(cfg)
 	startNodeRecovery(context.Background(), pool, cfg, bucket)
 
-	// Journal interval env override (smoke runbook lever — see
-	// journalIntervalFromEnv). Resolved before anything starts so a bad
+	// Journal checkpoint interval: journal_checkpoint_interval_sec, which
+	// the JOURNAL_INTERVAL_SEC env var overrides (smoke runbook lever — see
+	// resolveJournalInterval). Resolved before anything starts so a bad
 	// value fails the run cleanly.
+	var journalInterval time.Duration
 	if cfg.ListType == 2 {
-		d, err := journalIntervalFromEnv(os.Getenv, journalCheckpointInterval)
+		d, err := resolveJournalInterval(cfg, os.Getenv)
 		if err != nil {
 			return err
 		}
-		journalCheckpointInterval = d
+		journalInterval = d
 	}
 
 	fileInput := FileInputNone
@@ -249,13 +252,13 @@ func run(cfg *Config, bucket, prefix, startAfter, checkFile, backupFile, resumeL
 	// and Mode 1/3 do not journal. Created before seeding (seeds are
 	// journaled) and before the check workers (they report terminals).
 	// CheckpointNow is fired right after seeding: the seed must be durable
-	// before the first 10-minute tick, not at it.
+	// before the first tick (10 minutes by default), not at it.
 	var journal *JournalTracker
 	var journalRun *JournalRunner
 	if cfg.ListType == 2 && fileInput == FileInputNone {
 		journal = NewJournalTracker()
 		lister.SetJournal(journal)
-		journalRun = StartJournalCheckpoints(journal, out, filepath.Join(cfg.OutputDir, "journal.txt"))
+		journalRun = StartJournalCheckpoints(journal, out, filepath.Join(cfg.OutputDir, "journal.txt"), journalInterval)
 	}
 	printer.SetQueueSnapshotProvider(func() QueueSnapshot {
 		cor, mpAll, cmp, mpOk, mcf, lf, cf, su, lpf := out.ChannelSnapshot()

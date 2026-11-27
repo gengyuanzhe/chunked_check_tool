@@ -569,6 +569,45 @@ func TestLoadConfig_LatencyWindowSec(t *testing.T) {
 	}
 }
 
+// TestLoadConfig_JournalCheckpointIntervalSec — absent falls back to 600s
+// (10 minutes, the interval the tool always had: a kill -9 loses at most one
+// interval of scan progress); a positive explicit value is kept; negative is
+// rejected.
+func TestLoadConfig_JournalCheckpointIntervalSec(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+		want int64
+		err  string
+	}{
+		{"default", "", 600, ""},
+		{"explicit", "journal_checkpoint_interval_sec: 30\n", 30, ""},
+		{"negative", "journal_checkpoint_interval_sec: -1\n", 0, "journal_checkpoint_interval_sec"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "cfg.yaml")
+			content := []byte("endpoints:\n  - 10.0.0.1:9000\nak: x\nsk: y\nmax_keys: 500\n" + tc.yaml)
+			if err := os.WriteFile(path, content, 0644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfig(path)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("expected %q error, got %v", tc.err, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.JournalCheckpointIntervalSec != tc.want {
+				t.Errorf("JournalCheckpointIntervalSec = %d, want %d", cfg.JournalCheckpointIntervalSec, tc.want)
+			}
+		})
+	}
+}
+
 // TestLoadConfig_EncodingTypeURLAndDebugLog — both are plain opt-in booleans
 // (default false, no validation).
 func TestLoadConfig_EncodingTypeURLAndDebugLog(t *testing.T) {

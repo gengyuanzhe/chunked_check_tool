@@ -375,19 +375,10 @@ func (t *JournalTracker) trackedPrefixes() int {
 	return len(t.states)
 }
 
-// journalCheckpointInterval is how often scan progress is persisted to the
-// journal; a kill -9 loses at most one interval of work. Package var (not
-// config) so tests can shrink it — same pattern as outputFlushInterval.
-// The JOURNAL_INTERVAL_SEC env var (see journalIntervalFromEnv) exists for
-// the kill -9 smoke runbook: local-minio scans finish in seconds, long
-// before the first 10-minute tick, so the runbook shrinks the interval to
-// exercise mid-run checkpoints.
-var journalCheckpointInterval = 10 * time.Minute
-
-// journalIntervalFromEnv resolves JOURNAL_INTERVAL_SEC (seconds). Unset or
-// empty keeps def. Anything but a positive integer is a loud error: a bad
-// value must never be silently ignored, since it silently changes the
-// kill -9 loss bound.
+// journalIntervalFromEnv resolves JOURNAL_INTERVAL_SEC (seconds) on top of
+// def, the configured interval. Unset or empty keeps def. Anything but a
+// positive integer is a loud error: a bad value must never be silently
+// ignored, since it silently changes the kill -9 loss bound.
 func journalIntervalFromEnv(getenv func(string) string, def time.Duration) (time.Duration, error) {
 	v := getenv("JOURNAL_INTERVAL_SEC")
 	if v == "" {
@@ -398,6 +389,15 @@ func journalIntervalFromEnv(getenv func(string) string, def time.Duration) (time
 		return 0, fmt.Errorf("JOURNAL_INTERVAL_SEC=%q: want an integer >= 1 (seconds)", v)
 	}
 	return time.Duration(sec) * time.Second, nil
+}
+
+// resolveJournalInterval is the time between two journal checkpoints: a
+// kill -9 loses at most that much scan progress. It is
+// journal_checkpoint_interval_sec from the config, which JOURNAL_INTERVAL_SEC
+// overrides when set — the kill -9 smoke runbook uses the override because
+// local-minio scans finish in seconds, long before a 10-minute tick.
+func resolveJournalInterval(cfg *Config, getenv func(string) string) (time.Duration, error) {
+	return journalIntervalFromEnv(getenv, time.Duration(cfg.JournalCheckpointIntervalSec)*time.Second)
 }
 
 // runJournalCheckpoints persists scan progress to journalPath until ctx is
@@ -420,7 +420,10 @@ func journalIntervalFromEnv(getenv func(string) string, def time.Duration) (time
 //
 // Lifecycle: cancel ctx after listing and checking have fully finished and
 // BEFORE out.Close() — FlushAndWait must never meet closed channels.
-func runJournalCheckpoints(ctx context.Context, tr *JournalTracker, out *Output, journalPath string, trigger <-chan chan struct{}) {
+//
+// interval is the time between two ticks: journal_checkpoint_interval_sec
+// as resolved by resolveJournalInterval.
+func runJournalCheckpoints(ctx context.Context, tr *JournalTracker, out *Output, journalPath string, trigger <-chan chan struct{}, interval time.Duration) {
 	f, err := os.OpenFile(journalPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		// The scan itself stays correct without a journal; only kill -9
@@ -429,7 +432,7 @@ func runJournalCheckpoints(ctx context.Context, tr *JournalTracker, out *Output,
 		return
 	}
 	defer f.Close()
-	ticker := time.NewTicker(journalCheckpointInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	checkpoint := func() {
 		snap := tr.Snapshot()
@@ -463,9 +466,10 @@ type JournalRunner struct {
 	done    chan struct{}
 }
 
-// StartJournalCheckpoints launches the loop. Stop cancels it and waits for
-// the final checkpoint; CheckpointNow forces one checkpoint synchronously.
-func StartJournalCheckpoints(tr *JournalTracker, out *Output, journalPath string) *JournalRunner {
+// StartJournalCheckpoints launches the loop, ticking every interval. Stop
+// cancels it and waits for the final checkpoint; CheckpointNow forces one
+// checkpoint synchronously.
+func StartJournalCheckpoints(tr *JournalTracker, out *Output, journalPath string, interval time.Duration) *JournalRunner {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &JournalRunner{
 		cancel:  cancel,
@@ -473,7 +477,7 @@ func StartJournalCheckpoints(tr *JournalTracker, out *Output, journalPath string
 		done:    make(chan struct{}),
 	}
 	go func() {
-		runJournalCheckpoints(ctx, tr, out, journalPath, r.trigger)
+		runJournalCheckpoints(ctx, tr, out, journalPath, r.trigger, interval)
 		close(r.done)
 	}()
 	return r

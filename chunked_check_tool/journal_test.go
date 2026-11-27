@@ -359,10 +359,10 @@ func TestTrackerLateTerminalIgnored(t *testing.T) {
 }
 
 // startCheckpointLoop launches runJournalCheckpoints on a fresh Output in
-// dir, with the interval already shrunk by the caller. Returns the journal
-// path, the Output (closed by t.Cleanup), and the stop function (cancels the
-// loop and waits for its final checkpoint).
-func startCheckpointLoop(t *testing.T, dir string, tr *JournalTracker) (journalPath string, o *Output, stop func()) {
+// dir, ticking every interval. Returns the journal path, the Output (closed
+// by t.Cleanup), and the stop function (cancels the loop and waits for its
+// final checkpoint).
+func startCheckpointLoop(t *testing.T, dir string, tr *JournalTracker, interval time.Duration) (journalPath string, o *Output, stop func()) {
 	t.Helper()
 	o, err := NewOutput(&Config{OutputDir: dir, IsCheck: true}, "test-bkt", FileInputNone)
 	if err != nil {
@@ -373,7 +373,7 @@ func startCheckpointLoop(t *testing.T, dir string, tr *JournalTracker) (journalP
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		runJournalCheckpoints(ctx, tr, o, journalPath, nil)
+		runJournalCheckpoints(ctx, tr, o, journalPath, nil, interval)
 		close(done)
 	}()
 	return journalPath, o, func() {
@@ -387,13 +387,10 @@ func startCheckpointLoop(t *testing.T, dir string, tr *JournalTracker) (journalP
 // still leave the seeded root in the journal (otherwise early kills are
 // unresumable and the resume loader cannot even know the scan scope).
 func TestCheckpointImmediateFirstWrite(t *testing.T) {
-	orig := journalCheckpointInterval
-	journalCheckpointInterval = 10 * time.Second
-	defer func() { journalCheckpointInterval = orig }()
-
 	tr := NewJournalTracker()
 	tr.RecordSeed("", "")
-	journalPath, _, stop := startCheckpointLoop(t, t.TempDir(), tr)
+	// No tick for 10s: the write can only come from the startup checkpoint.
+	journalPath, _, stop := startCheckpointLoop(t, t.TempDir(), tr, 10*time.Second)
 	defer stop()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -414,15 +411,11 @@ func TestCheckpointImmediateFirstWrite(t *testing.T) {
 // result lines for that page's objects are already IN THE FILE, without
 // Close. snapshot -> FlushAndWait -> write is what makes this hold.
 func TestCheckpointOrderAndDurability(t *testing.T) {
-	orig := journalCheckpointInterval
-	journalCheckpointInterval = 10 * time.Millisecond
-	defer func() { journalCheckpointInterval = orig }()
-
 	dir := t.TempDir()
 	tr := NewJournalTracker()
 	tr.RecordSeed("p", "")
 	tr.RegisterPage("p", 1, "T1")
-	journalPath, o, stop := startCheckpointLoop(t, dir, tr)
+	journalPath, o, stop := startCheckpointLoop(t, dir, tr, 10*time.Millisecond)
 	defer stop()
 
 	// Push the result line BEFORE the terminal report — the checker-side
@@ -449,16 +442,12 @@ func TestCheckpointOrderAndDurability(t *testing.T) {
 // lines are written before cursor lines: a kill mid-batch may leave "child
 // discovered, parent not done" (recoverable) but never the reverse.
 func TestCheckpointBatchOrderDiscoveredFirst(t *testing.T) {
-	orig := journalCheckpointInterval
-	journalCheckpointInterval = 10 * time.Second
-	defer func() { journalCheckpointInterval = orig }()
-
 	tr := NewJournalTracker()
 	tr.AddDiscovered("sub")
 	tr.RecordSeed("p", "")
 	tr.RegisterPage("p", 1, "T1")
 	tr.Terminal("p", 0)
-	journalPath, _, stop := startCheckpointLoop(t, t.TempDir(), tr)
+	journalPath, _, stop := startCheckpointLoop(t, t.TempDir(), tr, 10*time.Second)
 	defer stop()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -483,13 +472,9 @@ func TestCheckpointBatchOrderDiscoveredFirst(t *testing.T) {
 // checkpoint, so the journal reflects state as of shutdown, not as of the
 // last tick.
 func TestCheckpointFinalOnStop(t *testing.T) {
-	orig := journalCheckpointInterval
-	journalCheckpointInterval = 10 * time.Second
-	defer func() { journalCheckpointInterval = orig }()
-
 	tr := NewJournalTracker()
 	tr.RecordSeed("p", "")
-	journalPath, _, stop := startCheckpointLoop(t, t.TempDir(), tr)
+	journalPath, _, stop := startCheckpointLoop(t, t.TempDir(), tr, 10*time.Second)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for { // wait for the startup checkpoint
@@ -513,13 +498,9 @@ func TestCheckpointFinalOnStop(t *testing.T) {
 // TestCheckpointCommitClearsDelta — a discovery line lands exactly once:
 // Commit removed it from the pending set, later checkpoints do not repeat it.
 func TestCheckpointCommitClearsDelta(t *testing.T) {
-	orig := journalCheckpointInterval
-	journalCheckpointInterval = 10 * time.Millisecond
-	defer func() { journalCheckpointInterval = orig }()
-
 	tr := NewJournalTracker()
 	tr.AddDiscovered("x")
-	journalPath, _, stop := startCheckpointLoop(t, t.TempDir(), tr)
+	journalPath, _, stop := startCheckpointLoop(t, t.TempDir(), tr, 10*time.Millisecond)
 	defer stop()
 
 	time.Sleep(50 * time.Millisecond) // several ticks pass
@@ -783,10 +764,6 @@ func TestLoadJournalForResumeMissing(t *testing.T) {
 // pipeline killed with pages emitted-but-unprobed leaves a journal whose
 // replayed frontier seeds EXACTLY the un-done remainder.
 func TestJournalResumeRoundTrip(t *testing.T) {
-	orig := journalCheckpointInterval
-	journalCheckpointInterval = 5 * time.Millisecond
-	defer func() { journalCheckpointInterval = orig }()
-
 	dir := t.TempDir()
 	cfg := &Config{OutputDir: dir, ListType: 2, IsCheck: true}
 	out, err := NewOutput(cfg, "test-bkt", FileInputNone)
@@ -806,7 +783,7 @@ func TestJournalResumeRoundTrip(t *testing.T) {
 	jDone := make(chan struct{})
 	t.Cleanup(func() { out.Close() })
 	go func() {
-		runJournalCheckpoints(jCtx, tr, out, journalPath, nil)
+		runJournalCheckpoints(jCtx, tr, out, journalPath, nil, 5*time.Millisecond)
 		close(jDone)
 	}()
 	t.Cleanup(func() { jCancel(); <-jDone })
@@ -1035,10 +1012,6 @@ func TestSnapshotEmitsCursorWithPipeOrNewlineToken(t *testing.T) {
 // kill left an empty journal and an unresumable run. The synchronous
 // post-seed trigger must persist the seed immediately.
 func TestCheckpointPostSeedTrigger(t *testing.T) {
-	orig := journalCheckpointInterval
-	journalCheckpointInterval = 10 * time.Second
-	defer func() { journalCheckpointInterval = orig }()
-
 	dir := t.TempDir()
 	o, err := NewOutput(&Config{OutputDir: dir, IsCheck: true}, "test-bkt", FileInputNone)
 	if err != nil {
@@ -1049,7 +1022,7 @@ func TestCheckpointPostSeedTrigger(t *testing.T) {
 
 	tr := NewJournalTracker()
 	// Production ordering: the loop is ALREADY running when seeds land.
-	r := StartJournalCheckpoints(tr, o, journalPath)
+	r := StartJournalCheckpoints(tr, o, journalPath, 10*time.Second)
 	defer r.Stop()
 
 	tr.RecordSeed("", "")
@@ -1101,5 +1074,40 @@ func TestJournalIntervalFromEnv(t *testing.T) {
 		if got != c.want {
 			t.Errorf("env %q: interval = %v, want %v", c.env, got, c.want)
 		}
+	}
+}
+
+// TestResolveJournalInterval — the interval between two checkpoints comes
+// from journal_checkpoint_interval_sec; JOURNAL_INTERVAL_SEC overrides it
+// when set, and a bad env value is a loud error.
+func TestResolveJournalInterval(t *testing.T) {
+	cases := []struct {
+		name   string
+		cfg    int64
+		env    string
+		want   time.Duration
+		wantEr bool
+	}{
+		{"config, no env", 600, "", 600 * time.Second, false},
+		{"config, smaller", 30, "", 30 * time.Second, false},
+		{"env overrides config", 600, "1", time.Second, false},
+		{"bad env", 600, "abc", 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := resolveJournalInterval(&Config{JournalCheckpointIntervalSec: c.cfg}, func(string) string { return c.env })
+			if c.wantEr {
+				if err == nil {
+					t.Fatalf("env %q: err = nil, want error", c.env)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("env %q: err = %v, want nil", c.env, err)
+			}
+			if got != c.want {
+				t.Errorf("env %q: interval = %v, want %v", c.env, got, c.want)
+			}
+		})
 	}
 }

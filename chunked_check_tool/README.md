@@ -77,6 +77,7 @@ node_isolate_threshold: 3           # 节点隔离阈值（累积节点故障数
 node_recover_probe_interval: 60     # 隔离节点恢复探测间隔秒数（连续 2 次健康恢复；0=禁用）
 dial_timeout: 10                    # 单次 TCP 建连超时秒数（黑洞 IP 默认 10s 兜底；0=Go 默认无超时）
 response_header_timeout: 0           # 等服务端响应头超时秒数（0=Go 默认无超时，不兜底）
+journal_checkpoint_interval_sec: 600  # journal 快照间隔秒数（list_type=2 扫描进度每隔这么久写一次 journal.txt；默认 600，负值报错）
 progress_interval: 5000             # 进度记录间隔
 obj_ch_capacity: 0                  # lister→checker channel 容量；0=max(check_concurrency*4, 2000)
 output_ch_capacity: 0               # output writer channel 容量；0=1024
@@ -109,6 +110,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 | `node_recover_probe_interval` | `60` | 隔离节点恢复探测间隔（秒）：后台每轮 HEAD bucket，连续 2 次健康应答 → 恢复进轮询池并清零故障计数；`0` 禁用恢复（隔离进程内永久） |
 | `dial_timeout` | `10` | 单次 TCP 建连超时（秒）：建连阶段（SYN→SYN-ACK→ACK）上限。黑洞 IP（不路由、不回 RST）场景 OS 默认 SYN 重试要 ~75s（macOS）/ ~127s（Linux），默认 10s 兜底；`0` = Go net/http 默认（无超时，走 OS 默认）。负值启动报错。只控制建连阶段，不影响已建立连接上的请求/响应传输 |
 | `response_header_timeout` | `0` | 等服务端响应头超时（秒）：请求发出后等 HTTP 响应头（status line + headers）的上限，不含响应体传输。服务端 accept 了 TCP 但进程挂死不响应时，这是唯一能检测的兜底。默认 `0` 不兜底（Go net/http 默认 = 无超时，永远等），用户遇到挂死服务端时显式配。负值启动报错 |
+| `journal_checkpoint_interval_sec` | `600` | journal 快照间隔（秒）：`list_type=2` 扫描每隔该值把扫描进度写一次 `journal.txt`，被 kill -9 后最多重做一个间隔的进度。调小更安全，写盘更频繁；负值启动报错 |
 | `progress_interval` | `5000` | stdout 进度打印阈值（约） |
 | `obj_ch_capacity` | `max(check_concurrency*4, 2000)` | lister→checker channel 容量；0 走默认 |
 | `output_ch_capacity` | `1024` | output writer channel 容量（每个结果/处理文件一个 channel）；0 走默认 |
@@ -296,7 +298,7 @@ join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
 
 被杀之后按运行模式续跑：
 
-- `list_type=2` 扫描：`-resume-journal <被杀那一轮的目录>/journal.txt`，最多重做 10 分钟的进度
+- `list_type=2` 扫描：`-resume-journal <被杀那一轮的目录>/journal.txt`，最多重做一个快照间隔的进度（默认 10 分钟，见 `journal_checkpoint_interval_sec`）
 - `-check-file` / `-backup-file`：重跑原输入文件，或用结果文件求差集只跑没有定论的对象（见上文「kill -9 后的续跑」）
 - `list_type=1`：只能用相同参数重跑全量扫描（探测幂等、输出 append-only 并集语义容忍重复）
 

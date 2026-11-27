@@ -90,6 +90,11 @@ type Config struct {
 	// and hides current-batch health. Default 60s; 0 (absent) = default,
 	// negative rejected.
 	LatencyWindowSec int `yaml:"latency_window_sec"`
+	// JournalCheckpointIntervalSec is the time between two journal
+	// checkpoints in list_type=2 scans: a kill -9 loses at most one interval
+	// of scan progress. Default 600 (10 minutes); 0 (absent) = default,
+	// negative rejected.
+	JournalCheckpointIntervalSec int64 `yaml:"journal_checkpoint_interval_sec"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -205,6 +210,14 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.LatencyWindowSec < 0 {
 		return nil, fmt.Errorf("latency_window_sec must be >= 1 seconds (got %d)", cfg.LatencyWindowSec)
+	}
+	// Journal checkpoint interval in seconds; absent (0) = 600 (10 minutes).
+	// Negative is meaningless and rejected.
+	if cfg.JournalCheckpointIntervalSec == 0 {
+		cfg.JournalCheckpointIntervalSec = 600
+	}
+	if cfg.JournalCheckpointIntervalSec < 0 {
+		return nil, fmt.Errorf("journal_checkpoint_interval_sec must be >= 1 seconds (got %d)", cfg.JournalCheckpointIntervalSec)
 	}
 	return &cfg, nil
 }
