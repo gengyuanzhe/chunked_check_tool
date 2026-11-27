@@ -130,7 +130,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
   - **第一次 SIGINT/SIGTERM**（`installSignalHandler` cancel listCtx）：停止 S3 LIST 与输入文件读取；in-flight 页的 ListPage 返回 ctx 错误 → 现有失败路径写 `list_failed(prefix, 本页游标)`——记录的是**未完成页**的 cursor，已成功的页不重列；队列里未弹出的 prefix 由 `drainQueuedPrefixes`（在 `listWg.Wait` 后、`close(objCh)` 前）写入 list_failed（裸 prefix = 从头列；`-resume-list` 种子 `prefix\x00token` 原样往返其游标，`Queue.Drain()` 取残余）；objCh 中已入队任务继续被 check worker 消费至完成。**不变量：run 目录是完备检查点**——每个 prefix 要么列完且每个对象都有终态，要么带可续游标。run 返回 `errInterrupted`（非零退出，数据无损失）。
   - **第二次信号**（cancel hardCtx）：in-flight 探测/中转中止（`Checker`/`BackupChecker`/relay 全走 hard ctx），objCh/ch 中剩余任务快速失败落 `check_failed`/`mp_check_failed`/`backup_failed`（即各自的补跑输入）——**硬停也不静默丢对象**。多段中转 Abort 清理。
   - **硬停 mid-page 的游标语义**：lister/Mode-1 根循环的 objCh 发送 select 在 hardCtx.Done 分支记录**当前页**的 continuationToken（不是下一页）——resume 重列本页即可找回未发送的对象；已发送对象在 check worker 侧因 ctx 取消落 check_failed，同样可补跑。
-  - **kill -9 兜底分两层**：Mode 2 扫描由 journal 兜底（不变量 21）——损失 ≤ 一个 checkpoint 间隔（默认 10 分钟工作量），恢复入口 `-resume-journal`，零重走；Mode 1/3 与文件输入模式仍是"未处理部分无记录，补救 = 原命令重跑（幂等 + union）"。已写管线的尾部丢失由 writer 周期 Flush 兜底（`outputFlushInterval`=3s，见 §6）：kill -9 每文件最多丢最后 ≤3s 的行（含失败文件即补跑输入本身）。无 fsync：write() 落 page cache 即扛进程死，fsync 只防整机断电（另一级耐久性，不需要）。备份侧另有 comm diff 去已完成的续跑 runbook（§7.4）。
+  - **kill -9 兜底分两层**：Mode 2 扫描由 journal 兜底（不变量 21）——损失 ≤ 一个 checkpoint 间隔（默认 10 分钟工作量），恢复入口 `-resume-journal`，零重走；Mode 1 与文件输入模式仍是"未处理部分无记录"：Mode 1 的补救 = 原命令重跑（幂等 + union）；文件输入模式（`-check-file` / `-backup-file`）用结果文件按 key 求差集得到重跑输入（§7.4）。已写管线的尾部丢失由 writer 周期 Flush 兜底（`outputFlushInterval`=3s，见 §6）：kill -9 每文件最多丢最后 ≤3s 的行（含失败文件即补跑输入本身）。无 fsync：write() 落 page cache 即扛进程死，fsync 只防整机断电（另一级耐久性，不需要）。
 
 20. **Mode 2 journal：kill -9 断点续跑**（`journal.go`，spec `docs/superpowers/specs/2026-11-05-resume-journal-design.md`）：
   - **启用条件**：`list_type=2 ∧ 文件输入=无`——全新扫描、`-resume-list` 恢复轮、`-resume-journal` 恢复轮都记账（`-resume-list` 轮同样长跑、同样会被 kill）。`journal.txt` 落输出目录根，append-only；恢复后写新时间戳目录的新 journal。
@@ -437,38 +437,103 @@ PID=$!; sleep 1.2; kill -INT $PID; wait $PID; echo "exit=$?"
 - **闭环验证**：`/tmp/chunked_check_tool -c cfg -bkt testbucket -resume-list <中断轮目录>/list_failed.txt` 跑完 `list_failed: 0`，且两轮 `list_all` 之和 == `mc ls --recursive local/testbucket | wc -l`（无丢失无重复的完备性证明）
 - 第二次信号（硬停）时序难在真机稳定触发，由单测覆盖（`TestListerHardAbortMidPageRecordsCurrentPageToken` + `TestRunInterruptedDrainsQueue`）
 
-### 7.4 kill -9 后备份续跑：comm diff 构造重跑输入
+### 7.4 kill -9 后 `-check-file` / `-backup-file` 的续跑：按 key 求差集
 
-场景：`-backup-file` 运行中被 kill -9 / OOM 打断。优雅中断走 `backup_failed.txt` 自喂；kill -9 下未处理任务不在任何文件里，恢复入口是**原输入重跑**——但全量重跑会把已完成的大头重新中转一遍。本 runbook 用差集剔掉已完成对象。
+场景：这两个文件输入模式被 kill -9 / OOM 打断。它们没有快照，也不记录输入读到哪一行，没处理的行不在任何文件里。恢复入口是**原输入重跑**；本 runbook 用差集剔掉已经有定论的对象，只重跑剩下的。
 
-可行的三个代码事实（`backup.go` / `output.go`）：
+**规则（两个模式统一）**
 
-- `WriteBackupOk`/`WriteMismatch` 写 `task.RawLine`——**原始输入行逐字节原样**，与输入文件可直接对齐；
-- `backup_ok.txt` 行在 ETag 终验通过后才写——是"真完成集合"的**子集**（周期 Flush 窗口 ≤3s 的丢行只会导致多备几个、幂等覆盖，不会漏备）；
-- `backup_failed.txt` **不在**排除集——失败的行保留在重跑输入中自动重试。
+- **按 key 过滤**：只比每行的第 2 个字段。同一轮只有一个桶（桶名不符的行工具判为坏行），所以 key 就能唯一确定对象。
+- **只有有定论的结果算完成**，其余的行留在重跑输入里。
+
+| 模式 | 算完成 | 不算完成（留在重跑输入里） |
+|---|---|---|
+| `-backup-file` | `backup_ok.txt` | `backup_failed.txt`、`mismatch.txt`、`parse_failed.txt` |
+| `-check-file` | `_unknown/` 下的 `ok_objects.txt`、`ok_mp.txt`、`corrupted_objects.txt`、`corrupted_mp.txt` | `mp.txt`、`check_failed.txt`、`mp_check_failed.txt`、`parse_failed.txt` |
+
+**为什么按 key，不按整行**
+
+- `-check-file` 的结果行是按字段重新拼的，不是抄输入行。对象在两轮之间被改写成普通对象时，结果行没有分段边界，按整行比永远对不上，这个对象会被反复重查。
+- `-backup-file` 的结果行是原始输入行，按整行比本来可行。统一成按 key 后，两个模式一套做法。
+
+**为什么 `mismatch.txt` 和 `mp.txt` 不算完成**
+
+它们表示"这一行处理不了"，不是对对象的定论。同一个 key 可能在输入里有两行（来自不同轮次，一行写普通对象，一行写多段对象）。以备份为例：对象现在是多段，普通那行得到 mismatch，多段那行能正常备份。如果中断发生在只处理完普通那行之后，mismatch 算完成就会跳过多段那行，**对象没有备份**。不算完成的代价很小：那一行每次重跑只花一次 HEAD，结果不变。
+
+**命令：`-backup-file`**
 
 ```bash
 # <kill 轮目录> = backup_output_dir（output_dir_timestamp=true 时为 backup_output_dir_<时间戳>）
-export LC_ALL=C   # sort 与 comm 必须同一字典序；macOS/Linux 默认 locale 排序不同，不加会静默漏行
-cd <kill 轮目录>
-sort -u backup_ok.txt mismatch.txt > /tmp/done.txt
-sort -u <原输入文件> > /tmp/input.sorted.txt
-comm -23 /tmp/input.sorted.txt /tmp/done.txt > /tmp/retry.txt
-wc -l /tmp/retry.txt   # 期望：远小于原输入行数
-# 用重跑输入续跑（落新的时间戳目录，其 backup_failed.txt 继续自喂）：
-# /tmp/chunked_check_tool -c cfg.yaml -bkt <bucket> -backup-file /tmp/retry.txt
+D=<kill 轮目录>
+IN=<那一轮的原始输入文件>
+OUT=retry.txt                         # 生成的重跑输入
+W=$(mktemp -d)                        # 中间文件目录
+export LC_ALL=C                      # sort 和 join 必须用同一套字典序
+US=$(printf '\037')                  # 字段分隔符 \x1f
+
+# 结果文件末行没有换行符 = 被 kill 时写了一半，去掉这一行；文件不存在则不输出
+drop_torn() { { if [ -s "$1" ] && [ -n "$(tail -c 1 "$1")" ]; then sed '$d' "$1"; else cat "$1"; fi; } 2>/dev/null; }
+
+# 1) 有定论的对象（只有 backup_ok.txt），按 key 排序
+drop_torn "$D/backup_ok.txt" | sort -t "$US" -k2,2 > "$W/done.bykey"
+# 2) 原输入按 key 排序
+sort -t "$US" -k2,2 "$IN" > "$W/input.bykey"
+# 3) 关联，只留没有定论的行。关联字段 key 会被放到行首，所以把前两个字段换回来
+join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
+  | awk -F "$US" -v OFS="$US" '{ k = $1; $1 = $2; $2 = k; print }' > "$OUT"
+
+# 多轮的结果都算数时，把各轮的 backup_ok.txt 都接到第 1 步：
+# { drop_torn <轮1>/backup_ok.txt; drop_torn <轮2>/backup_ok.txt; } | sort -t "$US" -k2,2 > "$W/done.bykey"
+# 续跑（落新的时间戳目录）：
+# /tmp/chunked_check_tool -c cfg.yaml -bkt <bucket> -backup-file retry.txt
 ```
 
-期望与验证：
+**命令：`-check-file`**
 
-- `retry.txt` = 原输入唯一行 − (backup_ok ∪ mismatch)：kill 时未处理的任务 + 已失败的任务 + Flush 窗口（≤3s）内已完成但行未落盘的对象——第三类重跑是幂等覆盖，方向安全
-- **排除 mismatch 行**：这些对象的行类型与 HEAD 判型不符（检查后被改写），出路是 `mismatch.txt` 直喂 `-check-file` 重查；硬按旧行中转，ETag 终验必失败
-- 行必须逐字节一致：输入文件在两轮之间不能被修改（工具写行是 RawLine 原样，天然满足）
-- 输入行重复被 `sort -u` 归并——同一对象本就只需备份一次
-- 历史多轮（含优雅中断轮）都算数时：`sort -u <各轮目录>/backup_ok.txt <各轮目录>/mismatch.txt ... > /tmp/done.txt`
-- 收敛判据 = 最新一轮失败文件为空（§4.20 闭环）
-- kill -9 还会在备份桶遗留**未完成的 multipart upload**（kill 时 `AbortMultipart` 不会执行）——普通 LIST 不可见，需 ListMultipartUploads 排查清理，当前无工具入口
-- 命令管道经合成数据验证（12 行输入 10 唯一 − 7 done = 3 行 retry）；kill 场景的端到端复验待 §7.1 环境
+```bash
+# 前提：被 kill 的那一轮开了 is_success_log 和 is_multipart_success_log，
+#       否则检查干净的对象没有记录，会被全部当成没处理过。
+# <kill 轮目录> = output_dir（output_dir_timestamp=true 时为 output_dir_<时间戳>）
+D=<kill 轮目录>
+IN=<那一轮的原始输入文件>
+OUT=retry.txt                         # 生成的重跑输入
+W=$(mktemp -d)                        # 中间文件目录
+export LC_ALL=C                      # sort 和 join 必须用同一套字典序
+US=$(printf '\037')                  # 字段分隔符 \x1f
+
+# 结果文件末行没有换行符 = 被 kill 时写了一半，去掉这一行；文件不存在则不输出
+drop_torn() { { if [ -s "$1" ] && [ -n "$(tail -c 1 "$1")" ]; then sed '$d' "$1"; else cat "$1"; fi; } 2>/dev/null; }
+
+# 1) 有定论的对象，按 key 排序（mp.txt 不算：它表示"没法验证"，不是定论）
+for f in ok_objects ok_mp corrupted_objects corrupted_mp; do
+  drop_torn "$D/_unknown/$f.txt"
+done | sort -t "$US" -k2,2 > "$W/done.bykey"
+# 2) 原输入按 key 排序
+sort -t "$US" -k2,2 "$IN" > "$W/input.bykey"
+# 3) 关联，只留没有定论的行。关联字段 key 会被放到行首，所以把前两个字段换回来
+join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
+  | awk -F "$US" -v OFS="$US" '{ k = $1; $1 = $2; $2 = k; print }' > "$OUT"
+
+# 续跑（落新的时间戳目录）：
+# /tmp/chunked_check_tool -c cfg.yaml -bkt <bucket> -check-file retry.txt
+```
+
+**依据的代码事实**
+
+- `backup_ok.txt` 的行在 ETag 终验通过后才写，是"真完成集合"的子集——周期 Flush（≤3s）内丢的行只会让对象多备一次（幂等覆盖），不会漏备。`ok_*` / `corrupted_*` 的行同理，探测出结果后才写。
+- 结果行的 key 和输入行的 key 都是 `url.QueryEscape` 后的形态，逐字节相同。工具生成的文件天然满足；手写的行要保证转义形式一致。
+- 关联（join）输出的行总是把关联字段放在最前，所以第 3 步要把前两个字段换回来。这一步只处理留在重跑输入里的行。
+
+**注意事项**
+
+- `LC_ALL=C` 必须设：sort 和 join 要用同一套字典序，macOS/Linux 默认 locale 不同，不设会静默出错。
+- 结果文件末行可能只写了一半（被 kill 时），`drop_torn` 把它去掉。这个对象因此留在重跑输入里，方向安全。
+- 输入里的重复行原样保留（同一个 key 的多行都会留下）。要先合并就对原输入先 `sort -u`。
+- `-check-file` 用 `multipart_check_mode=1` 配置时，"输入行写普通对象、HEAD 发现是多段"的行不写 `mp.txt`（只写 `list_parse_failed.log`，见 `Checker.verify`）。这类行会一直留在重跑输入里，每次重跑只花一次 HEAD。
+- 性能（2026-11-27 在 macOS 上实测，BSD 工具）：全程只用外部排序和顺序关联，内存不随输入增长。500 万行（180 MB）、90% 已完成时，整行比 2.3 秒，按 key 比 3.9 秒；1500 万行（545 MB）时 7.1 秒对 11.9 秒。
+- 收敛判据 = 最新一轮失败文件为空（§4.20 闭环）。
+- kill -9 还会在备份桶遗留**未完成的 multipart upload**（kill 时 `AbortMultipart` 不会执行）——普通 LIST 不可见，需 ListMultipartUploads 排查清理，当前无工具入口。
+- 命令经构造数据验证（2026-11-27）：覆盖有定论、无定论、未处理、坏行、末行残行、同一个 key 多行、前缀相近的 key、转义后含 `%` 的 key、多轮结果合并；在 500 万 / 1500 万行的数据集上与整行比结果一致。kill 场景的端到端复验待 §7.1 环境。
 
 ### 7.5 kill -9 + -resume-journal 冒烟（复用 7.1/7.3 环境）
 

@@ -135,6 +135,8 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 
 **收敛重试**：本模式自己也会产出更小的 `check_failed.txt` / `mp_check_failed.txt`（瞬时故障恢复后重试即可清零），循环喂回直到为空。对象在检查后被改写导致的 `mismatch.txt`（backup 模式产出）同样喂本模式重查。
 
+**中断恢复**：本模式没有快照，中断后重跑同一输入文件即可（检查幂等）。输入很大时用差集只重跑没有定论的对象，见下方「kill -9 后的续跑」。
+
 ## backup-file 模式
 
 `-backup-file <path>` 把输入列表里的对象**原样中转**到 `backup_bucket`（客户端下载再上传，并做 ETag 终验）。输入文件每行格式（两种可混排，与 `-check-file` 相同，字段分隔符 `\x1f`）：
@@ -165,8 +167,81 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 - S3 多段约束：非末段必须 ≥5MB。输入行语义是原始 part 边界（原上传本来合规）；若喂入"固定分段"格式（段 <5MB）会被 S3 拒绝（EntityTooSmall）→ `backup_failed`
 - `mp.txt`（mode=0/2 未验证多段、`-check-file` 时普通行 HEAD 判多段的漂移对象）**无 offsets，无法自动中转**（ETag 终验对不上），需人工补 part 边界后走 `-check-file`/`-backup-file`。mode=1 ETag 解析失败的对象落到根目录 `list_parse_failed.txt`（同样无 offsets，无法自动中转）
 - 观测指标（无 S3 LIST，不显示 `list_*`）：进度行 `[progress] read=X list_failed=… backup_ok=… backup_failed=… backup_mismatch=… get_calls=… get_avg_ms=… (backed=N) q=obj:… lf:… bok:… bfail:… mm:…`；汇总 `read: X` + `list_failed` + `get_calls` + `backup_ok: N backup_failed: N backup_mismatch: N`
-- **中断恢复**：信号到达时停止读输入、排空已入队对象；重跑同一输入文件即可（探测/中转幂等，重复中转 = 覆盖写）。大输入可用 comm 差集跳过已成功对象（三个输出文件的行都是原始输入行）：
-  `comm -23 <(sort input.txt) <(cat out/{backup_ok,backup_failed,mismatch}.txt | sort -u) > retry.txt`
+- **中断恢复**：信号到达时停止读输入、排空已入队对象；重跑同一输入文件即可（探测/中转幂等，重复中转 = 覆盖写）。输入很大时用差集只重跑没备份成功的对象，见下方「kill -9 后的续跑」
+
+### kill -9 后的续跑（`-check-file` / `-backup-file`）
+
+这两个模式没有快照，也不记录输入读到哪一行。进程被 `kill -9` 或 OOM 杀掉后，用"原输入减去已有定论的对象"得到重跑输入。规则对两个模式统一：
+
+- **按 key 过滤**：只比每行的第 2 个字段（同一个桶内，key 唯一确定对象）。
+- **只有有定论的结果算完成**，其余的行留在重跑输入里：
+
+| 模式 | 算完成 | 不算完成，留在重跑输入里 |
+|---|---|---|
+| `-backup-file` | `backup_ok.txt` | `backup_failed.txt`、`mismatch.txt`、`parse_failed.txt` |
+| `-check-file` | `_unknown/` 下的 `ok_objects.txt`、`ok_mp.txt`、`corrupted_objects.txt`、`corrupted_mp.txt` | `mp.txt`、`check_failed.txt`、`mp_check_failed.txt`、`parse_failed.txt` |
+
+`-check-file` 的前提：被杀的那一轮开了 `is_success_log` 和 `is_multipart_success_log`，否则检查干净的对象没有记录，会被全部当成没处理过。
+
+```bash
+# -backup-file
+D=<被杀那一轮的输出目录>              # backup_output_dir（默认带 <时间戳> 后缀）
+IN=<那一轮的原始输入文件>
+OUT=retry.txt                         # 生成的重跑输入
+W=$(mktemp -d)                        # 中间文件目录
+export LC_ALL=C                      # sort 和 join 必须用同一套字典序
+US=$(printf '\037')                  # 字段分隔符 \x1f
+
+# 结果文件末行没有换行符 = 被 kill 时写了一半，去掉这一行；文件不存在则不输出
+drop_torn() { { if [ -s "$1" ] && [ -n "$(tail -c 1 "$1")" ]; then sed '$d' "$1"; else cat "$1"; fi; } 2>/dev/null; }
+
+# 1) 有定论的对象（只有 backup_ok.txt），按 key 排序
+drop_torn "$D/backup_ok.txt" | sort -t "$US" -k2,2 > "$W/done.bykey"
+# 2) 原输入按 key 排序
+sort -t "$US" -k2,2 "$IN" > "$W/input.bykey"
+# 3) 关联，只留没有定论的行。关联字段 key 会被放到行首，所以把前两个字段换回来
+join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
+  | awk -F "$US" -v OFS="$US" '{ k = $1; $1 = $2; $2 = k; print }' > "$OUT"
+
+# 多轮的结果都算数时，把各轮的 backup_ok.txt 都接到第 1 步：
+# { drop_torn <轮1>/backup_ok.txt; drop_torn <轮2>/backup_ok.txt; } | sort -t "$US" -k2,2 > "$W/done.bykey"
+# 续跑（落新的时间戳目录）：
+# ./chunked_check_tool -c config.yaml -bkt <bucket> -backup-file retry.txt
+```
+
+```bash
+# -check-file
+D=<被杀那一轮的输出目录>              # output_dir（默认带 <时间戳> 后缀）
+IN=<那一轮的原始输入文件>
+OUT=retry.txt                         # 生成的重跑输入
+W=$(mktemp -d)                        # 中间文件目录
+export LC_ALL=C                      # sort 和 join 必须用同一套字典序
+US=$(printf '\037')                  # 字段分隔符 \x1f
+
+# 结果文件末行没有换行符 = 被 kill 时写了一半，去掉这一行；文件不存在则不输出
+drop_torn() { { if [ -s "$1" ] && [ -n "$(tail -c 1 "$1")" ]; then sed '$d' "$1"; else cat "$1"; fi; } 2>/dev/null; }
+
+# 1) 有定论的对象，按 key 排序（mp.txt 不算：它表示"没法验证"，不是定论）
+for f in ok_objects ok_mp corrupted_objects corrupted_mp; do
+  drop_torn "$D/_unknown/$f.txt"
+done | sort -t "$US" -k2,2 > "$W/done.bykey"
+# 2) 原输入按 key 排序
+sort -t "$US" -k2,2 "$IN" > "$W/input.bykey"
+# 3) 关联，只留没有定论的行。关联字段 key 会被放到行首，所以把前两个字段换回来
+join -t "$US" -1 2 -2 2 -v 1 "$W/input.bykey" "$W/done.bykey" \
+  | awk -F "$US" -v OFS="$US" '{ k = $1; $1 = $2; $2 = k; print }' > "$OUT"
+
+# 续跑（落新的时间戳目录）：
+# ./chunked_check_tool -c config.yaml -bkt <bucket> -check-file retry.txt
+```
+
+几点说明：
+
+- **为什么按 key 而不按整行**：`-check-file` 的结果行是按字段重新拼的。对象在两轮之间被改写成普通对象后，结果行没有分段边界，按整行比永远对不上。
+- **`mismatch.txt` 和 `mp.txt` 为什么不算完成**：它们表示"这一行处理不了"，不是定论。同一个 key 可能在输入里有两行（一行写普通对象、一行写多段对象）；算完成会跳过另一行，对象就得不到处理。
+- `LC_ALL=C` 必须设。被杀那一轮的结果文件末行可能只写了一半，`drop_torn` 会去掉它，这个对象因此留在重跑输入里。
+- 速度：全程只用外部排序和顺序关联，内存不随输入增长。macOS 上实测 500 万行（180 MB）约 4 秒，是整行比的 1.7 倍。
+- 详细原因和验证记录见 `AGENTS.md` §7.4。
 
 ## 输出
 
