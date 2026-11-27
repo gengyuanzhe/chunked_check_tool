@@ -150,19 +150,6 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.ListAPIVersion == 0 {
 		cfg.ListAPIVersion = 1
 	}
-	// Retired field guard: silently ignoring is_multipart_segment_check would
-	// run an old config with mode=0 (off) and report every multipart as
-	// unverified. Fail loudly so the operator migrates the config.
-	var raw map[string]any
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
-	}
-	if _, ok := raw["is_multipart_segment_check"]; ok {
-		return nil, fmt.Errorf("is_multipart_segment_check was replaced by multipart_check_mode (0=off, 1=offset, 2=segment): migrate the config (former true → multipart_check_mode: 2)")
-	}
-	if _, ok := raw["result_line_format"]; ok {
-		return nil, fmt.Errorf("result_line_format was removed: per-owner result files now use the fixed bucket\\x1f<escaped-key> shape (same separator and escape rule as process files)")
-	}
 	if cfg.MultipartCheckMode < MultipartCheckModeOff || cfg.MultipartCheckMode > MultipartCheckModeSegment {
 		return nil, fmt.Errorf("multipart_check_mode must be 0 (off), 1 (offset), or 2 (segment), got %d", cfg.MultipartCheckMode)
 	}

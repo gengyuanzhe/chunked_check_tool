@@ -210,34 +210,6 @@ func TestLoadConfig_NodeIsolateThreshold(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_LegacySegmentCheckField — the retired is_multipart_segment_check
-// field must not be silently ignored: an old config would then run with
-// mode=0 (off) and report every multipart as unverified. Fail loudly with a
-// migration hint instead.
-func TestLoadConfig_LegacySegmentCheckField(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cfg.yaml")
-	content := []byte(`
-endpoints:
-  - 10.0.0.1:9000
-ak: x
-sk: y
-max_keys: 1000
-is_multipart_segment_check: true
-multipart_segment_size: 5242880
-`)
-	if err := os.WriteFile(path, content, 0644); err != nil {
-		t.Fatal(err)
-	}
-	_, err := LoadConfig(path)
-	if err == nil {
-		t.Fatal("expected error for retired is_multipart_segment_check field")
-	}
-	if !strings.Contains(err.Error(), "multipart_check_mode") {
-		t.Errorf("error should mention multipart_check_mode, got: %v", err)
-	}
-}
-
 func TestLoadConfig_BackupBucket(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")

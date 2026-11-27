@@ -15,8 +15,9 @@
 仅对普通对象进行强制校验；多段对象可选分段校验。ETag 来自 list 响应（统一来源，**不从 Range GET response header 取**），根据 ETag 判断是普通对象还是多段：
 
 - 如果是多段对象：
-  - 若 `is_multipart_segment_check=true` 且 `multipart_segment_size>0`：按 `ceil(Size/segment_size)` 分段，对每段开头 128 字节做 Range GET，任一段命中 `length;chunk-signature=xxx` 格式即视为损坏，写入 `<ownerID>/corrupted_mp.txt`。某段 Range GET 报错走 `mp_check_failed.txt`（根目录）路径并停止后续段检查；全部段均不匹配则按普通多段记入 `<ownerID>/ok_mp.txt`（仅 `is_multipart_success_log=true` 时落盘，否则只计数不写文件）。
-  - 否则直接写入 `<ownerID>/mp.txt`（仅 key，不带 ETag），**不做 Range GET**。
+  - 若 `multipart_check_mode=2` 且 `multipart_segment_size>0`：按 `ceil(Size/segment_size)` 合成分段边界，对每段开头 128 字节做 Range GET，任一段命中 `;chunk-signature=` 格式即视为损坏，写入 `<ownerID>/corrupted_mp.txt`。某段 Range GET 报错走 `mp_check_failed.txt`（根目录）路径并停止后续段检查；全部段均不匹配则按普通多段记入 `<ownerID>/ok_mp.txt`（仅 `is_multipart_success_log=true` 时落盘，否则只计数不写文件）。
+  - 若 `multipart_check_mode=1`：LIST 带 `internal-list-mp-offset: true` header 取真实 part 边界，对每个 part offset `[off_i, off_i+128]` 做 Range GET 匹配 `;chunk-signature=`；解析不出 offsets 的对象回落 `list_parse_failed.txt`。
+  - 否则（`multipart_check_mode=0`）直接写入 `<ownerID>/mp.txt`（仅 key，不带 ETag），**不做 Range GET**。
 - 如果是普通对象，通过 Range GET 读前 128 字节，检查是否以 `length;chunk-signature=xxx\n` 格式开头；命中则视为损坏，写入 `<ownerID>/corrupted_objects.txt`。
 
 `multipart_segment_size` 必须与上传时的 multipart part size 一致，否则 chunk-signature 不在段边界上会漏检。Size=0 的多段对象跳过分段检查，按普通多段记录。
@@ -56,7 +57,7 @@ check_concurrency: 16   # 校验并发度
 output_dir: ./out       # 默认当前目录
 is_check: true          # true=列举+校验, false=仅列举
 is_success_log: false   # 是否记录正常普通对象
-is_multipart_segment_check: false   # 是否按固定 part size 对多段对象做分段损坏检查
+multipart_check_mode: 0   # 多段检查模式：0=关闭 1=offset 检查 2=固定分段
 multipart_segment_size: 0    # 多段分段检查的段长度(字节)，需与上传 part size 一致
 is_multipart_success_log: false  # 是否记录干净的多段对象
 progress_interval: 5000  # 进度打印阈值（约，性能优先）
@@ -71,9 +72,9 @@ progress_interval: 5000  # 进度打印阈值（约，性能优先）
 | 文件 | 内容 | 何时写 |
 |---|---|---|
 | `corrupted_objects.txt` | 损坏的普通对象 key | Range GET 命中 chunk-signature（`is_check=true`） |
-| `mp.txt` | 多段对象 key（仅 key，不带 ETag） | `is_multipart_segment_check=false` 时所有多段对象 |
-| `corrupted_mp.txt` | 损坏的多段对象 key | `is_multipart_segment_check=true` 时分段检查命中 |
-| `ok_mp.txt` | 干净的多段对象 key | `is_multipart_segment_check=true` 且 `is_multipart_success_log=true` |
+| `mp.txt` | 多段对象 key（仅 key，不带 ETag） | `multipart_check_mode=0` 时所有多段对象 |
+| `corrupted_mp.txt` | 损坏的多段对象 key | `multipart_check_mode=1/2` 时分段检查命中 |
+| `ok_mp.txt` | 干净的多段对象 key | `multipart_check_mode=1/2` 且 `is_multipart_success_log=true` |
 | `ok_objects.txt` | 正常普通对象 key | `is_success_log=true` |
 
 **处理文件**（全局，根目录 `<output_dir>/<filename>`）：
@@ -91,7 +92,7 @@ progress_interval: 5000  # 进度打印阈值（约，性能优先）
 
 `.txt` 与对应 `.log` 通过对象名/prefix 关联：`.txt` 只存 key/prefix 作关联键，错误原因在 `.log` 里。`.log` 字段顺序：`time level msg req_id key/prefix http_code s3_code err`（slog text handler，key=value 形式）。
 
-**统计**需要包含：`list_all`（对象总数=list_obj+list_mp，与程序执行总耗时同一行）、`list_obj`（列举的普通对象数）、`list_mp`（列举的多段对象数）、`ok_obj`（干净普通对象）、`corrupt_obj`（损坏普通对象）、`ok_mp`（干净多段，**仅** `is_multipart_segment_check=true` 时通过分段检查的才算，switch off 时为 0——未校验不能谎称干净）、`corrupt_mp`（损坏多段）、list 总次数、list 平均耗时、list 总耗时、get 总次数、get 平均耗时、get 总耗时、`list_failed` 数、`check_failed` 数（普通对象 RangeGet 失败）、`mp_check_failed` 数。
+**统计**需要包含：`list_all`（对象总数=list_obj+list_mp，与程序执行总耗时同一行）、`list_obj`（列举的普通对象数）、`list_mp`（列举的多段对象数）、`ok_obj`（干净普通对象）、`corrupt_obj`（损坏普通对象）、`ok_mp`（干净多段，**仅** `multipart_check_mode!=0` 时通过分段检查的才算，mode=0 时为 0——未校验不能谎称干净）、`corrupt_mp`（损坏多段）、list 总次数、list 平均耗时、list 总耗时、get 总次数、get 平均耗时、get 总耗时、`list_failed` 数、`check_failed` 数（普通对象 RangeGet 失败）、`mp_check_failed` 数。
 
 ### 其他：
 

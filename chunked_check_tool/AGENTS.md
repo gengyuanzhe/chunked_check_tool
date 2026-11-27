@@ -196,7 +196,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
 | `encoding_type_url` | `false` | true 时 LIST 请求带 `EncodingType=url`（V1/V2 都带）。wire 上 server 字段（key/prefix/marker）URL 编码，保护 XML 反序列化免受 `\x1f` 等 XML 1.0 非法控制字符撕裂。出口由 `wireDecoder` 统一 `QueryUnescape` 解码（边界 A，见不变量 23）；V2 `NextContinuationToken` 是不透明 base64 不解码。Wire decode 失败保留原值 best-effort，warn 一次/页到 `list_failed.log`。**在目标服务器上启用前必须先探测**——某些 S3 实现不支持该参数或解码行为不同（见 `memory/encoding-type-marker-semantics.md`） |
 | `debug_log` | `false` | true 时每次 LIST 请求打三行 Debug 级诊断（`list-page req`/`list-page err`/`list-page resp`）到 run.log，记录 marker/token/delim/maxKeys/req_id/next/truncated/nContents/nCP。便于追 marker 游标漂移与短响应 quirk。nil 守卫——无 logger 时不打。详见不变量 27 |
 | `latency_window_sec` | `60` | progress 行 `latency_avg_ms`/`latency_max_ms` 的滑动窗口秒数。每窗口重置，反映**当前批次**的 LIST 延迟健康（全局 `list_avg_ms` 会被早期 spike 稀释、掩盖当前批次问题）。0=用默认 60s；负值启动报错。详见不变量 26 |
-| `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 mp.txt 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，多段 ETag 返回 `<md5>-<partcnt>-<off0>|<off1>|...`——服务端 ETag 内部分隔符仍是 `|`，由服务端生成不可改，按真实 part 边界逐段检查；解析不出 offsets 回落 list_parse_failed.txt，**不再**写 mp.txt。**优先级高于 mode=2**）；`2`=固定分段检查（旧模式待废弃，必须配 `multipart_segment_size > 0`）。非法值启动报错；配置里出现已废弃的 `is_multipart_segment_check` 字段也报错并提示迁移（防旧配置被静默当作 mode=0） |
+| `multipart_check_mode` | `0` | 多段对象损坏检查模式：`0`=关闭（全部写 mp.txt 不检查）；`1`=offset 检查（LIST 带 `internal-list-mp-offset: true` header，多段 ETag 返回 `<md5>-<partcnt>-<off0>|<off1>|...`——服务端 ETag 内部分隔符仍是 `|`，由服务端生成不可改，按真实 part 边界逐段检查；解析不出 offsets 回落 list_parse_failed.txt，**不再**写 mp.txt。**优先级高于 mode=2**）；`2`=固定分段检查（旧模式待废弃，必须配 `multipart_segment_size > 0`）。非法值启动报错 |
 | `multipart_segment_size` | `0` | 多段分段检查的段长度（字节），需与上传 part size 一致；`0` 表示不分段 |
 | `whole_object_probe_threshold` | `1024` | 小对象全读阈值（字节）。`0<Size<=该值` 时走快路径：单次 `RangeGetAt(0, thr)` 读全对象，body 同时匹配 `chunkSigRe`（`;chunk-signature=` 强特征）OR `trailerRe`（`0\r\nx-amz-checksum-<algo>:<value>\r\n\r\n` trailer marker），1 请求覆盖段首+段尾两种损坏；超过该值走 head@0+tail@Size-128（普通）/head@0+(N-1)边界（多段，无 tail probe）多探测。`0`=禁用快路径恒走多探测。负值启动报错 |
 | `is_multipart_success_log` | `false` | 是否记录干净的多段对象到 `<ownerID>/ok_mp.txt` |
@@ -545,3 +545,4 @@ diff union.txt mckeys.txt      # 期望空（有 mp.txt 的配置把它也并进
 - `chunked_check_tool` 二进制已 `.gitignore`，不要提交。
 - `.superpowers/` 目录是 SDD 工作区（ledger、brief、review package），已 gitignore，不要提交。
 - 改动涉及多文件接口（`S3API`、`Lister.Run` 签名、`Output` 方法、`Stats` 字段）时，先在 ledger 或 PR 描述记录决策，再改。
+- **工具自身不做历史版本兼容**：本工具是单机运维工具，不是给外部长期消费的库。改配置字段/文件格式/接口时，**不要**加 retired-field guard、旧格式兼容、迁移提示等回溯代码——旧配置/旧文件直接报错或失效即可，由使用者重新生成。代码里不保留对已删配置项/已删代码路径的检测守卫。
