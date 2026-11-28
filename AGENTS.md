@@ -12,7 +12,7 @@
 | 签名校验覆盖 `x-amz-*` 和 `x-obs-*` 两类前缀（标准 SigV4 只强制 `x-amz-*`） | 自定义 header 一律不以 `x-` 开头；内部修复专用 header 用 `internal-` 前缀（SigV2/V4 下允许不签名） |
 | LIST 带 `internal-list-mp-offset: true` 时改写多段 ETag：`<md5>-N` → `<md5>-<partcnt>-<off0>\|<off1>\|...`，`off_i` 是第 i 段在落盘字节里的物理起始偏移 | 解析时校验 md5 是 32 位 hex、offset 个数 = partcnt、`off_0 = 0`、严格递增、每个 `off_i ≤ Size`；该 header 只挂 LIST 调用，HEAD/GET/PUT 不带 |
 | `Owner.ID` 非空时为 `[a-z0-9]+` | 不做 URL 编解码，原样读写；owner 为空落 `_unknown/` |
-| **普通 LIST（带 delimiter）翻页**：`IsTruncated=true` 的页一定带 `NextMarker`，不会出现「截断了却没有游标」；`NextMarker` 落在目录上时不带结尾的 `/`（标准 S3 带）。用户 2026-11-28 告知，未在本地重测（minio 没有这个偏差） | `NextMarker` 原样作为下一次请求的 marker：不补 `/`、不做规范化。`NextMarker` 为空就是列表结束，不要为「截断却无游标」加报错或重试 |
+| **普通 LIST（带 delimiter）翻页**：`IsTruncated=true` 的页一定带 `NextMarker`，不会出现「截断了却没有游标」。用户 2026-11-28 告知 | `NextMarker` 为空就是列表结束；不要为「截断却无游标」加报错或重试。`NextMarker` 不带结尾 `/` 不是常态，是服务端 bug 的症状，见 §5 |
 | **trailer 类多段上传报错不落盘**：trailer 类编码（`STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER`、`STREAMING-UNSIGNED-PAYLOAD-TRAILER`）作为**多段 part** 上传时报错、对象不落盘；**但单次 PUT 走 trailer 编码仍能成功落盘** | `trailerRe` 只覆盖单次 PUT 场景（普通对象的 whole-object / tail 探测），不覆盖多段（多段 part 不可能是 trailer 上传，故多段探测只跑 `chunkSigRe`）。`trailerRe` 不能删——单次 PUT 的 unsigned-trailer 损坏只能靠它抓。行为约定，机制未深究；服务端若修需重测 |
 
 ## 2. 实测过、行为标准
@@ -35,4 +35,4 @@
 服务端存在以下**已确认的 BUG**，不是存储的"行为约定"——它是 bug，未来会被修。但在它存在期间，开发工具选方案时要把它考虑进来：两个方案都能完成任务时，优先选与该 bug 兼容的；如果选中的方案与该 bug 不兼容，**必须明确告诉用户**，由用户决定是否接受。
 
 - **aws-chunked 上传落盘为原始字节**：PUT 请求处理未正确解析 `X-Amz-Content-Sha256` header，把 `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` / `-TRAILER` / `STREAMING-UNSIGNED-PAYLOAD-TRAILER` 三类 streaming 上传的分帧格式 + trailer + 签名全部当作原始 body 字节流落盘。**后果**：备份/中转上传如果走 aws-chunked，落盘的就不是用户字节，备份本身会制造损坏。**驱动的设计选择**：中转上传一律带 `withUnsignedPayload`（裸 body + `x-amz-content-sha256: UNSIGNED-PAYLOAD`，不出现 aws-chunked 分帧），字节保真由 ETag 终验把关。详见 `chunked_check_tool/AGENTS.md §1.1`。
-- **LIST 页被提前截断**：**症状**——某一页返回的条目数少于请求的 `max_keys`（对象数；带 delimiter 时是对象 + 公共前缀），同时 `IsTruncated=true`。服务端分页出 bug 时就是这个表现（用户 2026-11-28 告知）。**机制**未诊断。`chunked_check_tool` 由 `checkShortResponse` 识别：把告警写进 `list_failed.log`（`short response while truncated`，带 `returned` 和 `max_keys`），再按该页的 `NextMarker` 续列。排查「漏扫」「扫不完」时，先看 `list_failed.log` 里有没有这条告警。
+- **LIST 页被提前截断**：**症状**——某一页返回的条目数少于请求的 `max_keys`（对象数；带 delimiter 时是对象 + 公共前缀），同时 `IsTruncated=true`。出 bug 时，这一页的 `NextMarker` 如果落在目录上，还不带结尾的 `/`（正常时带）。服务端分页出 bug 时就是这个表现，平时不会出现（用户 2026-11-28 告知）。**机制**未诊断。`chunked_check_tool` 由 `checkShortResponse` 识别（条目数 + `IsTruncated`）：把告警写进 `list_failed.log`（`short response while truncated`，带 `returned` 和 `max_keys`），再按该页的 `NextMarker` 续列，`NextMarker` 原样使用、不补 `/`（按 S3 的 marker 语义推断，未在私有存储上实测：补上 `/` 会跳过排序在 `c` 和 `c/` 之间的 key，例如 `c.txt`；原样使用最多让 `c/` 在下一页再出现一次，不会漏）。排查「漏扫」「扫不完」时，先看 `list_failed.log` 里有没有这条告警。
