@@ -549,7 +549,14 @@ func loadJournalForResume(path string) (map[string]journalState, error) {
 // prefixes are skipped, cursor entries continue from their token, anything
 // else lists from the top. Returns whether anything was seeded (drives the
 // empty-queue close, same as the other seed paths).
+//
+// The table stays with the lister for the rest of the round (Lister.resumed).
+// It is the replay table itself, which this function already needs in
+// memory; nothing is built for it. A sub-prefix the table covers is seeded
+// here or skipped as done, so the lister leaves it alone when a resumed
+// prefix re-lists the page its cursor points at.
 func seedFromJournal(states map[string]journalState, lister *Lister) bool {
+	lister.SetResumed(states)
 	seeded := false
 	for prefix, st := range states {
 		switch {

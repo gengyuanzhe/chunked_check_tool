@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -840,6 +841,146 @@ func TestJournalResumeRoundTrip(t *testing.T) {
 	}
 	if !seeds["root/\x00tok2"] || !seeds["root/sub/"] || len(seeds) != 2 {
 		t.Errorf("resume seeds = %v, want {root/\\x00tok2, root/sub/} — exactly the un-done remainder", seeds)
+	}
+}
+
+// perPrefixCountingS3 wraps scriptedS3 and counts LIST calls per prefix.
+type perPrefixCountingS3 struct {
+	*scriptedS3
+	mu    sync.Mutex
+	calls map[string]int
+}
+
+func (c *perPrefixCountingS3) ListPage(ctx context.Context, prefix, startAfter, continuationToken string, delim bool, maxKeys int) ([]ObjectInfo, []string, string, error) {
+	c.mu.Lock()
+	c.calls[prefix]++
+	c.mu.Unlock()
+	return c.scriptedS3.ListPage(ctx, prefix, startAfter, continuationToken, delim, maxKeys)
+}
+
+// TestJournalResumeDoesNotEnqueueAJournaledSubprefixTwice — a resumed prefix
+// re-lists the page its cursor points at. That page's sub-prefixes were
+// written to the journal before the cursor could reach them, so the resume
+// round has already seeded each of them, or skipped it as done. Handing
+// them to the queue a second time listed them twice in one round — with
+// everything under them — and re-listed the finished ones.
+func TestJournalResumeDoesNotEnqueueAJournaledSubprefixTwice(t *testing.T) {
+	// The killed run's last checkpoint: root/ has page 1 complete and page 2
+	// in flight; page 2 holds two sub-prefixes, one of them already done.
+	journal := writeJournal(t, strings.Join([]string{
+		"discovered\x1froot%2F",
+		"cursor\x1froot%2F\x1froottok2",
+		"discovered\x1froot%2Fsub-new%2F",
+		"discovered\x1froot%2Fsub-done%2F",
+		"done\x1froot%2Fsub-done%2F",
+	}, "\n")+"\n")
+	states, err := loadJournalForResume(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &perPrefixCountingS3{scriptedS3: &scriptedS3{pages: map[string][]pageResult{
+		// scriptedS3 serves a prefix's pages in request order. root/ is first
+		// requested with roottok2, so its first page here is page 2.
+		"root/": {
+			{prefixes: []string{"root/sub-new/", "root/sub-done/"}, nextToken: "roottok3"},
+			{prefixes: []string{"root/sub-late/"}, nextToken: ""},
+		},
+		"root/sub-new/":  {{nextToken: ""}},
+		"root/sub-done/": {{nextToken: ""}},
+		"root/sub-late/": {{nextToken: ""}},
+	}}, calls: map[string]int{}}
+	cfg := &Config{OutputDir: t.TempDir(), ListType: 2, IsCheck: true}
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+	defer out.Close()
+	l := NewLister(NewQueue(), out, NewStats(), cfg)
+	if !seedFromJournal(states, l) {
+		t.Fatal("seedFromJournal = false, want true")
+	}
+	objCh := make(chan VerifyTask, 16)
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go l.Run(&wg, objCh, i, fake, nil)
+	}
+	wg.Wait()
+	close(objCh)
+
+	// root/ is listed from its cursor (2 pages). sub-new/ was seeded from the
+	// journal, sub-done/ skipped as done, so neither is listed again when
+	// root/ re-lists page 2. sub-late/ is on page 3, which the journal never
+	// saw: listed once.
+	want := map[string]int{"root/": 2, "root/sub-new/": 1, "root/sub-late/": 1}
+	for prefix, n := range want {
+		if got := fake.calls[prefix]; got != n {
+			t.Errorf("LIST calls for %q = %d, want %d", prefix, got, n)
+		}
+	}
+	if got := fake.calls["root/sub-done/"]; got != 0 {
+		t.Errorf("LIST calls for the finished root/sub-done/ = %d, want 0", got)
+	}
+	if len(fake.calls) != len(want) {
+		t.Errorf("listed prefixes = %v, want exactly %v", fake.calls, want)
+	}
+}
+
+// TestJournalResumeKeepsAFinishedSubprefixDone — once a journaled
+// sub-prefix has finished in the resume round, the parent re-listing its
+// page must not record it as discovered again. In this round's journal
+// that line would come after the done line, and the next resume would read
+// the sub-prefix as unfinished.
+func TestJournalResumeKeepsAFinishedSubprefixDone(t *testing.T) {
+	// The killed run's last checkpoint: root/ has its cursor one page in,
+	// and that page holds one sub-prefix that was never started.
+	journal := writeJournal(t, strings.Join([]string{
+		"discovered\x1froot%2F",
+		"cursor\x1froot%2F\x1froottok2",
+		"discovered\x1froot%2Fsub%2F",
+	}, "\n")+"\n")
+	states, err := loadJournalForResume(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const normal = "0123456789abcdef0123456789abcdef"
+	fake := &scriptedS3{pages: map[string][]pageResult{
+		"root/":     {{prefixes: []string{"root/sub/"}, nextToken: ""}}, // the page at roottok2
+		"root/sub/": {{objs: []ObjectInfo{{Key: "root/sub/a", ETag: normal}}, nextToken: ""}},
+	}}
+	cfg := &Config{OutputDir: t.TempDir(), ListType: 2, IsCheck: true}
+	out, _ := NewOutput(cfg, "test-bkt", FileInputNone)
+	defer out.Close()
+	tr := NewJournalTracker()
+	l := NewLister(NewQueue(), out, NewStats(), cfg)
+	l.SetJournal(tr)
+	if !seedFromJournal(states, l) {
+		t.Fatal("seedFromJournal = false, want true")
+	}
+	// Take both seeds out of the queue, so that the order below is fixed.
+	for i := 0; i < 2; i++ {
+		if _, ok := l.queue.Pop(); !ok {
+			t.Fatal("queue closed before both seeds were popped")
+		}
+	}
+
+	// The sub-prefix finishes first, and a checkpoint commits that.
+	objCh := make(chan VerifyTask, 8)
+	l.processPrefix("root/sub/", "", objCh, fake, nil)
+	task := <-objCh
+	tr.Terminal(task.JournalPrefix, task.PageSeq)
+	snap := tr.Snapshot()
+	if !containsString(snap.Dones, "root/sub/") {
+		t.Fatalf("sub-prefix not done after its object was checked: %+v", snap)
+	}
+	tr.Commit(snap)
+
+	// Then the parent lists the page its cursor points at, which holds that
+	// same sub-prefix.
+	l.processPrefix("root/", "roottok2", objCh, fake, nil)
+	snap = tr.Snapshot()
+	if containsString(snap.Discovered, "root/sub/") {
+		t.Errorf("finished sub-prefix recorded as discovered again; snapshot: %+v", snap)
+	}
+	if n := l.queue.Len(); n != 0 {
+		t.Errorf("queue holds %d items after the parent re-listed its page, want 0: %v", n, queueItems(l.queue))
 	}
 }
 

@@ -37,6 +37,12 @@ type Lister struct {
 	// journal tracks scan progress for kill -9 resume (Mode 2 S3 listing
 	// only; nil = off, every bookkeeping call is guarded by a nil check).
 	journal *JournalTracker
+	// resumed holds the prefix table replayed from the journal of the killed
+	// run (-resume-journal only; nil otherwise). Every prefix it covers was
+	// seeded from that journal when the round started, or skipped as done,
+	// so a prefix re-listing the page its cursor points at must neither
+	// record nor enqueue those sub-prefixes again: see processPrefix.
+	resumed map[string]journalState
 }
 
 func NewLister(queue *Queue, out *Output, stats *Stats, cfg *Config) *Lister {
@@ -47,6 +53,13 @@ func NewLister(queue *Queue, out *Output, stats *Stats, cfg *Config) *Lister {
 // to keep the dozens of existing test constructions untouched.
 func (l *Lister) SetJournal(j *JournalTracker) {
 	l.journal = j
+}
+
+// SetResumed hands the lister the prefix table replayed from the journal of
+// the killed run, for the rest of a -resume-journal round. See the resumed
+// field.
+func (l *Lister) SetResumed(states map[string]journalState) {
+	l.resumed = states
 }
 
 // Seed pushes a starting prefix and bumps inflight so the first worker does
@@ -141,6 +154,23 @@ func (l *Lister) processPrefix(prefix, initialToken string, objCh chan<- VerifyT
 			return
 		}
 		checkShortResponse(l.out, prefix, continuationToken, len(objs)+len(prefixes), next != "", l.cfg.MaxKeys)
+		// Sub-prefixes the killed run's journal already covers were seeded
+		// from it, or skipped as done, when this round started (seedFromJournal).
+		// This prefix is re-listing the page its cursor pointed at, and that
+		// page's sub-prefixes reached the journal before the cursor could
+		// advance. Taking them again would list each one twice in this round,
+		// everything under it included, and would write a late discovered
+		// line behind a done one in this round's journal, turning a finished
+		// sub-prefix back into an unfinished one for the next resume.
+		newPrefixes := prefixes
+		if l.resumed != nil {
+			newPrefixes = prefixes[:0]
+			for _, p := range prefixes {
+				if _, covered := l.resumed[p]; !covered {
+					newPrefixes = append(newPrefixes, p)
+				}
+			}
+		}
 		// Register the page's FULL object count and record this page's
 		// discoveries BEFORE any object of the page can reach a terminal
 		// state (the first objCh send). Two load-bearing orderings:
@@ -153,7 +183,7 @@ func (l *Lister) processPrefix(prefix, initialToken string, objCh chan<- VerifyT
 		var pageSeq int32 = -1
 		if l.journal != nil {
 			pageSeq = l.journal.RegisterPage(prefix, len(objs), next)
-			for _, p := range prefixes {
+			for _, p := range newPrefixes {
 				l.journal.AddDiscovered(p)
 			}
 		}
@@ -197,7 +227,7 @@ func (l *Lister) processPrefix(prefix, initialToken string, objCh chan<- VerifyT
 			// BFS: enqueue discovered sub-prefixes. Each Add must happen
 			// before Push so a racing worker cannot observe inflight==0
 			// between the Push and the accounting Add.
-			for _, p := range prefixes {
+			for _, p := range newPrefixes {
 				l.inflight.Add(1)
 				l.queue.Push(p)
 			}
