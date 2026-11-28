@@ -330,6 +330,48 @@ func TestRunBackupFileEndToEnd(t *testing.T) {
 	}
 }
 
+// TestRunBackupFileInputReadErrorFailsTheRun — a read error part-way through
+// the backup list (here: a line over the 1 MiB limit) relays the lines
+// before it and still fails the run, naming the line where it stopped. A
+// list that cannot be opened at all already fails, because the archive
+// upload opens it before anything is relayed.
+func TestRunBackupFileInputReadErrorFailsTheRun(t *testing.T) {
+	f := newFakeBackupS3Server(t)
+	regContent := []byte("plain regular object body")
+	f.objects["reg1"] = fakeBackupObject{ETag: md5Hex(regContent), Content: regContent}
+	host := strings.TrimPrefix(f.srv.URL, "http://")
+	dir := t.TempDir()
+	cfg := &Config{
+		Endpoints:        []string{host},
+		Scheme:           "http",
+		AK:               "test",
+		SK:               "test",
+		OutputDir:        dir,
+		BackupOutputDir:  dir,
+		ProgressInterval: 1000,
+		BackupBucket:     "dstbucket",
+		CheckConcurrency: 2,
+		ListConcurrency:  2,
+		ListAPIVersion:   2,
+	}
+	backupPath := filepath.Join(dir, "list.txt")
+	content := "srcbucket\x1freg1\n" +
+		"srcbucket\x1f" + strings.Repeat("k", 1<<20) + "\n" // line 2: over the limit
+	if err := os.WriteFile(backupPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	err := run(cfg, "srcbucket", "", "", "", backupPath, "", "", &buf)
+	if err == nil || !strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("run error = %v, want a read error naming line 2", err)
+	}
+	// Line 1 was relayed and the summary was printed before the error.
+	assertFileContent(t, dir, "backup_ok.txt", "srcbucket\x1freg1\n")
+	if !strings.Contains(buf.String(), "backup_ok: 1") {
+		t.Errorf("summary missing backup_ok: 1\nfull:\n%s", buf.String())
+	}
+}
+
 // TestRunBackupFileETagMismatchEndToEnd — a source ETag that disagrees
 // with what the relay reproduces flags backup_failed (stage=etag) at the
 // wire level.

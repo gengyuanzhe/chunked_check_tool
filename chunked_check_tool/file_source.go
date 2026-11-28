@@ -45,7 +45,13 @@ func newFileSource[T any](path, bucket string, out *Output, stats *Stats, parse 
 }
 
 // Run reads the input file line by line and pushes each parsed task to ch,
-// blocking while the workers are busy. It returns when the file is exhausted.
+// blocking while the workers are busy. It returns when the file is
+// exhausted.
+//
+// A malformed line is not an error: it goes to parse_failed and the run
+// continues. An error means the file itself could not be read to the end,
+// so the lines after that point were never processed. The error names the
+// line where it stopped, and the caller must fail the run on it.
 func (s *fileSource[T]) Run(ch chan<- T) error {
 	f, err := os.Open(s.path)
 	if err != nil {
@@ -79,5 +85,12 @@ func (s *fileSource[T]) Run(ch chan<- T) error {
 		}
 		ch <- task
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return fmt.Errorf("read input file %q: line %d is longer than the %d-byte limit; it and the lines after it were not processed",
+				s.path, lineNum+1, maxLineLen)
+		}
+		return fmt.Errorf("read input file %q after line %d: %w", s.path, lineNum, err)
+	}
+	return nil
 }

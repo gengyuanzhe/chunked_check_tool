@@ -132,9 +132,10 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 - HEAD 失败按**行声明的类型**分流：普通行 → `check_failed.txt`（`bkt\x1fkey`）；多段行 → `mp_check_failed.txt`（保留 offsets）——两个文件都可再喂回本模式循环重试
 - 无 S3 LIST，无需配 `multipart_check_mode`（offsets 来自输入行）；结果文件落在 `_unknown/` 子目录（行内无 owner）
 - **成功和失败都记录**：`ok_objects.txt` / `ok_mp.txt` 恒写，不受 `is_success_log` / `is_multipart_success_log` 控制（两个开关只管主扫描），与失败文件、备份模式一致
+- **输入文件读不出来时，进程以退出码 1 结束**：文件打不开，或读取中途出错（例如某一行超过 1 MiB 的长度上限）时，已读入的行照常处理、汇总照常打印，然后报错退出，错误信息带文件路径和出错的行号。坏行不属于这种情况：坏行写 `parse_failed.txt` 后继续
 - 进度行 `[progress] read=X ok_obj=… corrupt_obj=… ok_mp=… corrupt_mp=… check_failed=… mp_check_failed=… get_calls=… get_avg_ms=… (checked=N) q=obj:…`；汇总 `read: X` + `list_failed`（仅坏行）+ `get_calls` + `ok_obj/corrupt_obj/ok_mp/corrupt_mp/check_failed/mp_check_failed`
 
-**收敛重试**：本模式自己也会产出更小的 `check_failed.txt` / `mp_check_failed.txt`（瞬时故障恢复后重试即可清零），循环喂回直到为空。对象在检查后被改写导致的 `mismatch.txt`（backup 模式产出）同样喂本模式重查。
+**收敛重试**：本模式自己也会产出更小的 `check_failed.txt` / `mp_check_failed.txt`（瞬时故障恢复后重试即可清零），循环喂回直到为空。对象在检查后被改写导致的 `mismatch.txt`（backup 模式产出）同样喂本模式重查。判断一轮是否做完，除了看失败文件，还要看退出码是 0：退出码 1 表示那一轮的输入没读完，失败文件为空也不算收敛。
 
 **中断恢复**：本模式没有快照，中断后重跑同一输入文件即可（检查幂等）。输入很大时用差集只重跑没有定论的对象，见下方「kill -9 后的续跑」。
 
@@ -164,6 +165,7 @@ backup_bucket: backup-target       # 备份目标桶（-backup-file 模式必填
 - 三个备份结果文件（`backup_ok.txt`/`backup_failed.txt`/`mismatch.txt`）均写入**原始输入行**（`bkt\x1fkey` 或 `bkt\x1fkey\x1fpartcnt\x1foffset…`），与输入文件同构：`backup_failed.txt` 可直接作为 `-backup-file` 输入重试失败对象（行内自带 offsets）；`.log` 文件保持结构化（key + 错误详情）
 - HEAD/中转失败 → 原始输入行写入 `backup_failed.txt`，`backup_failed.log` 记录失败阶段（head/upload/etag）与错误；多段中转失败会 AbortMultipartUpload 清理未完成分片
 - 坏行（格式错误/bkt 不匹配）与文件模式一致：写入 `parse_failed.txt` 并跳过
+- **输入文件读不出来时，进程以退出码 1 结束**：读取中途出错（例如某一行超过 1 MiB）时，已读入的行照常备份、汇总照常打印，然后报错退出，错误信息带行号。文件不存在时更早失败，因为归档上传那一步会先打开它
 - 复用 `check_concurrency` 作为备份 worker 数；节点故障轮询仅覆盖请求发起阶段——流式中转一旦开始，中途故障不重试（流不可重放），整对象记为失败
 - S3 多段约束：非末段必须 ≥5MB。输入行语义是原始 part 边界（原上传本来合规）；喂入非末段小于 5MB 的行会被 S3 拒绝（EntityTooSmall）→ `backup_failed`
 - `mp.txt`（mode=0 未验证多段、`-check-file` 时普通行 HEAD 判多段的漂移对象）**无 offsets，无法自动中转**（ETag 终验对不上），需人工补 part 边界后走 `-check-file`/`-backup-file`。mode=1 ETag 解析失败的对象落到根目录 `list_parse_failed.txt`（同样无 offsets，无法自动中转）

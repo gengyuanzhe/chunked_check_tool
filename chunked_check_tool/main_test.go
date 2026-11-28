@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,6 +165,58 @@ func TestRunCheckFileEndToEnd(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary missing %q\nfull:\n%s", want, out)
 		}
+	}
+}
+
+// TestRunCheckFileUnreadableInputFailsTheRun — an input file that cannot be
+// opened must fail the run. The file source runs in a goroutine that used to
+// only log the error, so the run finished with exit code 0, an empty summary
+// and empty failure files — which under "failure files empty = converged"
+// reads as a completed retry.
+func TestRunCheckFileUnreadableInputFailsTheRun(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{Endpoints: []string{"127.0.0.1:1"}, Scheme: "http", AK: "t", SK: "t", OutputDir: dir, IsCheck: true,
+		CheckConcurrency: 1, ListConcurrency: 1}
+	var buf bytes.Buffer
+	err := run(cfg, "srcbucket", "", "", filepath.Join(dir, "no-such-file.txt"), "", "", "", &buf)
+	if err == nil {
+		t.Fatal("run returned nil for an input file that does not exist, want an error")
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("run error = %v, want one that wraps fs.ErrNotExist", err)
+	}
+	// The summary is still printed before the error is returned.
+	if !strings.Contains(buf.String(), "read: 0") {
+		t.Errorf("summary missing read: 0\nfull:\n%s", buf.String())
+	}
+}
+
+// TestRunCheckFileInputReadErrorFailsTheRun — a read error part-way through
+// the input (here: a line over the 1 MiB limit) processes the lines before
+// it and still fails the run, naming the line where it stopped.
+func TestRunCheckFileInputReadErrorFailsTheRun(t *testing.T) {
+	f := newFakeBackupS3Server(t)
+	f.objects["reg1"] = fakeBackupObject{ETag: md5Hex([]byte("clean")), Content: []byte("clean")}
+	host := strings.TrimPrefix(f.srv.URL, "http://")
+	dir := t.TempDir()
+	cfg := &Config{Endpoints: []string{host}, Scheme: "http", AK: "t", SK: "t", OutputDir: dir, IsCheck: true,
+		CheckConcurrency: 2, ListConcurrency: 2, ListAPIVersion: 2}
+	checkPath := filepath.Join(dir, "check.txt")
+	content := "srcbucket\x1freg1\n" +
+		"srcbucket\x1f" + strings.Repeat("k", 1<<20) + "\n" + // line 2: over the limit
+		"srcbucket\x1freg1\n" // line 3: never reached
+	if err := os.WriteFile(checkPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	err := run(cfg, "srcbucket", "", "", checkPath, "", "", "", &buf)
+	if err == nil || !strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("run error = %v, want a read error naming line 2", err)
+	}
+	// Line 1 was processed; line 3 was not.
+	assertFileContent(t, dir, filepath.Join("_unknown", "ok_objects.txt"), "srcbucket\x1freg1\n")
+	if !strings.Contains(buf.String(), "read: 1") {
+		t.Errorf("summary missing read: 1\nfull:\n%s", buf.String())
 	}
 }
 

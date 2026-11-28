@@ -299,10 +299,13 @@ func run(cfg *Config, bucket, prefix, startAfter, checkFile, backupFile, resumeL
 	if fileInput != FileInputNone {
 		listStart := time.Now()
 		src := newFileSource[VerifyTask](checkFile, bucket, out, stats, parseCheckFileLine)
+		// srcErr is the input read error, if any. The lines that were read
+		// are still processed and the summary is still printed; the error is
+		// returned after that, so the process exits non-zero instead of
+		// looking like a completed run.
+		var srcErr error
 		go func() {
-			if err := src.Run(objCh); err != nil {
-				log.Printf("file source: %v", err)
-			}
+			srcErr = src.Run(objCh)
 			close(objCh)
 			stats.SetListDuration(time.Since(listStart))
 		}()
@@ -312,7 +315,7 @@ func run(cfg *Config, bucket, prefix, startAfter, checkFile, backupFile, resumeL
 		}
 		stats.SetTotalDuration(time.Since(start))
 		stats.PrintSummary(stdout, mode)
-		return nil
+		return srcErr
 	}
 
 	// Spawn list workers. They block on the queue until seeds arrive.
@@ -521,10 +524,12 @@ func runBackup(cfg *Config, bucket, backupFile string, stdout io.Writer) error {
 	}
 
 	src := newFileSource[BackupTask](backupFile, bucket, out, stats, parseMixedLine)
+	// srcErr is the input read error, if any: like -check-file, the lines
+	// that were read are relayed and the summary printed, then the error is
+	// returned and the process exits non-zero.
+	var srcErr error
 	go func() {
-		if err := src.Run(ch); err != nil {
-			log.Printf("backup source: %v", err)
-		}
+		srcErr = src.Run(ch)
 		close(ch)
 	}()
 
@@ -534,7 +539,7 @@ func runBackup(cfg *Config, bucket, backupFile string, stdout io.Writer) error {
 	}
 	stats.SetTotalDuration(time.Since(start))
 	stats.PrintSummary(stdout, ModeBackup)
-	return nil
+	return srcErr
 }
 
 // uploadBackupList archives the input list file into the backup bucket under
