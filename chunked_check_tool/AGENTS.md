@@ -129,7 +129,7 @@ b\r\nhello world\r\n0\r\nx-amz-checksum-sha256:<base64>\r\n\r\n
   - **进程不拦截任何信号**：没有 `signal.Notify`，Ctrl-C / kill / kill -9 效果相同——立即终止，不执行任何收尾代码（不刷输出缓冲、不写 journal 的最终检查点、不打印汇总）。没有“优雅停机”这一档；续跑能力只来自两样：Mode 2 的 `journal.txt` 快照，和文件输入模式的结果文件。
   - **被杀之后怎么续跑**：Mode 2 扫描由 journal 兜底（不变量 21）——损失 ≤ 一个 checkpoint 间隔（`journal_checkpoint_interval_sec`，默认 600 秒的工作量），恢复入口 `-resume-journal`；Mode 1 与文件输入模式是"未处理部分无记录"：Mode 1 的补救 = 原命令重跑（幂等 + union）；文件输入模式（`-check-file` / `-backup-file`）用结果文件按 key 求差集得到重跑输入（§7.4）。已写管线的尾部丢失由 writer 周期 Flush 兜底（`outputFlushInterval`=3s，见 §6）：被杀时每文件最多丢最后 ≤3s 的行，末行可能是半行（含失败文件即补跑输入本身）。无 fsync：write() 落 page cache 即扛进程死，fsync 只防整机断电（另一级耐久性，不需要）。
 
-20. **Mode 2 journal：kill -9 断点续跑**（`journal.go`，spec `docs/superpowers/specs/2026-11-05-resume-journal-design.md`）：
+20. **Mode 2 journal：kill -9 断点续跑**（`journal.go`，spec `docs/superpowers/specs/2026-11-05-resume-journal-design.md`；思路讲解见 §8）：
   - **启用条件**：`list_type=2 ∧ 文件输入=无`——全新扫描、`-resume-list` 恢复轮、`-resume-journal` 恢复轮都记账（`-resume-list` 轮同样长跑、同样会被 kill）。`journal.txt` 落输出目录根，append-only；恢复后写新时间戳目录的新 journal。
   - **三行格式**（`\x1f` 分隔，server 字段 `QueryEscape` 转义——单版本策略，旧 `|` 格式不可读）：`discovered\x1f<prefix>` / `cursor\x1f<prefix>\x1f<token>` / `done\x1f<prefix>`。解析规则：discovered/done 的 prefix = `QueryUnescape` 余量；cursor 在余量按 `\x1f` 切分两个字段各 `QueryUnescape`（含 `|`/`\n` 的 token 也能逐字节往返）；重放取每 prefix 最后一条事件；末尾无换行的残行丢弃（kill 撕裂批次，安全方向）；其他坏行报错（机器写的文件，中间坏 = 真损坏）。
   - **"完成"的语义**（正确性核心）：prefix 的某页"完成" = 该页**全部**对象的结果行已推入输出 channel——不是"列举过"、不是"发射过"。页的待终态计数在 `ListPage` 成功时按 `len(objs)` **整页一次性登记**（只上报了一部分对象时该页永远不算完成 → 水位停在它前面）；`Terminal` 由 checker `Handle` 的 **defer** 上报（体 = 结果行已推 channel）；list-only 分类即终态。
@@ -656,13 +656,116 @@ diff union.txt mckeys.txt      # 期望空（有 mp.txt 的配置把它也并进
 期望（实跑值）：
 
 - kill -9 退出码 137；journal 非空三态混合（实测 5 done + 8 discovered + 2 cursor；cursor 同前缀每 tick 重发一行，重放取最后一条）；间隔保持默认 600 秒时 kill 落在首 tick 前则 journal 只有种子行（`CheckpointNow` 保证非空）——恢复退化为整轮重扫，损失 ≤ 一个间隔，设计内
-- 续跑轮 summary `list_failed: 0`；**完备性判据 = 两轮对象结果行（撕裂尾行丢弃后）去重并集 == `mc ls` 键集**（实测 17,006 == 17,006，diff 空）。**不要用"两轮 `list_all` 求和 == mc 数"**：恢复轮重列在途页会双计（实测两轮结果行 19,396 行，重叠 2,390）——这是 journal"冻结在半页前、恢复重列整页"设计的必然副作用
+- 续跑轮 summary `list_failed: 0`；**完备性判据 = 两轮对象结果行（撕裂尾行丢弃后）去重并集 == `mc ls` 键集**（实测 17,006 == 17,006，diff 空）。**不要用"两轮 `list_all` 求和 == mc 数"**：恢复轮重列在途页会双计（实测两轮结果行 19,396 行，重叠 2,390）——这是 journal"冻结在半页前、恢复重列整页"设计的必然副作用（2026-11-28 起被重列那一页上的子目录不再被列两遍，见 §8.6；页上的对象仍会计两次）
 - 数学自洽断言：续跑 `list_all` = 总对象数 −（cursor 前已终态页的对象数 + done 前缀的对象数）（实测 13,005 = 17,006 − 4,000 − 1）
 - done 跳过抽验：done 前缀的对象不出现在续跑轮任何输出文件（实测 corrupted/corrupted.bin）；cursor 续列抽验：撕裂行所属对象（如 obj_6391）出现在续跑轮 ok_objects.txt
 - 续跑轮 run.log 的 config 快照含 `resume_journal:` 行；续跑轮自己写新 journal（终态全 done；中途 tick 的 cursor 行被更晚的 done 行覆盖，行序保证重放 last-wins 正确）
 - 恢复轮可再次被 kill / 再次恢复（用同样的命令指向新目录的 journal.txt）
 
-## 8. 已知遗留项（改动时留意，非阻塞）
+## 8. list 断点续传（`journal.txt`）：核心思路与逻辑
+
+本节讲 `list_type=2` 扫描被 `kill -9` 之后怎么接着扫，以及 `journal.txt` 里三种行各代表什么。必须守住的规则和顺序在不变量 20，操作步骤在 §7.5；这里只讲思路。
+
+### 8.1 要解决的问题
+
+进程不拦截信号（不变量 19），被杀时不做任何收尾。要能接着扫，就得在运行过程中把进度记到盘上。
+
+十亿级对象不可能逐个记「这个对象检查完了」，那相当于把结果文件再写一遍。所以 journal 退一层，**按页记**：一页默认 1000 个条目，一个前缀的进度用一行就能表示。代价是被杀之后只能恢复到页的粒度，一页里已经检查过的对象会被再检查一遍。
+
+### 8.2 记的是「每个前缀翻到了哪一页」
+
+一个前缀就是一次 LIST 的范围：根前缀，或者某个子目录。列一个前缀是一页一页翻的：每返回一页，服务端给一个 token，下一次请求带上它就得到下一页。
+
+`list_type=2` 里根前缀不特殊：它是队列里的第一个任务，由抢到它的那个列举 worker 翻页。主协程只负责把它放进队列。
+
+**一页「处理完」的定义是整套设计里最要紧的一条：这一页列出来的对象全部检查完、结果行已经交给输出，才算处理完。「列出来了」不算。** 所以每个前缀的游标永远停在「第一个还没处理完的页」的起点。
+
+页上的子目录不计入这个条件：
+
+- 子目录在被列出来的那一刻就登记为「已发现」，之后作为独立任务交给别的 worker，它自己有自己一页一页的进度。
+- 所以一个有 10000 个子目录、没有直接对象的根目录，10 页翻完就是 `done`，不用等任何子目录处理完。
+- 子目录是在这一页的对象全部交给检查 worker 之后才被派出去的。
+
+还有一点容易误解：**列举不等检查。** 一页的对象只要全部进了检查队列，就去列下一页。所以任一时刻会有 1 到 2 页「已经列出来、对象还没检查完」，它们在游标后面，续跑时会被重新列、重新检查。
+
+### 8.3 三种行的含义
+
+| 行 | 含义 | 续跑时 |
+|---|---|---|
+| `discovered\x1f<前缀>` | 这个前缀进入了扫描（放进去的种子，或某一页列出来的子目录），还没有任何一页处理完 | 从头列 |
+| `cursor\x1f<前缀>\x1f<token>` | 这个前缀翻页翻到一半，`token` 是下一个还没处理完的页的起点 | 从 token 接着列 |
+| `done\x1f<前缀>` | 这个前缀翻完了，并且每一页的对象都处理完了 | 跳过 |
+
+读 `journal.txt` 时，**每个前缀以它的最后一行为准**。一个前缀的状态只往前走：先是 `discovered`，翻过一页之后变成 `cursor`，最后是 `done`。后面的行盖住前面的。
+
+「只有 `discovered`」不等于「一点没动」：这个前缀可能已经列了一部分，只是没有任何一页检查完。这一部分续跑时会重来。
+
+根前缀本身是空字符串，所以它的行里前缀那一栏是空的：`discovered\x1f`、`cursor\x1f\x1f<token>`、`done\x1f`。
+
+### 8.4 什么时候写，每次写什么
+
+每写一次叫一次快照（checkpoint），有三个时机：
+
+1. 种子放进队列之后立刻写一次。
+2. 之后每隔 `journal_checkpoint_interval_sec` 秒写一次，默认 600。
+3. 扫描结束时写一次。
+
+每次写的是「相对于上次快照的变化」，所以 `journal.txt` 是一个只追加的日志，不是某一时刻的完整状态：
+
+- 新登记的前缀：写一行 `discovered`，每个前缀只写一次。
+- 正在翻页的前缀：写一行 `cursor`，每次快照都把当前游标重写一遍。
+- 刚处理完的前缀：写一行 `done`，只写一次。
+
+登记是在内存里立刻发生的，写进文件要等下一次快照。
+
+### 8.5 续跑时会重做什么
+
+入口是 `-resume-journal <被杀那一轮的目录>/journal.txt`，只能用于 `list_type=2`，不能和 `-prefix` 一起用（细节见不变量 20）。
+
+一句话：**上次快照之后发生的事，`journal.txt` 不知道，续跑时会重做。**
+
+| 被杀时的状态 | 续跑时 |
+|---|---|
+| 启动后还没到第一次定时快照 | `journal.txt` 里只有种子，等于从头扫 |
+| 前缀最后一条是 `done` | 不重做 |
+| 前缀最后一条是 `cursor` | 重做游标之后已列出但没检查完的页，以及上次快照之后翻的页 |
+| 前缀只有 `discovered` | 它本来就要列；被杀前已经列出的部分重来 |
+
+重做的上限是一个快照间隔的工作量，再加上每个正在翻页的前缀的一两页。间隔越短损失越小，写盘越频繁。
+
+**只保证不漏，不保证不重复。** 不漏的根据是：每次快照都是先把结果文件刷盘，再写 `journal.txt`，所以 `journal.txt` 里越过的每一页，对象的结果都已经落盘。
+
+续跑那一轮在新目录里写自己的 `journal.txt`，可以再次被杀、再次续跑。把各轮的结果文件合起来、去掉重复行，就是完整结果。
+
+### 8.6 续跑时子目录不会被列两遍
+
+带 `cursor` 的前缀续跑时，会从游标把那一页重新列一遍。这一页上的子目录在上次快照时就已经写进了 `journal.txt`，续跑一开始也已经按各自的记录放进了队列（已 `done` 的则被跳过）。
+
+所以重列这一页时，**已经在 `journal.txt` 里的子目录不再登记，也不再入队**。`seedFromJournal` 把读出来的那张前缀表交给列举器（`Lister.resumed`），列举器在入队前查它。
+
+不做这一步有两个后果：
+
+- 这些子目录和它们下面的所有内容，会在续跑这一轮里被处理两遍，已经完成的也被再做一遍。
+- 迟到的 `discovered` 行会排在这些前缀的 `done` 行后面。下一次续跑读到它，会把已经做完的子目录当成没做完。
+
+这张表就是读 `journal.txt` 时本来就要建的那张，没有额外的内存分配，只是续跑这一轮不再释放它。实测每个前缀占 110 到 150 字节：1 万个子目录约 1.2 MB。
+
+重列那一页上的**对象**仍然会被重新检查，这是按页记账固有的代价。
+
+### 8.7 一个例子
+
+扫描一个桶，快照间隔 10 分钟：
+
+| 时间 | 发生了什么 | 写进 `journal.txt` 的行 |
+|---|---|---|
+| 10:00 | 启动，根前缀放进队列 | `discovered\x1f` |
+| 10:00–10:10 | 根前缀第 1 页的对象全部检查完，这一页列出了子目录 `a/` 和 `b/`；`a/` 处理完；`b/` 翻到一半 | |
+| 10:10 | 快照 | `discovered\x1fa%2F`、`discovered\x1fb%2F`、`cursor\x1f\x1f<第 2 页的 token>`、`cursor\x1fb%2F<token>`、`done\x1fa%2F` |
+| 10:12 | 被 `kill -9` | |
+
+续跑时读这个文件：`a/` 的最后一行是 `done`，跳过；根前缀的最后一行是 `cursor`，从第 2 页接着翻；`b/` 从它自己的游标接着翻。
+
+## 9. 已知遗留项（改动时留意，非阻塞）
 
 来源：SDD ledger 的 deferred minors（见 `.superpowers/sdd/2026-09-03-chunked-check-tool/progress.md` 与 `.superpowers/sdd/2026-11-05-resume-journal/progress.md`）。
 
@@ -675,14 +778,14 @@ diff union.txt mckeys.txt      # 期望空（有 mp.txt 的配置把它也并进
 - **`list_type` 非法值（非 1/2）静默落到 Mode 2 分支**：可加校验。
 - **per-owner writer goroutine 的 MkdirAll/OpenFile 失败静默丢弃该行**：罕见启动期磁盘错误，第 N 个 owner 目录建不出来时该 owner 的结果行会丢，但其他 owner 不受影响。
 
-### 8.1 journal 遗留项（2026-11-06 review 轮 deferred，M=Minor / N=Nit）
+### 9.1 journal 遗留项（2026-11-06 review 轮 deferred，M=Minor / N=Nit）
 
 - **M1（已解决 2026-11-24）：key 含 `\n` 或 `|` 破坏 journal 行格式**：已用 `\x1f` 分隔 + `QueryEscape`/`QueryUnescape` 转义统一解决（全工具规则，见不变量 23），`TestSnapshotEmitsCursorWithPipeOrNewlineToken` 是回归钉。
 - **N1：`FlushAndWait` 在 `out.Close()` 之后调用会永久阻塞**：写手 goroutine 已退出、flush 请求无人应答。现有接线不可达：不变量 ③（`journalRun.Stop()` 先于 `out.Close()`）锁死时序。**修复触发条件**：未来有人改动关停顺序或新增 FlushAndWait 调用点时，顺手加"Close 后返回而非阻塞"守卫。
 - **N2：journal.go 内存注释措辞过头**："不随桶规模增长"的精确说法是上限 = 一个 checkpoint 间隔内新发现的前缀量（发现速率 × 间隔），极端发现速率下也会不小。**修复触发条件**：下次改 journal.go 时顺带改一行注释，无需单独动。
 - **N3（已解决 2026-11-27）：测试直接改写包级 `journalCheckpointInterval` 的恢复纪律**：快照间隔改为配置项后，作为参数传给 checkpoint 循环，测试直接传入自己要的间隔。包级变量已删除，不再妨碍 `t.Parallel()`。
 
-## 9. 工作流约定
+## 10. 工作流约定
 
 - 实现性改动遵循 TDD：先写失败测试，再实现，再跑测试，再 commit。
 - 每个 commit 聚焦一个职责（feat/fix/refactor 前缀）。
